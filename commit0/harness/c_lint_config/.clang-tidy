@@ -1,0 +1,39 @@
+# Default clang-tidy configuration for commit0 C repos.
+#
+# Curated for bug-finding, not style policing. Style is delegated to
+# clang-format (repo-provided when present). Advisory: lint output is fed
+# back to the agent as context, but exit codes are not gated.
+#
+# To override locally, drop a different .clang-tidy at the repo root —
+# clang-tidy walks parent directories looking for the closest config.
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  -cert-err58-cpp,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  readability-misleading-indentation,
+  readability-redundant-control-flow,
+  readability-string-compare,
+  misc-no-recursion,
+  misc-static-assert,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-reserved-identifier,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '^(?!.*/(third_party|vendor|deps|build)/).+\.h$'
+
+FormatStyle: file
+
+CheckOptions:
+  - key: cert-dcl16-c.NewSuffixes
+    value: L;LL;LU;LLU
+  - key: bugprone-suspicious-string-compare.WarnOnImplicitComparison
+    value: '1'
+  - key: misc-no-recursion.RecursionLimit
+    value: '5'

@@ -1,0 +1,99 @@
+"""Clone and set up C repos for the commit0 C pipeline.
+
+Mirrors commit0/harness/setup_go.py but uses C_SPLIT for filtering. Does NOT
+modify the original setup.py.
+"""
+
+import logging
+import os
+from typing import Iterator
+
+from commit0.harness.constants import BASE_BRANCH
+from commit0.harness.constants_c import (
+    CRepoInstance,
+    C_SPLIT,
+    C_GITIGNORE_ENTRIES,
+)
+from commit0.harness.utils import clone_repo, load_dataset_from_config
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+def main(
+    dataset_name: str,
+    dataset_split: str,
+    repo_split: str,
+    base_dir: str,
+) -> None:
+    """Clone and prepare C repos for evaluation.
+
+    Parameters
+    ----------
+    dataset_name : str
+        Name or path of the C dataset.
+    dataset_split : str
+        HuggingFace split or "test" for local JSON.
+    repo_split : str
+        Key from C_SPLIT, a repo name, or "all".
+    base_dir : str
+        Local directory to clone repos into.
+    """
+    dataset: Iterator[CRepoInstance] = load_dataset_from_config(
+        dataset_name, split=dataset_split
+    )  # type: ignore
+
+    for example in dataset:
+        repo_name = example["repo"].split("/")[-1]
+        if repo_split != "all":
+            if repo_split in C_SPLIT:
+                if repo_name not in C_SPLIT[repo_split]:
+                    continue
+            else:
+                if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
+                    continue
+
+        clone_url = f"https://github.com/{example['repo']}.git"
+        clone_dir = os.path.abspath(os.path.join(base_dir, repo_name))
+
+    dataset_lower = dataset_name.lower()
+    if dataset_lower.endswith(".json") or os.sep in dataset_name:
+        branch = "commit0_all"
+    else:
+        branch = dataset_name.split("/")[-1]
+
+        repo = clone_repo(clone_url, clone_dir, branch, logger)
+
+        if BASE_BRANCH in repo.branches:
+            repo.git.branch("-D", BASE_BRANCH)
+        repo.git.checkout("-b", BASE_BRANCH)
+        logger.info("Checked out base branch: %s for %s", BASE_BRANCH, repo_name)
+
+        try:
+            gitignore_path = os.path.join(clone_dir, ".gitignore")
+            existing_lines: list[str] = []
+            if os.path.exists(gitignore_path):
+                with open(gitignore_path, "r") as f:
+                    existing_lines = f.read().splitlines()
+            added_lines: list[str] = []
+            for entry in C_GITIGNORE_ENTRIES:
+                if entry not in existing_lines:
+                    added_lines.append(entry)
+            if added_lines:
+                with open(gitignore_path, "a") as f:
+                    for line in added_lines:
+                        f.write(f"\n{line}")
+                    f.write("\n")
+                repo.git.add(".gitignore")
+                repo.git.commit("-m", "chore: add aider/logs/build to gitignore")
+                logger.info("Added %s to .gitignore", added_lines)
+            else:
+                logger.info(".gitignore already has needed exclusions")
+        except Exception as e:
+            logger.warning("Failed to update .gitignore: %s", e)
+
+
+__all__: list[str] = []
