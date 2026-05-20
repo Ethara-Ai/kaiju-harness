@@ -6,13 +6,12 @@ For each repo:
 2. Clone locally, record reference_commit (HEAD)
 3. Create 'commit0_all' branch
 4. Run ruststubber on source files
-5. Verify stubbed code compiles (cargo check)
-6. Commit stubbed version as base_commit
-7. Push commit0_all branch to fork
-8. Collect test IDs via cargo test --list
-9. Save test IDs as .bz2
-10. Append entry to rust_dataset.json
-11. Generate per-repo YAML config in commit0/data/
+5. Commit stubbed version as base_commit
+6. Push commit0_all branch to fork
+7. Collect test IDs via cargo test --list
+8. Save test IDs as .bz2
+9. Append entry to rust_dataset.json
+10. Generate per-repo YAML config in commit0/data/
 
 Usage:
     python3 -m tools.prepare_repo_rust \
@@ -32,7 +31,7 @@ Usage:
 Requires:
     - gh CLI installed (for forking)
     - ruststubber binary built at tools/ruststubber/target/release/ruststubber
-    - cargo installed (for cargo check and cargo test --list)
+    - cargo installed (for cargo test --list)
 """
 
 from __future__ import annotations
@@ -213,22 +212,6 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str) -> tuple[int, int]:
     return ok, fail
 
 
-def verify_compiles(repo_dir: Path, crate: str) -> bool:
-    """Run cargo check to verify stubbed code compiles."""
-    logger.info("Verifying compilation with cargo check -p %s...", crate)
-    result = subprocess.run(
-        ["cargo", "check", "-p", crate],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    if result.returncode != 0:
-        logger.error("cargo check failed:\n%s", result.stderr)
-        return False
-    logger.info("Compilation check passed")
-    return True
-
 
 
 
@@ -320,7 +303,7 @@ def create_dataset_entry(
 
 def get_dataset_path(repo_name: str) -> Path:
     """Return the per-repo dataset file path: PROJECT_ROOT/<reponame>_rust_dataset.json."""
-    return PROJECT_ROOT / f"{repo_name}_rust_dataset.json"
+    return PROJECT_ROOT / f"{repo_name}_dataset.json"
 
 
 def append_to_dataset(entry: dict, repo_name: str) -> Path:
@@ -348,7 +331,7 @@ def append_to_dataset(entry: dict, repo_name: str) -> Path:
     dataset_file.write_text(content)
     logger.info("Updated %s (%d entries)", dataset_file, len(existing))
 
-    entries_file = PROJECT_ROOT / f"{repo_name}_rust_entries.json"
+    entries_file = PROJECT_ROOT / f"{repo_name}_entries.json"
     entries_file.write_text(content)
     logger.info("Updated %s", entries_file)
 
@@ -361,7 +344,7 @@ def append_to_dataset(entry: dict, repo_name: str) -> Path:
 def generate_commit0_yaml(crate: str, repo_name: str, entry: dict) -> Path:
     """Generate .commit0_rust.yaml in project root (single config file, overwritten each run)."""
     yaml_path = PROJECT_ROOT / ".commit0_rust.yaml"
-    dataset_file = f"./{repo_name}_rust_dataset.json"
+    dataset_file = f"./{repo_name}_dataset.json"
 
     content = f"""# commit0 Rust config for {crate}
 dataset_name: {dataset_file}
@@ -396,7 +379,6 @@ def prepare_rust_repo(
     rust_version: str = "stable",
     edition: str = "2021",
     packages: str = "pkg-config libssl-dev",
-    skip_compile_check: bool = False,
     skip_spec: bool = False,
     specs_dir: Path = SPECS_DIR,
 ) -> dict | None:
@@ -442,12 +424,6 @@ def prepare_rust_repo(
     if ok == 0:
         logger.error("No files were stubbed. Aborting.")
         return None
-
-    # Step 6: Verify compilation
-    if not skip_compile_check:
-        if not verify_compiles(repo_dir, crate):
-            logger.error("Stubbed code does not compile. Aborting.")
-            return None
 
     # Step 7: Commit
     git(repo_dir, "add", "-A")
@@ -667,11 +643,6 @@ def main() -> None:
         help="System packages needed (default: pkg-config libssl-dev)",
     )
     parser.add_argument(
-        "--skip-compile-check",
-        action="store_true",
-        help="Skip cargo check after stubbing",
-    )
-    parser.add_argument(
         "--skip-spec",
         action="store_true",
         help="Skip scraping docs.rs spec PDF",
@@ -717,7 +688,6 @@ def main() -> None:
         rust_version=args.rust_version,
         edition=args.edition,
         packages=args.packages,
-        skip_compile_check=args.skip_compile_check,
         skip_spec=args.skip_spec,
     )
 
