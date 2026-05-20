@@ -27,6 +27,7 @@ import re
 import shlex
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 from tools.generate_test_ids import (
@@ -52,6 +53,10 @@ _TS_TEST_EXTENSIONS = (
     ".spec.js",
     ".spec.jsx",
 )
+
+# Vitest emits ANSI color codes even with --json/--reporter=json; strip them
+# before json.loads so 'Extra data' errors don't swallow the output.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +88,9 @@ def _parse_vitest_list_output(
     # 1. Guard: empty input
     if not stdout or not stdout.strip():
         return []
+
+    # 1b. Strip ANSI escape sequences (vitest emits colors even with --json)
+    stdout = _ANSI_RE.sub("", stdout)
 
     # 2. Find the JSON array boundaries
     first_bracket = stdout.find("[")
@@ -582,8 +590,18 @@ def collect_ts_test_ids_docker(
     collect_cmd = " ".join(shlex.quote(p) for p in cmd_parts)
 
     # 4. Compose the full bash command for Docker
+    # Opt-in: build workspace siblings first for monorepo repos (e.g. prisma).
+    # Set KAIJU_TS_BUILD_WORKSPACES=1 to enable. Default off (build is slow).
+    workspace_build = ""
+    if os.environ.get("KAIJU_TS_BUILD_WORKSPACES") == "1":
+        workspace_build = (
+            "if [ -f pnpm-workspace.yaml ] || grep -q '\"workspaces\"' "
+            "package.json 2>/dev/null; then "
+            "pnpm -r build > /dev/null 2>&1 || true; fi; "
+        )
     bash_cmd = (
-        f"cd {CONTAINER_WORKDIR} && {checkout}" f"{collect_cmd} 2>/dev/null; true"
+        f"cd {CONTAINER_WORKDIR} && {checkout}{workspace_build}"
+        f"{collect_cmd} 2>/dev/null; true"
     )
 
     # 5. Run in Docker container
@@ -639,6 +657,52 @@ def collect_ts_test_ids_docker(
                 test_ids = _parse_vitest_list_output(stdout_fb)
             except (docker.errors.ContainerError, requests.exceptions.ReadTimeout):
                 logger.debug("  vitest fallback also failed in Docker")
+
+        # 8. Ultimate fallback: glob test files inside the container.
+        # Returns relative file paths as test IDs when vitest can't enumerate
+        # (e.g. monorepo sibling packages aren't built, configs missing, etc.).
+        if not test_ids:
+            logger.info("  Falling back to glob-based test file enumeration")
+            glob_cmd = (
+                f"cd {CONTAINER_WORKDIR} && {checkout}"
+                r"find . -type f \( "
+                r"-name '*.test.ts' -o -name '*.test.tsx' "
+                r"-o -name '*.test.js' -o -name '*.test.jsx' "
+                r"-o -name '*.test.mts' -o -name '*.test.cts' "
+                r"-o -name '*.spec.ts' -o -name '*.spec.tsx' "
+                r"-o -name '*.spec.js' -o -name '*.spec.jsx' "
+                r"-o -name '*.spec.mts' -o -name '*.spec.cts' "
+                r"-o -name '*.vitest.ts' -o -name '*.vitest.tsx' "
+                r"-o -name '*.vitest.js' -o -name '*.vitest.jsx' "
+                r"\) "
+                r"-not -path '*/node_modules/*' "
+                r"-not -path '*/dist/*' "
+                r"-not -path '*/build/*' "
+                r"-not -path '*/.git/*' "
+                r"-not -path '*/coverage/*' "
+                r"-not -path '*/.next/*' "
+                r"2>/dev/null | sed 's|^\./||'; true"
+            )
+            try:
+                raw_glob = client.containers.run(
+                    image_name,
+                    command=["bash", "-c", glob_cmd],
+                    remove=True,
+                    platform=get_docker_platform(),
+                )
+                glob_out = (
+                    raw_glob.decode("utf-8", errors="replace")
+                    if isinstance(raw_glob, bytes)
+                    else raw_glob
+                )
+                files = [ln.strip() for ln in glob_out.splitlines() if ln.strip()]
+                if files:
+                    logger.info(
+                        "  Glob fallback found %d test files", len(files)
+                    )
+                    test_ids = files
+            except (docker.errors.ContainerError, requests.exceptions.ReadTimeout):
+                logger.debug("  Glob fallback also failed")
 
         return test_ids
     finally:

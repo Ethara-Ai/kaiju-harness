@@ -20,13 +20,77 @@ PROJECT_ROOT = TOOLS_DIR.parent
 MAX_STDERR_LOG_CHARS = 2000
 MAX_STDOUT_LOG_CHARS = 500
 
+_HEAP_FLOOR_MB = 4096
+_HEAP_CEIL_MB = 12288
+_HEAP_SYSTEM_FRACTION = 0.75
+_TIMEOUT_FLOOR_S = 300
+_TIMEOUT_CEIL_S = 1800
+_TIMEOUT_S_PER_100_FILES = 60
+
+
+def _detect_system_ram_mb() -> int | None:
+    """Best-effort total physical RAM in MB. Returns None if unknown."""
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and size > 0:
+            return int(pages * size // (1024 * 1024))
+    except (ValueError, OSError, AttributeError):
+        pass
+    return None
+
+
+def _compute_node_heap_mb() -> int:
+    """Resolve V8 heap size: KAIJU_TS_NODE_HEAP_MB > 75% of RAM clamped [4GB,12GB] > 8GB."""
+    override = os.environ.get("KAIJU_TS_NODE_HEAP_MB")
+    if override:
+        try:
+            return max(1024, int(override))
+        except ValueError:
+            logger.warning("Invalid KAIJU_TS_NODE_HEAP_MB=%r, ignoring", override)
+    ram_mb = _detect_system_ram_mb()
+    if ram_mb is None:
+        return 8192
+    target = int(ram_mb * _HEAP_SYSTEM_FRACTION)
+    return max(_HEAP_FLOOR_MB, min(_HEAP_CEIL_MB, target))
+
+
+def _count_ts_files(*roots: Path) -> int:
+    """Count .ts/.tsx files under given roots (excluding node_modules and .git)."""
+    total = 0
+    for root in roots:
+        try:
+            for path in Path(root).rglob("*.ts"):
+                parts = path.parts
+                if "node_modules" in parts or ".git" in parts:
+                    continue
+                total += 1
+        except (OSError, RuntimeError):
+            continue
+    return total
+
+
+def _compute_smart_timeout(src_dir: Path, extra_scan_dirs: list[Path] | None) -> int:
+    """Resolve subprocess timeout: KAIJU_TS_STUB_TIMEOUT > scaled by file count > 300s."""
+    override = os.environ.get("KAIJU_TS_STUB_TIMEOUT")
+    if override:
+        try:
+            return max(60, int(override))
+        except ValueError:
+            logger.warning("Invalid KAIJU_TS_STUB_TIMEOUT=%r, ignoring", override)
+    roots: list[Path] = [Path(src_dir)]
+    if extra_scan_dirs:
+        roots.extend(Path(d) for d in extra_scan_dirs)
+    n_files = _count_ts_files(*roots)
+    scaled = _TIMEOUT_FLOOR_S + (n_files // 100) * _TIMEOUT_S_PER_100_FILES
+    return max(_TIMEOUT_FLOOR_S, min(_TIMEOUT_CEIL_S, scaled))
 
 def run_stub_ts(
     src_dir: Path,
     extra_scan_dirs: list[Path] | None = None,
     mode: str = "all",
     verbose: bool = False,
-    timeout: int = 300,
+    timeout: int | None = None,
 ) -> dict:
     """Run the ts-morph stubbing engine via subprocess.
 
@@ -37,7 +101,8 @@ def run_stub_ts(
                          (e.g. test dirs, sibling packages). Not stubbed.
         mode: Stubbing mode. Only "all" is supported for TypeScript.
         verbose: Enable debug logging in the TS engine (sent to stderr).
-        timeout: Maximum seconds to wait for the subprocess.
+        timeout: Maximum seconds to wait for the subprocess. None (default)
+                 = auto-scale by file count. Override via KAIJU_TS_STUB_TIMEOUT.
 
     Returns:
     -------
@@ -92,9 +157,19 @@ def run_stub_ts(
     cwd = str(PROJECT_ROOT)
 
     env = os.environ.copy()
-    heap_mb = env.get("KAIJU_TS_NODE_HEAP_MB", "8192")
+    heap_mb = _compute_node_heap_mb()
     existing_node_opts = env.get("NODE_OPTIONS", "")
-    env["NODE_OPTIONS"] = f"{existing_node_opts} --max-old-space-size={heap_mb}".strip()
+    env["NODE_OPTIONS"] = (
+        f"{existing_node_opts} --max-old-space-size={heap_mb}".strip()
+    )
+
+    if timeout is None:
+        timeout = _compute_smart_timeout(src_dir, extra_scan_dirs)
+    logger.info(
+        "TS stubber resource budget: heap=%d MB, timeout=%d s",
+        heap_mb,
+        timeout,
+    )
 
     logger.info("Running TS stubber: %s", " ".join(cmd))
     result = subprocess.run(

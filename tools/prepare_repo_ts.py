@@ -49,6 +49,139 @@ def _get_scrape_func():
     return _scrape_spec_sync
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_STUBBER_PROBE_PKG = "ts-morph"
+_STUBBER_ROOT_PKGS = ("ts-morph", "ts-node", "typescript", "@types/node")
+_WORKSPACE_INDICATORS = (
+    "pnpm-workspace.yaml",
+    "pnpm-workspace.yml",
+    "lerna.json",
+    "rush.json",
+)
+
+
+def _validate_stubber_deps() -> None:
+    """Verify the TS stubber's npm deps are installed at the project root.
+    Tries `npm install` on first miss; raises with actionable error otherwise.
+    """
+    probe = _PROJECT_ROOT / "node_modules" / _STUBBER_PROBE_PKG
+    if probe.exists():
+        return
+    root_pkg = _PROJECT_ROOT / "package.json"
+    if not root_pkg.exists():
+        raise EnvironmentError(
+            f"Stubber deps missing and no package.json at {_PROJECT_ROOT}. "
+            f"Expected: {', '.join(_STUBBER_ROOT_PKGS)}"
+        )
+    if shutil.which("npm") is None:
+        raise EnvironmentError(
+            "Stubber needs `npm` to install ts-morph/ts-node/typescript at the "
+            f"project root ({_PROJECT_ROOT}) but `npm` is not on PATH."
+        )
+    logger.warning(
+        "Stubber dependencies missing at %s; running `npm install` once...",
+        _PROJECT_ROOT,
+    )
+    result = subprocess.run(
+        ["npm", "install"],
+        cwd=str(_PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    if result.returncode != 0 or not probe.exists():
+        raise EnvironmentError(
+            f"npm install at {_PROJECT_ROOT} did not produce {probe}. "
+            f"Stderr tail: {result.stderr[-500:].strip()}"
+        )
+    logger.info("Stubber deps installed at %s", _PROJECT_ROOT)
+
+
+def _ensure_pkg_manager(pkg_manager: str) -> None:
+    """Ensure the package manager is on PATH; auto-activate via corepack if needed."""
+    if shutil.which(pkg_manager) is not None:
+        return
+    if pkg_manager == "npm":
+        raise EnvironmentError(
+            "`npm` is not on PATH but the repo needs it. Install Node.js."
+        )
+    corepack = shutil.which("corepack")
+    if corepack and pkg_manager in ("pnpm", "yarn"):
+        logger.warning(
+            "`%s` not on PATH; attempting `corepack prepare %s@latest --activate`",
+            pkg_manager,
+            pkg_manager,
+        )
+        result = subprocess.run(
+            [corepack, "prepare", f"{pkg_manager}@latest", "--activate"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if result.returncode == 0 and shutil.which(pkg_manager) is not None:
+            logger.info("Activated %s via corepack", pkg_manager)
+            return
+    raise EnvironmentError(
+        f"`{pkg_manager}` is not on PATH. Install it manually:\n"
+        f"  npm install -g {pkg_manager}   (or)   corepack enable && "
+        f"corepack prepare {pkg_manager}@latest --activate"
+    )
+
+
+def _list_workspace_packages(repo_dir: Path) -> list[str]:
+    """Find workspace packages under packages/, apps/, libs/, modules/."""
+    found: list[str] = []
+    for parent in ("packages", "apps", "libs", "modules"):
+        parent_dir = repo_dir / parent
+        if not parent_dir.is_dir():
+            continue
+        for child in sorted(parent_dir.iterdir()):
+            if child.is_dir() and (child / "package.json").exists():
+                found.append(f"{parent}/{child.name}/src")
+    return found
+
+
+def _detect_monorepo(repo_dir: Path) -> tuple[bool, list[str]]:
+    """Detect monorepo and return (is_monorepo, [workspace_package_paths])."""
+    for marker in _WORKSPACE_INDICATORS:
+        if (repo_dir / marker).exists():
+            return True, _list_workspace_packages(repo_dir)
+    pkg = repo_dir / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(pkg.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        if data.get("workspaces"):
+            return True, _list_workspace_packages(repo_dir)
+    return False, []
+
+
+def _assert_monorepo_safety(
+    repo_dir: Path,
+    src_dir: str,
+    src_dir_override: str | None,
+) -> None:
+    """Refuse to stub a whole monorepo when --src-dir is not explicitly given."""
+    if src_dir_override:
+        return
+    if src_dir != ".":
+        return
+    is_monorepo, packages = _detect_monorepo(repo_dir)
+    if not is_monorepo:
+        return
+    suggestion = packages[0] if packages else "packages/<name>/src"
+    sample = ", ".join(packages[:5]) or "(none detected)"
+    raise EnvironmentError(
+        f"Detected a monorepo at {repo_dir} but no --src-dir was given.\n"
+        f"Stubbing the whole monorepo will exhaust V8's heap.\n"
+        f"Pass --src-dir <path>, e.g. --src-dir {suggestion}.\n"
+        f"Detected workspace packages: {sample}"
+    )
+
+
 def resolve_commits_from_remote(
     fork_name: str, branch: str
 ) -> tuple[str, str] | None:
@@ -703,6 +836,7 @@ def create_ts_stubbed_branch(
     if package_json.exists():
         pkg_manager = detect_package_manager(repo_dir)
         logger.info("  Installing dependencies via %s...", pkg_manager)
+        _ensure_pkg_manager(pkg_manager)
         install_cmd = [pkg_manager, "install"]
         if pkg_manager != "bun":
             install_cmd.append("--ignore-scripts")
@@ -899,6 +1033,7 @@ def prepare_ts_repo(
         logger.error("  Cannot detect TypeScript source dir for %s", full_name)
         return None
     logger.info("  Source directory: %s", src_dir)
+    _assert_monorepo_safety(repo_dir, src_dir, src_dir_override)
 
     setup_dict, test_dict, test_framework = generate_setup_dict_ts(repo_dir)
     logger.info(
@@ -1076,6 +1211,7 @@ def main() -> None:
     args = parser.parse_args()
 
     setup_git_credentials(dry_run=args.dry_run)
+    _validate_stubber_deps()
 
     if not args.repo and not args.input_file:
         parser.error("Provide either --repo owner/name or an input_file positional.")

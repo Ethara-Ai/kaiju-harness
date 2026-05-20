@@ -12,6 +12,55 @@ import docker.errors
 
 logger = logging.getLogger(__name__)
 
+_PKG_MANAGER_CACHE: dict[str, str] = {}
+
+
+def _detect_image_pkg_manager(
+    client: docker.DockerClient,
+    image_name: str,
+) -> str:
+    """Detect package manager from lockfiles in /testbed. Returns one of:
+    'pnpm' | 'yarn' | 'bun' | 'npm'. Result is cached per image."""
+    if image_name in _PKG_MANAGER_CACHE:
+        return _PKG_MANAGER_CACHE[image_name]
+    probe = (
+        'for f in pnpm-lock.yaml yarn.lock bun.lockb package-lock.json; do '
+        '  [ -f "/testbed/$f" ] && echo "$f" && exit 0; '
+        'done; echo none'
+    )
+    pm = "npm"
+    try:
+        output = client.containers.run(
+            image_name,
+            ["sh", "-c", probe],
+            remove=True,
+            stderr=True,
+            stdout=True,
+        )
+        marker = output.decode().strip().splitlines()[-1] if output else ""
+        if marker.startswith("pnpm-lock"):
+            pm = "pnpm"
+        elif marker.startswith("yarn.lock"):
+            pm = "yarn"
+        elif marker.startswith("bun.lockb"):
+            pm = "bun"
+    except Exception as e:
+        logger.debug("pkg manager detect failed for %s: %s", image_name, e)
+    _PKG_MANAGER_CACHE[image_name] = pm
+    return pm
+
+
+def _build_require_cmd(package_name: str, pkg_manager: str) -> list[str]:
+    """Build a require() probe command that respects the package manager's
+    module-resolution layout (pnpm symlinks, yarn pnp, etc.)."""
+    script = f'require({_json.dumps(package_name)})'
+    if pkg_manager == "pnpm":
+        return ["pnpm", "exec", "node", "-e", script]
+    if pkg_manager == "yarn":
+        return ["yarn", "node", "-e", script]
+    if pkg_manager == "bun":
+        return ["bun", "-e", script]
+    return ["node", "-e", script]
 
 def check_node_modules(
     client: docker.DockerClient,
@@ -82,17 +131,20 @@ def check_require(
     if not _NPM_PACKAGE_RE.fullmatch(package_name):
         return (False, f"Invalid package name for require() check: {package_name!r}")
     safe_name = package_name
+    pm = _detect_image_pkg_manager(client, image_name)
+    cmd = _build_require_cmd(safe_name, pm)
     try:
         client.containers.run(
             image_name,
-            ["node", "-e", f'require("{safe_name}")'],
+            cmd,
+            working_dir="/testbed",
             remove=True,
             stderr=True,
             stdout=True,
         )
-        return (True, f"require('{package_name}') OK")
+        return (True, f"require('{package_name}') OK [{pm}]")
     except docker.errors.ContainerError:
-        return (False, f"require('{package_name}') failed")
+        return (False, f"require('{package_name}') failed [{pm}]")
     except Exception as e:
         logger.warning("check_require('%s') failed: %s", package_name, e)
         return (False, f"require('{package_name}') error: {e}")
