@@ -119,7 +119,7 @@ def read_commit0_rust_config(dot_file_path: str) -> dict:
 def setup(
     repo_split: str = typer.Argument(
         ...,
-        help=f"Split of Rust repositories, one of: {', '.join([highlight(key, Colors.ORANGE) for key in RUST_SPLIT.keys()])}",
+        help="Split of Rust repositories — 'all', a curated subset, or any repo name in the dataset.",
     ),
     dataset_name: str = typer.Option(
         "wentingzhao/commit0_rust", help="Name of the Rust dataset"
@@ -131,9 +131,6 @@ def setup(
     ),
 ) -> None:
     """Clone Rust repositories for a given split."""
-    if repo_split != "all":
-        all_repos = [r.split("/")[-1] for r in RUST_SPLIT.get("all", [])]
-        check_valid(repo_split, list(RUST_SPLIT.keys()) + all_repos)
 
     base_dir = str(Path(base_dir).resolve())
     if dataset_name.endswith(".json"):

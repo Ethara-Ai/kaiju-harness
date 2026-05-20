@@ -115,66 +115,10 @@ SPLIT_LITE = [
     "babel",
     "minitorch",
 ]
-SPLIT_ALL = [
-    "statsmodels",
-    "python-progressbar",
-    "xarray",
-    "imbalanced-learn",
-    "web3.py",
-    "scrapy",
-    "seaborn",
-    "pypdf",
-    "pexpect",
-    "pytest",
-    "pylint",
-    "joblib",
-    "dulwich",
-    "virtualenv",
-    "minitorch",
-    "networkx",
-    "requests",
-    "sphinx",
-    "jedi",
-    "moviepy",
-    "loguru",
-    "paramiko",
-    "geopandas",
-    "bitstring",
-    "fastapi",
-    "chardet",
-    "tornado",
-    "python-prompt-toolkit",
-    "attrs",
-    "PyBoy",
-    "pydantic",
-    "filesystem_spec",
-    "tlslite-ng",
-    "graphene",
-    "mimesis",
-    "babel",
-    "dnspython",
-    "portalocker",
-    "cookiecutter",
-    "pyjwt",
-    "python-rsa",
-    "more-itertools",
-    "simpy",
-    "click",
-    "fabric",
-    "jinja",
-    "flask",
-    "sqlparse",
-    "marshmallow",
-    "imapclient",
-    "tinydb",
-    "cachetools",
-    "voluptuous",
-    "parsel",
-    "wcwidth",
-    "deprecated",
-]
-# NOTE: Individual SPLIT_XXX variables below are generated from SPLIT_ALL for convenience.
-# To add a new repo, add it to SPLIT_ALL and add a SPLIT_REPONAME = ["reponame"] line.
+# NOTE: The "all" subset is derived dynamically from the loaded dataset by
+# ``commit0.harness.split_utils.resolve_split``. Only curated subsets
+# (``lite``, ``ethara``, ``ethara-lite``) and individual repo names stay below.
+# Individual SPLIT_XXX variables below stay hand-curated for fine-grained pinning.
 SPLIT_MINITORCH = ["minitorch"]
 SPLIT_SIMPY = ["simpy"]
 SPLIT_STATSMODELS = ["statsmodels"]
@@ -260,7 +204,6 @@ SPLIT_ARROW = ["arrow"]
 SPLIT_GSPREAD = ["gspread"]
 
 SPLIT = {
-    "all": SPLIT_ALL,
     "lite": SPLIT_LITE,
     "ethara": SPLIT_ETHARA,
     "ethara-lite": SPLIT_ETHARA_LITE,

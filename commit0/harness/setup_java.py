@@ -14,6 +14,7 @@ from commit0.harness.constants_java import (
     JAVA_REMOTE_BRANCH,
 )
 from commit0.harness.utils import clone_repo, load_dataset_from_config
+from commit0.harness.split_utils import resolve_split
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +31,14 @@ def main(
     repos_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = list(load_dataset_from_config(dataset_name, split=dataset_split))
-
-    if dataset_split != "all" and dataset_split in JAVA_SPLIT:
-        allowed_repos = set(JAVA_SPLIT[dataset_split])
-    else:
-        allowed_repos = None
+    allowed_repos = set(resolve_split(dataset_split, dataset, curated=JAVA_SPLIT))
 
     for entry in dataset:
         repo_name = entry["repo"]
         original_repo = entry.get("original_repo", repo_name)
-        if allowed_repos is not None and repo_name not in allowed_repos and original_repo not in allowed_repos:
+        basename = repo_name.split("/")[-1]
+        original_basename = original_repo.split("/")[-1]
+        if basename not in allowed_repos and original_basename not in allowed_repos:
             continue
 
         repo_short = repo_name.split("/")[-1]

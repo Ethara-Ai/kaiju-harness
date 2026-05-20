@@ -140,7 +140,7 @@ class TestMainClone:
     def test_clones_each_repo(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry("org/a"), _entry("org/b")])
+        mock_load.return_value = list([_entry("org/a"), _entry("org/b")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -155,7 +155,7 @@ class TestMainClone:
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
         base = tmp_path / "java_repos"
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         from commit0.harness.setup_java import main
 
         main("ds", "all", "17", str(base))
@@ -167,7 +167,7 @@ class TestMainClone:
     def test_respects_split_filter(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry("org/a"), _entry("org/b")])
+        mock_load.return_value = list([_entry("org/a"), _entry("org/b")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -184,7 +184,7 @@ class TestMainSplitFilter:
     def test_lite_split_filters(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry("org/a"), _entry("org/b")])
+        mock_load.return_value = list([_entry("org/a"), _entry("org/b")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -198,7 +198,7 @@ class TestMainSplitFilter:
     def test_all_split_includes_all(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry("org/a"), _entry("org/b")])
+        mock_load.return_value = list([_entry("org/a"), _entry("org/b")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -214,7 +214,7 @@ class TestMainBaseBranch:
     def test_creates_commit0_java_branch(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry()])
+        mock_load.return_value = list([_entry()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -228,7 +228,7 @@ class TestMainBaseBranch:
     def test_deletes_existing_branch(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry()])
+        mock_load.return_value = list([_entry()])
         mock_repo = MagicMock()
         branch_mock = MagicMock()
         branch_mock.name = "commit0_java"
@@ -246,7 +246,7 @@ class TestMainGitignore:
     def test_adds_aider_patterns(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry()])
+        mock_load.return_value = list([_entry()])
         repo_dir = tmp_path / "mylib"
         repo_dir.mkdir()
         mock_repo = MagicMock()
@@ -262,7 +262,7 @@ class TestMainGitignore:
     def test_adds_logs_pattern(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([_entry()])
+        mock_load.return_value = list([_entry()])
         repo_dir = tmp_path / "mylib"
         repo_dir.mkdir()
         mock_repo = MagicMock()
@@ -282,7 +282,7 @@ class TestMainGitignore:
         repo_dir.mkdir()
         gi = repo_dir / ".gitignore"
         gi.write_text(".aider*\nlogs/\n")
-        mock_load.return_value = iter([_entry()])
+        mock_load.return_value = list([_entry()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -297,7 +297,7 @@ class TestMainYamlConfig:
     def test_writes_commit0_java_yaml(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         from commit0.harness.setup_java import main, JAVA_CONFIG_FILE
 
         main("ds", "all", "17", str(tmp_path))
@@ -308,7 +308,7 @@ class TestMainYamlConfig:
     def test_contains_expected_keys(
         self, mock_load: MagicMock, mock_clone: MagicMock, tmp_path: Path
     ) -> None:
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         from commit0.harness.setup_java import main, JAVA_CONFIG_FILE
 
         main("ds", "all", "17", str(tmp_path))

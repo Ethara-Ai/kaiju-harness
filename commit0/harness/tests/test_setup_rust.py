@@ -33,7 +33,7 @@ class TestSetupRustFiltering:
             _make_example(repo="Rust-commit0/taffy"),
             _make_example(repo="Rust-commit0/bon"),
         ]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -47,7 +47,7 @@ class TestSetupRustFiltering:
             _make_example(repo="Rust-commit0/taffy"),
             _make_example(repo="Rust-commit0/bon"),
         ]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -62,7 +62,7 @@ class TestSetupRustFiltering:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_name_match_with_dash_underscore(self, mock_load, mock_clone):
         examples = [_make_example(repo="Rust-commit0/my-crate")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -73,7 +73,7 @@ class TestSetupRustFiltering:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_name_mismatch_skips(self, mock_load, mock_clone):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -86,7 +86,7 @@ class TestSetupRustCloning:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_url_format(self, mock_load, mock_clone):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -98,7 +98,7 @@ class TestSetupRustCloning:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_dir_is_absolute(self, mock_load, mock_clone):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -110,7 +110,7 @@ class TestSetupRustCloning:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_dir_uses_repo_name(self, mock_load, mock_clone):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -122,7 +122,7 @@ class TestSetupRustCloning:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_json_dataset_uses_commit0_all_branch(self, mock_load, mock_clone):
         examples = [_make_example()]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -134,7 +134,7 @@ class TestSetupRustCloning:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_hub_dataset_uses_split_name(self, mock_load, mock_clone):
         examples = [_make_example()]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -148,7 +148,7 @@ class TestSetupRustCloning:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_os_sep_in_name_uses_commit0_all(self, mock_load, mock_clone):
         examples = [_make_example()]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -162,7 +162,7 @@ class TestSetupRustBranchCreation:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_creates_base_branch(self, mock_load, mock_clone):
         examples = [_make_example()]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -173,7 +173,7 @@ class TestSetupRustBranchCreation:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_deletes_existing_base_branch(self, mock_load, mock_clone):
         examples = [_make_example()]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = ["commit0", "main"]
         mock_clone.return_value = mock_repo
@@ -185,7 +185,7 @@ class TestSetupRustBranchCreation:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_no_delete_when_branch_absent(self, mock_load, mock_clone):
         examples = [_make_example()]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -198,7 +198,7 @@ class TestSetupRustGitignore:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_creates_gitignore_when_missing(self, mock_load, mock_clone, tmp_path):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -215,7 +215,7 @@ class TestSetupRustGitignore:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_appends_missing_entries(self, mock_load, mock_clone, tmp_path):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -234,7 +234,7 @@ class TestSetupRustGitignore:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_skips_existing_entries(self, mock_load, mock_clone, tmp_path):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -250,7 +250,7 @@ class TestSetupRustGitignore:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_commits_gitignore_changes(self, mock_load, mock_clone, tmp_path):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -265,7 +265,7 @@ class TestSetupRustGitignore:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_gitignore_exception_does_not_crash(self, mock_load, mock_clone, tmp_path):
         examples = [_make_example(repo="Rust-commit0/taffy")]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_repo.git.add.side_effect = Exception("git error")
@@ -281,7 +281,7 @@ class TestSetupRustDatasetName:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_dataset_name_lowered(self, mock_load, mock_clone):
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         main("ORG/DATASET", "test", "all", "/base")
         # load_dataset_from_config is called with original case
         mock_load.assert_called_once_with("ORG/DATASET", split="test")
@@ -294,7 +294,7 @@ class TestSetupRustDatasetName:
             _make_example(repo="Rust-commit0/bon"),
             _make_example(repo="Rust-commit0/grex"),
         ]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -311,7 +311,7 @@ class TestSetupRustGitignoreEdge:
         gitignore = tmp_path / "taffy" / ".gitignore"
         gitignore.parent.mkdir(parents=True)
         gitignore.write_text("target/\n")
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -323,7 +323,7 @@ class TestSetupRustGitignoreEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_gitignore_all_entries_present(self, mock_load, mock_clone, caplog):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -351,7 +351,7 @@ class TestSetupRustGitignoreEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_gitignore_no_existing_file(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -363,7 +363,7 @@ class TestSetupRustGitignoreEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_gitignore_exception_logged_as_warning(self, mock_load, mock_clone, caplog):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -381,7 +381,7 @@ class TestSetupRustBranchEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_json_path_uses_commit0_all_branch(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -392,7 +392,7 @@ class TestSetupRustBranchEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_os_sep_path_uses_commit0_all(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -403,7 +403,7 @@ class TestSetupRustBranchEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_dataset_name_slash_takes_last_part(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -414,7 +414,7 @@ class TestSetupRustBranchEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_existing_base_branch_deleted(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         from commit0.harness.constants_rust import RUST_BASE_BRANCH
 
@@ -426,7 +426,7 @@ class TestSetupRustBranchEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_no_existing_base_branch_no_delete(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -436,7 +436,7 @@ class TestSetupRustBranchEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_checkout_base_branch(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -452,7 +452,7 @@ class TestSetupRustFilteringEdge:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_dash_underscore_normalization(self, mock_load, mock_clone):
         """repo_split 'ta_rs' matches repo name 'ta-rs'."""
-        mock_load.return_value = iter([_make_example(repo="Rust-commit0/ta-rs")])
+        mock_load.return_value = list([_make_example(repo="Rust-commit0/ta-rs")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -462,7 +462,7 @@ class TestSetupRustFilteringEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_nonmatching_name_skipped(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example(repo="Rust-commit0/taffy")])
+        mock_load.return_value = list([_make_example(repo="Rust-commit0/taffy")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -478,7 +478,7 @@ class TestSetupRustFilteringEdge:
             repos = RUST_SPLIT["all"]
             if len(repos) >= 2:
                 examples = [_make_example(repo=r) for r in repos]
-                mock_load.return_value = iter(examples)
+                mock_load.return_value = list(examples)
                 mock_repo = MagicMock()
                 mock_repo.branches = []
                 mock_clone.return_value = mock_repo
@@ -488,7 +488,7 @@ class TestSetupRustFilteringEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_url_format(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example(repo="Rust-commit0/taffy")])
+        mock_load.return_value = list([_make_example(repo="Rust-commit0/taffy")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -499,7 +499,7 @@ class TestSetupRustFilteringEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_dir_is_absolute(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example(repo="Rust-commit0/taffy")])
+        mock_load.return_value = list([_make_example(repo="Rust-commit0/taffy")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -510,14 +510,14 @@ class TestSetupRustFilteringEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_empty_dataset_no_clone(self, mock_load, mock_clone):
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         main("dataset", "test", "all", "/base")
         mock_clone.assert_not_called()
 
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_dataset_name_lowered_for_branch(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example()])
+        mock_load.return_value = list([_make_example()])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
@@ -528,7 +528,7 @@ class TestSetupRustFilteringEdge:
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_repo_name_extracted_from_full_path(self, mock_load, mock_clone):
-        mock_load.return_value = iter([_make_example(repo="org/sub/repo-name")])
+        mock_load.return_value = list([_make_example(repo="org/sub/repo-name")])
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo

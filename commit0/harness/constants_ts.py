@@ -17,9 +17,9 @@ class TsRepoInstance(RepoInstance):
     test_framework: str = "jest"
 
 
-TS_SPLIT: Dict[str, list[str]] = {
-    "all_ts": [],
-}
+# Curated subsets only — the "all" / "all_ts" subset is derived dynamically
+    # from the loaded dataset by ``commit0.harness.split_utils.resolve_split``.
+TS_SPLIT: Dict[str, list[str]] = {}
 
 # Per-repo branch created by setup_ts (one per repo clone)
 TS_BASE_BRANCH = "commit0"

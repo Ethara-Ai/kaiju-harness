@@ -9,6 +9,7 @@ from commit0.harness.constants_cpp import (
     CPP_GITIGNORE_ENTRIES,
     CppRepoInstance,
 )
+from commit0.harness.split_utils import resolve_split
 
 
 logging.basicConfig(
@@ -28,17 +29,13 @@ def main(
     )  # type: ignore
     dataset_name = dataset_name.lower()
 
+    allowed_repos = set(resolve_split(repo_split, dataset, curated=CPP_SPLIT))
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]
         clone_url = f"https://github.com/{example['repo']}.git"
 
-        if repo_split != "all":
-            if repo_split in CPP_SPLIT:
-                if repo_name not in CPP_SPLIT[repo_split]:
-                    continue
-            else:
-                if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                    continue
+        if repo_name not in allowed_repos:
+            continue
 
         clone_dir = os.path.abspath(os.path.join(base_dir, repo_name))
 

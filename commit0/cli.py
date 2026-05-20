@@ -10,7 +10,7 @@ import commit0.harness.setup
 import commit0.harness.evaluate
 import commit0.harness.lint
 import commit0.harness.save
-from commit0.harness.constants import SPLIT, SPLIT_ALL
+from commit0.harness.constants import SPLIT
 from commit0.harness.utils import get_active_branch
 import subprocess
 import yaml
@@ -165,8 +165,6 @@ def setup(
 ) -> None:
     """Commit0 clone a repo split."""
     check_commit0_path()
-    if "commit0" in dataset_name.split("/")[-1].lower():
-        check_valid(repo_split, SPLIT)
 
     base_dir = str(Path(base_dir).resolve())
     # Resolve local JSON files to absolute paths, but don't touch HuggingFace identifiers.
@@ -262,7 +260,7 @@ def build(
 def get_tests(
     repo_name: str = typer.Argument(
         ...,
-        help=f"Name of the repository to get tests for, one of: {', '.join(highlight(key, Colors.ORANGE) for key in SPLIT_ALL)}",
+        help="Name of the repository to get tests for (must match a repo in the dataset).",
     ),
 ) -> None:
     """Get tests for a Commit0 repository."""

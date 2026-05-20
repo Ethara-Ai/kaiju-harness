@@ -50,7 +50,7 @@ class TestSimpleDatasets:
     )
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_returns_early(self, mock_load, name):
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         result = main(name, "test", "all", "/base")
         assert result is None
         mock_load.assert_called_once_with(name, split="test")
@@ -65,7 +65,7 @@ class TestSweDataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance(instance_id="django__django-12345")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("swe-bench", "test", "all", "/base")
         mock_clone.assert_called_once()
@@ -81,7 +81,7 @@ class TestSweDataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance(base_commit="deadbeef")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("my-swe-dataset", "test", "all", "/base")
         assert mock_clone.call_args[0][2] == "deadbeef"
@@ -95,7 +95,7 @@ class TestSweDataset:
     ):
         ex1 = _repo_instance(instance_id="django__django-12345")
         ex2 = _repo_instance(instance_id="flask__flask-99999")
-        mock_load.return_value = iter([ex1, ex2])
+        mock_load.return_value = list([ex1, ex2])
         mock_clone.return_value = _make_repo_mock()
         main("swe-bench", "test", "django", "/base")
         assert mock_clone.call_count == 1
@@ -110,7 +110,7 @@ class TestSweDataset:
     ):
         ex1 = _repo_instance(instance_id="django__django-12345")
         ex2 = _repo_instance(instance_id="flask__flask-99999")
-        mock_load.return_value = iter([ex1, ex2])
+        mock_load.return_value = list([ex1, ex2])
         mock_clone.return_value = _make_repo_mock()
         main("swe-bench", "test", "all", "/base")
         assert mock_clone.call_count == 2
@@ -125,7 +125,7 @@ class TestCommit0Dataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance(repo="wenting/mylib")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "all", "/base")
         args = mock_clone.call_args[0]
@@ -140,7 +140,7 @@ class TestCommit0Dataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "all", "/base")
         assert mock_clone.call_args[0][2] == "commit0_combined"
@@ -153,7 +153,7 @@ class TestCommit0Dataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("path/to/dataset.json", "test", "all", "/base")
         assert mock_clone.call_args[0][2] == "commit0_all"
@@ -167,7 +167,7 @@ class TestCommit0Dataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("some/local/path", "test", "all", "/base")
         assert mock_clone.call_args[0][2] == "commit0_all"
@@ -182,7 +182,7 @@ class TestCommit0Dataset:
     ):
         ex_in = _repo_instance(repo="owner/myrepo")
         ex_out = _repo_instance(repo="owner/excluded")
-        mock_load.return_value = iter([ex_in, ex_out])
+        mock_load.return_value = list([ex_in, ex_out])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "lite", "/base")
         assert mock_clone.call_count == 1
@@ -196,7 +196,7 @@ class TestCommit0Dataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance(repo="owner/myrepo")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "lite", "/base")
         mock_clone.assert_not_called()
@@ -210,7 +210,7 @@ class TestCommit0Dataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance(repo="owner/myrepo")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "unknown_split", "/base")
         assert mock_clone.call_count == 0
@@ -224,7 +224,7 @@ class TestCommit0Dataset:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance(repo="owner/my-repo")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "my_repo", "/base")
         assert mock_clone.call_count == 1
@@ -239,7 +239,7 @@ class TestBaseBranch:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         repo = _make_repo_mock(has_base_branch=True)
         mock_clone.return_value = repo
         main("wentingzhao/commit0_combined", "test", "all", "/base")
@@ -254,7 +254,7 @@ class TestBaseBranch:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         repo = _make_repo_mock(has_base_branch=False)
         mock_clone.return_value = repo
         main("wentingzhao/commit0_combined", "test", "all", "/base")
@@ -265,7 +265,7 @@ class TestBaseBranch:
 class TestGitignore:
     def _run_with_gitignore(self, exists_return, read_content):
         example = _repo_instance()
-        mock_load = MagicMock(return_value=iter([example]))
+        mock_load = MagicMock(return_value=list([example]))
         repo = _make_repo_mock(has_base_branch=False)
         mock_clone = MagicMock(return_value=repo)
 
@@ -317,7 +317,7 @@ class TestGitignore:
 
     def test_gitignore_failure_logs_warning(self):
         example = _repo_instance()
-        mock_load = MagicMock(return_value=iter([example]))
+        mock_load = MagicMock(return_value=list([example]))
         repo = _make_repo_mock(has_base_branch=False)
         mock_clone = MagicMock(return_value=repo)
 
@@ -341,7 +341,7 @@ class TestCloneRepoArgs:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_url_format(self, mock_load, mock_clone, mock_abs, mock_exists):
         example = _repo_instance(repo="owner/myrepo")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "all", "/base")
         url = mock_clone.call_args[0][0]
@@ -353,7 +353,7 @@ class TestCloneRepoArgs:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_receives_logger(self, mock_load, mock_clone, mock_abs, mock_exists):
         example = _repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "all", "/base")
         logger_arg = mock_clone.call_args[0][3]
@@ -369,7 +369,7 @@ class TestMultipleExamples:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         examples = [_repo_instance(repo=f"owner/repo{i}") for i in range(5)]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_clone.return_value = _make_repo_mock()
         main("wentingzhao/commit0_combined", "test", "all", "/base")
         assert mock_clone.call_count == 5

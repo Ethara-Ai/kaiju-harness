@@ -32,6 +32,7 @@ from tools.prepare_repo import (
     get_head_sha,
     get_default_branch,
 )
+from tools._git_auth import setup_git_credentials, fork_repo
 from tools.stub_ts_runner import run_stub_ts
 
 # Lazy import for spec scraping (optional dependency) -- mirrors prepare_repo_go.py
@@ -111,61 +112,6 @@ def _exec_prefix(pkg_manager: str) -> str:
     return {"pnpm": "pnpm exec", "yarn": "yarn", "bun": "bunx"}.get(pkg_manager, "npx")
 
 
-def fork_repo_ts(full_name: str, org: str, token: str | None = None) -> str:
-    """Fork a repo to a target user or org. Handles both user and org accounts."""
-    import time
-
-    fork_name = f"{org}/{full_name.split('/')[-1]}"
-
-    try:
-        result = subprocess.run(
-            ["gh", "repo", "view", fork_name, "--json", "name"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info("  Fork already exists: %s", fork_name)
-            return fork_name
-    except Exception as e:
-        logger.warning("  Fork existence check failed for %s: %s", fork_name, e)
-
-    logger.info("  Forking %s to %s...", full_name, org)
-    result = subprocess.run(
-        ["gh", "repo", "fork", full_name, "--org", org, "--clone=false"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if result.returncode != 0 and "login for a user account" in result.stderr:
-        subprocess.run(
-            ["gh", "repo", "fork", full_name, "--clone=false"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        )
-    elif result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode, result.args, result.stdout, result.stderr
-        )
-
-    for _ in range(10):
-        try:
-            result = subprocess.run(
-                ["gh", "repo", "view", fork_name, "--json", "name"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                logger.info("  Fork ready: %s", fork_name)
-                return fork_name
-        except Exception as e:
-            logger.warning("  Fork poll failed for %s: %s", fork_name, e)
-        time.sleep(2)
-
-    raise RuntimeError(f"Fork {fork_name} not available after 20s")
 
 
 def detect_ts_src_dir(repo_dir: Path) -> str:
@@ -942,7 +888,7 @@ def prepare_ts_repo(
         fork_name = f"{org}/{full_name.split('/')[-1]}"
         logger.info("  [DRY RUN] Would fork to %s", fork_name)
     else:
-        fork_name = fork_repo_ts(full_name, org, token=token)
+        fork_name = fork_repo(full_name, org, token=token)
 
     repo_dir = full_clone(full_name, clone_dir, tag=release_tag)
     if release_tag:
@@ -1128,6 +1074,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    setup_git_credentials(dry_run=args.dry_run)
 
     if not args.repo and not args.input_file:
         parser.error("Provide either --repo owner/name or an input_file positional.")

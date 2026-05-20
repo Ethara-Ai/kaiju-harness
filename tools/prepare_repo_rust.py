@@ -46,6 +46,13 @@ import sys
 import time
 from pathlib import Path
 
+from tools._git_auth import (
+    git,
+    fork_repo,
+    push_to_fork,
+    setup_git_credentials,
+)
+
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -63,17 +70,6 @@ DEFAULT_ORG = "Zahgon"
 # ─── Git Helpers ──────────────────────────────────────────────────────────────
 
 
-def git(repo_dir: Path, *args: str, check: bool = True, timeout: int = 120) -> str:
-    """Run a git command in repo_dir, return stdout."""
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-    )
-    return result.stdout.strip()
 
 
 def get_head_sha(repo_dir: Path) -> str:
@@ -97,50 +93,6 @@ def get_default_branch(repo_dir: Path) -> str:
 # ─── Fork & Clone ────────────────────────────────────────────────────────────
 
 
-def fork_repo(full_name: str, org: str) -> str:
-    """Fork a repo to the target org using gh CLI. Returns fork full_name."""
-    fork_name = f"{org}/{full_name.split('/')[-1]}"
-
-    # Check if fork already exists
-    try:
-        result = subprocess.run(
-            ["gh", "repo", "view", fork_name, "--json", "name"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info("Fork already exists: %s", fork_name)
-            return fork_name
-    except Exception:
-        pass
-
-    logger.info("Forking %s to %s...", full_name, org)
-    subprocess.run(
-        ["gh", "repo", "fork", full_name, "--org", org, "--clone=false"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=True,
-    )
-
-    # Wait for fork to be available
-    for _ in range(10):
-        try:
-            result = subprocess.run(
-                ["gh", "repo", "view", fork_name, "--json", "name"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                logger.info("Fork ready: %s", fork_name)
-                return fork_name
-        except Exception:
-            pass
-        time.sleep(2)
-
-    raise RuntimeError(f"Fork {fork_name} not available after 20s")
 
 
 def clone_repo(full_name: str, clone_dir: Path) -> Path:
@@ -471,7 +423,7 @@ def prepare_rust_repo(
         logger.info("[DRY RUN] Would push commit0_all to %s", fork_name)
     else:
         logger.info("Pushing commit0_all to %s...", fork_name)
-        git(repo_dir, "push", "origin", "commit0_all", "--force", timeout=120)
+        push_to_fork(repo_dir, fork_name, "commit0_all", remote_name="origin")
 
     # Step 9: Test ID collection removed — use tools/generate_test_ids_rust.py separately
 
@@ -654,6 +606,8 @@ def main() -> None:
         args.repo = args.upstream
     if not args.repo:
         parser.error("--repo is required")
+
+    setup_git_credentials(dry_run=args.dry_run)
 
     if not all([args.crate, args.src_dir, args.test_cmd]):
         derived = _derive_rust_defaults(args.repo)

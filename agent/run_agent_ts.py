@@ -23,6 +23,7 @@ from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
 from commit0.harness.constants_ts import TS_SPLIT
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_ts_test_ids import main as get_ts_tests
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.utils import load_dataset_from_config
@@ -429,27 +430,15 @@ def run_agent_ts_impl(
         commit0_config["dataset_name"], split=commit0_config["dataset_split"]
     )
     repo_split = commit0_config["repo_split"]
-    if repo_split == "all":
-        filtered_dataset = list(dataset)
-    elif repo_split in TS_SPLIT:
-        filtered_dataset = [
-            example
-            for example in dataset
-            if isinstance(example, dict)
-            and "repo" in example
-            and isinstance(example["repo"], str)
-            and example["repo"].split("/")[-1] in TS_SPLIT[repo_split]
-        ]
-    else:
-        filtered_dataset = [
-            example
-            for example in dataset
-            if isinstance(example, dict)
-            and "repo" in example
-            and isinstance(example["repo"], str)
-            and example["repo"].split("/")[-1].replace("-", "_")
-            == repo_split.replace("-", "_")
-        ]
+    dataset = list(dataset)
+    allowed_repos = set(resolve_split(repo_split, dataset, curated=TS_SPLIT))
+    filtered_dataset = [
+        example
+        for example in dataset
+        if isinstance(example, dict)
+        and isinstance(example.get("repo"), str)
+        and example["repo"].split("/")[-1] in allowed_repos
+    ]
     if not filtered_dataset:
         raise ValueError(
             f"No examples matched repo_split={repo_split!r}. "

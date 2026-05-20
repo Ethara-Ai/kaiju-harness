@@ -64,30 +64,9 @@ JAVA_SPLIT_LITE: List[str] = [
     "apache/commons-text",
     "FasterXML/jackson-core",
 ]
-JAVA_SPLIT_ALL: List[str] = [
-    "apache/commons-lang",
-    "apache/commons-io",
-    "apache/commons-collections",
-    "google/guava",
-    "google/gson",
-    "JodaOrg/joda-time",
-    "apache/commons-codec",
-    "apache/commons-math",
-    "apache/commons-text",
-    "FasterXML/jackson-core",
-    "FasterXML/jackson-databind",
-    "apache/commons-csv",
-    "apache/commons-compress",
-    "apache/commons-cli",
-    "apache/commons-validator",
-    "assertj/assertj",
-    "square/retrofit",
-    "jhy/jsoup",
-    "ben-manes/caffeine",
-    "google/auto",
-]
+# Curated Java subsets only. The "all" subset is derived dynamically from the
+# loaded dataset by ``commit0.harness.split_utils.resolve_split``.
 JAVA_SPLIT: Dict[str, List[str]] = {
-    "all": JAVA_SPLIT_ALL,
     "lite": JAVA_SPLIT_LITE,
 }
 

@@ -18,7 +18,6 @@ from commit0.harness.constants import (
     RUN_AGENT_LOG_DIR,
     RUN_PYTEST_LOG_DIR,
     SPLIT,
-    SPLIT_ALL,
     SPLIT_LITE,
     SUPPORTED_PYTHON_VERSIONS,
     TESTS_ERROR,
@@ -179,12 +178,8 @@ class TestTestStatus:
 
 class TestConstants:
     def test_split_dict_has_required_keys(self):
-        for key in ("all", "lite", "ethara", "ethara-lite"):
+        for key in ("lite", "ethara", "ethara-lite"):
             assert key in SPLIT, f"Missing key {key!r} in SPLIT"
-
-    def test_split_all_is_superset_of_lite(self):
-        for repo in SPLIT_LITE:
-            assert repo in SPLIT_ALL, f"{repo!r} from SPLIT_LITE not found in SPLIT_ALL"
 
     def test_eval_backends(self):
         assert EVAL_BACKENDS == ["local", "modal", "e2b"]

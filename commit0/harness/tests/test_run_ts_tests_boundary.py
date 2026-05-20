@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from commit0.harness.build_ts import _filter_by_split
 from commit0.harness.run_ts_tests import _inject_test_ids
 
 
@@ -108,86 +107,3 @@ def test_newline_in_test_ids_does_not_inject_extra_line() -> None:
         assert line.strip() != "echo pwned"
 
 
-# ---------------------------------------------------------------------------
-# _filter_by_split
-# ---------------------------------------------------------------------------
-
-
-class TestFilterBySplitBoundary:
-    """_filter_by_split(example, split) returns True if example belongs to
-    the requested split. Behaviour:
-
-    * 'all' / 'all_ts' → True always
-    * split in TS_SPLIT → repo_name in that list (empty list = all)
-    * otherwise → normalize by replacing '-' with '_' and compare names
-    """
-
-    @pytest.mark.parametrize(
-        "split",
-        ["all", "all_ts"],
-    )
-    def test_all_splits_accept_anything(self, split: str) -> None:
-        assert _filter_by_split({"repo": "random/weird-name"}, split) is True
-        # Also a non-dict example
-        ns = SimpleNamespace(repo="x/y")
-        assert _filter_by_split(ns, split) is True
-
-    def test_named_split_in_ts_split_but_empty_list_means_all(
-        self, monkeypatch
-    ) -> None:
-        from commit0.harness import build_ts
-
-        monkeypatch.setitem(build_ts.TS_SPLIT, "__test_empty__", [])
-        assert _filter_by_split({"repo": "o/anything"}, "__test_empty__") is True
-
-    def test_named_split_with_non_matching_repo_rejected(self, monkeypatch) -> None:
-        from commit0.harness import build_ts
-
-        monkeypatch.setitem(build_ts.TS_SPLIT, "__test_fixed__", ["zod"])
-        assert _filter_by_split({"repo": "o/hono"}, "__test_fixed__") is False
-        assert _filter_by_split({"repo": "o/zod"}, "__test_fixed__") is True
-
-    @pytest.mark.parametrize(
-        "split, repo, expected",
-        [
-            # exact normalized match
-            ("my-repo", "org/my-repo", True),
-            ("my_repo", "org/my-repo", True),
-            ("my-repo", "org/my_repo", True),
-            ("my_repo", "org/my_repo", True),
-            # case sensitivity: implementation lowercase? No — normalisation
-            # only replaces hyphens/underscores. Mixed case must NOT match.
-            ("My-Repo", "org/my-repo", False),
-            ("my-repo", "org/My-Repo", False),
-            # boundary: no match against a different name
-            ("zod", "org/hono", False),
-            # empty split string never matches a real name
-            ("", "org/my-repo", False),
-            # Unicode repo name against normalised ASCII split
-            ("emoji-repo", "org/emoji-repo", True),
-        ],
-    )
-    def test_fallthrough_normalization(
-        self, split: str, repo: str, expected: bool
-    ) -> None:
-        assert _filter_by_split({"repo": repo}, split) is expected
-
-    def test_non_dict_example_with_repo_attribute(self) -> None:
-        ns = SimpleNamespace(repo="org/zod")
-        assert _filter_by_split(ns, "zod") is True
-
-    def test_non_dict_example_no_match(self) -> None:
-        ns = SimpleNamespace(repo="org/nothing-like-that")
-        assert _filter_by_split(ns, "zod") is False
-
-    def test_dict_without_repo_falls_through_to_empty_name(self) -> None:
-        # repo_full='' → repo_name=''; '' == split normalised only if split==''
-        assert _filter_by_split({}, "") is True
-        assert _filter_by_split({}, "zod") is False
-
-    def test_repo_name_is_last_slash_segment(self) -> None:
-        # Multi-segment repo path: only the last segment matches the split
-        assert _filter_by_split({"repo": "owner/sub/group/zod"}, "zod") is True
-
-    def test_whitespace_in_split_does_not_match(self) -> None:
-        assert _filter_by_split({"repo": "org/zod"}, "  zod  ") is False

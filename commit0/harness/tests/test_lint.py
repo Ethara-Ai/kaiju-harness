@@ -51,7 +51,7 @@ class TestRepoMatching:
 
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_empty_dataset_raises(self, mock_load):
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         from commit0.harness.lint import main
 
         with pytest.raises(AssertionError, match="No example available"):

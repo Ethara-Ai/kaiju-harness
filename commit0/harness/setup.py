@@ -7,6 +7,7 @@ from commit0.harness.utils import (
     load_dataset_from_config,
 )
 from commit0.harness.constants import BASE_BRANCH, RepoInstance, SPLIT
+from commit0.harness.split_utils import resolve_split
 
 
 logging.basicConfig(
@@ -33,6 +34,11 @@ def main(
     ):
         logger.info("Skipping setup for simple dataset: %s", dataset_name)
         return
+    allowed_repos = (
+        set(resolve_split(repo_split, dataset, curated=SPLIT))
+        if "swe" not in dataset_name
+        else set()
+    )
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]
         clone_url = f"https://github.com/{example['repo']}.git"
@@ -42,15 +48,8 @@ def main(
             clone_dir = os.path.abspath(os.path.join(base_dir, example["instance_id"]))
             branch = example["base_commit"]
         else:
-            if repo_split != "all":
-                if repo_split in SPLIT:
-                    if repo_name not in SPLIT[repo_split]:
-                        continue
-                else:
-                    # Custom split not in SPLIT dict — treat as repo name filter.
-                    # Normalize hyphens/underscores for comparison.
-                    if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                        continue
+            if repo_name not in allowed_repos:
+                continue
             clone_dir = os.path.abspath(os.path.join(base_dir, repo_name))
             # For HF datasets like "wentingzhao/commit0_combined", the last
             # segment is the branch name on the fork.  For local JSON files

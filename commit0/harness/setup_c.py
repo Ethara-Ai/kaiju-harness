@@ -14,6 +14,7 @@ from commit0.harness.constants_c import (
     C_SPLIT,
     C_GITIGNORE_ENTRIES,
 )
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.utils import clone_repo, load_dataset_from_config
 
 logging.basicConfig(
@@ -46,24 +47,20 @@ def main(
         dataset_name, split=dataset_split
     )  # type: ignore
 
+    allowed_repos = set(resolve_split(repo_split, dataset, curated=C_SPLIT))
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]
-        if repo_split != "all":
-            if repo_split in C_SPLIT:
-                if repo_name not in C_SPLIT[repo_split]:
-                    continue
-            else:
-                if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                    continue
+        if repo_name not in allowed_repos:
+            continue
 
         clone_url = f"https://github.com/{example['repo']}.git"
         clone_dir = os.path.abspath(os.path.join(base_dir, repo_name))
 
-    dataset_lower = dataset_name.lower()
-    if dataset_lower.endswith(".json") or os.sep in dataset_name:
-        branch = "commit0_all"
-    else:
-        branch = dataset_name.split("/")[-1]
+        dataset_lower = dataset_name.lower()
+        if dataset_lower.endswith(".json") or os.sep in dataset_name:
+            branch = "commit0_all"
+        else:
+            branch = dataset_name.split("/")[-1]
 
         repo = clone_repo(clone_url, clone_dir, branch, logger)
 

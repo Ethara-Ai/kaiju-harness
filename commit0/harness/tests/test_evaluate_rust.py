@@ -464,7 +464,7 @@ def base_patches():
             ),
         ) as mock_tqdm,
         patch(f"{MODULE}.ThreadPoolExecutor") as mock_executor_cls,
-        patch(f"{MODULE}.as_completed", return_value=iter([])) as mock_as_completed,
+        patch(f"{MODULE}.as_completed", return_value=list([])) as mock_as_completed,
         patch("builtins.print") as mock_print,
         patch(f"{MODULE}.RUST_SPLIT", _FAKE_SPLIT),
         patch(f"{MODULE}.RUN_RUST_TESTS_LOG_DIR", Path("/tmp/fake_logs")),

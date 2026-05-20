@@ -17,11 +17,8 @@ from commit0.harness.constants_c import (
     C_HEADER_EXT,
     C_SKIP_DIRS,
     C_SPLIT,
-    C_SPLIT_ALL,
     C_STUB_MARKER,
     C_TEST_FILE_GLOBS,
-    resolve_c_split,
-    resolve_c_split_all,
 )
 
 
@@ -77,60 +74,6 @@ class TestApptAllowlist:
         assert isinstance(ALLOWED_APT_PACKAGES, frozenset)
 
 
-class TestResolveCSplit:
-    def test_returns_hardcoded_when_no_dataset(self):
-        merged = resolve_c_split("not-a-real-dataset-path.json")
-        assert "c_lite" in merged
-        assert merged["c_lite"] == ["cJSON"]
-
-    def test_local_json_adds_aliases(self, tmp_path: Path):
-        dataset = tmp_path / "dataset.json"
-        dataset.write_text(
-            json.dumps(
-                [
-                    {
-                        "instance_id": "foolib_c",
-                        "repo": "OrgX/foolib",
-                        "original_repo": "OriginalOrg/foolib",
-                    }
-                ]
-            )
-        )
-        merged = resolve_c_split(str(dataset))
-        # All four aliases must map to [basename]
-        assert merged["foolib_c"] == ["foolib"]
-        assert merged["OrgX/foolib"] == ["foolib"]
-        assert merged["OriginalOrg/foolib"] == ["foolib"]
-        assert merged["foolib"] == ["foolib"]
-        # Hardcoded entries still present
-        assert merged["c_lite"] == ["cJSON"]
-
-    def test_hardcoded_wins_on_collision(self, tmp_path: Path):
-        dataset = tmp_path / "dataset.json"
-        dataset.write_text(
-            json.dumps([{"repo": "x/c_lite", "instance_id": "c_lite"}])
-        )
-        merged = resolve_c_split(str(dataset))
-        # Hardcoded c_lite -> ["cJSON"] must win over derived ["c_lite"]
-        assert merged["c_lite"] == ["cJSON"]
-
-    def test_resolve_c_split_all_dedup(self, tmp_path: Path):
-        dataset = tmp_path / "dataset.json"
-        dataset.write_text(
-            json.dumps([{"repo": "x/cJSON", "instance_id": "cJSON_c"}])
-        )
-        flat = resolve_c_split_all(str(dataset))
-        assert "cJSON" in flat
-        # No duplicates
-        assert len(flat) == len(set(flat))
-
-    def test_malformed_json_falls_back(self, tmp_path: Path):
-        dataset = tmp_path / "dataset.json"
-        dataset.write_text("not valid json {{{")
-        merged = resolve_c_split(str(dataset))
-        # Falls back to hardcoded
-        assert "c_lite" in merged
-
 
 class TestConstants:
     def test_base_branch_matches_go(self):
@@ -158,9 +101,8 @@ class TestConstants:
         assert ".aider*" in C_GITIGNORE_ENTRIES
         assert "logs/" in C_GITIGNORE_ENTRIES
 
-    def test_c_split_all_flat(self):
-        assert "cJSON" in C_SPLIT_ALL
-
+    def test_c_lite_curated_contains_cjson(self):
+        assert "cJSON" in C_SPLIT["c_lite"]
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

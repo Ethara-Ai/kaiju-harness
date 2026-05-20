@@ -65,7 +65,7 @@ def base_patches():
             ),
         ) as mock_tqdm,
         patch(f"{MODULE}.ThreadPoolExecutor") as mock_executor_cls,
-        patch(f"{MODULE}.as_completed", return_value=iter([])) as mock_as_completed,
+        patch(f"{MODULE}.as_completed", return_value=list([])) as mock_as_completed,
         patch("builtins.print") as mock_print,
         patch(f"{MODULE}.SPLIT", {"all": ["repo"], "lite": ["repo"]}) as mock_split,
     ):
@@ -478,10 +478,7 @@ class TestSweFilterInTripleLoop:
     def test_swe_non_all_skips_non_matching(self, base_patches):
         e1 = _make_example(instance_id="swe-bench/inst1", repo="github/r1")
         e2 = _make_example(instance_id="other/inst2", repo="github/r2")
-        dataset = MagicMock()
-        dataset.__iter__ = MagicMock(return_value=iter([e1, e2]))
-        dataset.__getitem__ = MagicMock(return_value=["swe-bench/inst1", "other/inst2"])
-        base_patches["load"].return_value = dataset
+        base_patches["load"].return_value = [e1, e2]
         base_patches["exists"].return_value = False
         base_patches["get_tests"].return_value = []
 

@@ -70,7 +70,7 @@ def _apply_patches(
         ctx_val = _ctx_ok()
 
     stack.enter_context(
-        patch(f"{MODULE}.load_dataset_from_config", return_value=iter(dataset))
+        patch(f"{MODULE}.load_dataset_from_config", return_value=list(dataset))
     )
     stack.enter_context(patch(f"{MODULE}.make_rust_spec", return_value=spec_val))
     stack.enter_context(patch(f"{MODULE}.get_hash_string", return_value=hash_val))
@@ -919,7 +919,7 @@ def test_load_dataset_called_with_args(tmp_path):
     with ExitStack() as s:
         _apply_patches(s, tmp_path)
         load_mock = s.enter_context(
-            patch(f"{MODULE}.load_dataset_from_config", return_value=iter([_example()]))
+            patch(f"{MODULE}.load_dataset_from_config", return_value=list([_example()]))
         )
         with pytest.raises(SystemExit):
             _call_main()

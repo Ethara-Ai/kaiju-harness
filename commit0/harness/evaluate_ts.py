@@ -22,6 +22,7 @@ from commit0.harness.utils import (
     get_active_branch,
     load_dataset_from_config,
 )
+from commit0.harness.split_utils import resolve_split
 
 logger = logging.getLogger(__name__)
 
@@ -99,23 +100,15 @@ def main(
         repo_split,
     )
 
-    # Resolve the split repo list; empty list means "all repos"
-    split_repos: list[str] = []
-    if repo_split in TS_SPLIT:
-        split_repos = TS_SPLIT[repo_split]
+    allowed_repos = set(resolve_split(repo_split, dataset_list, curated=TS_SPLIT))
 
     triples: list[tuple[str, str, str]] = []
     log_dirs: list[str] = []
 
     for example in dataset_list:
         repo_name = example["repo"].split("/")[-1]
-        if repo_split != "all":
-            if repo_split in TS_SPLIT:
-                if split_repos and repo_name not in split_repos:
-                    continue
-            else:
-                if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                    continue
+        if repo_name not in allowed_repos:
+            continue
 
         test_info = example["test"]
         test_target = (

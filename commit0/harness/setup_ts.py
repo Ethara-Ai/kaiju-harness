@@ -10,6 +10,7 @@ from commit0.harness.constants_ts import (
     TS_GITIGNORE_ENTRIES,
     TsRepoInstance,
 )
+from commit0.harness.split_utils import resolve_split
 
 
 logger = logging.getLogger(__name__)
@@ -26,17 +27,13 @@ def main(
     )  # type: ignore
     normalized_name = dataset_name.lower()
 
+    allowed_repos = set(resolve_split(repo_split, dataset, curated=TS_SPLIT))
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]
         clone_url = f"https://github.com/{example['repo']}.git"
 
-        if repo_split != "all":
-            if repo_split in TS_SPLIT:
-                if repo_name not in TS_SPLIT[repo_split]:
-                    continue
-            else:
-                if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                    continue
+        if repo_name not in allowed_repos:
+            continue
 
         clone_dir = os.path.abspath(os.path.join(base_dir, repo_name))
 

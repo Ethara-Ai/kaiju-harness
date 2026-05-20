@@ -55,7 +55,7 @@ def _run_main(
 
     with (
         patch(
-            f"{MODULE}.load_dataset_from_config", return_value=iter(dataset)
+            f"{MODULE}.load_dataset_from_config", return_value=list(dataset)
         ) as m_load,
         patch(f"{MODULE}.make_spec", return_value=spec_sentinel) as m_spec,
         patch(f"{MODULE}.docker") as m_docker,

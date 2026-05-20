@@ -415,15 +415,14 @@ def list_repos(
 
     dataset = load_dataset_from_config(dataset_name, split="test")
 
-    if effective_split in JAVA_SPLIT:
-        allowed = set(JAVA_SPLIT[effective_split])
-        filtered = [
-            e for e in dataset
-            if e["repo"] in allowed
-            or e.get("original_repo", "") in allowed
-        ]
-    else:
-        filtered = list(dataset)
+    from commit0.harness.split_utils import resolve_split
+
+    allowed = set(resolve_split(effective_split, dataset, curated=JAVA_SPLIT))
+    filtered = [
+        e for e in dataset
+        if e.get("repo", "").split("/")[-1] in allowed
+        or e.get("original_repo", "").split("/")[-1] in allowed
+    ]
 
     for entry in filtered:
         typer.echo(entry["repo"])

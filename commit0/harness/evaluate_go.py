@@ -28,6 +28,7 @@ from commit0.harness.utils import (
     get_active_branch,
     load_dataset_from_config,
 )
+from commit0.harness.split_utils import resolve_split
 
 logging.basicConfig(
     level=logging.INFO,
@@ -118,15 +119,11 @@ def main(
     log_dirs: list[str] = []
     specs: list = []
 
+    allowed_repos = set(resolve_split(repo_split, dataset_list, curated=GO_SPLIT))
     for example in dataset_list:
         repo_name = example["repo"].split("/")[-1]
-        if repo_split != "all":
-            if repo_split in GO_SPLIT:
-                if repo_name not in GO_SPLIT[repo_split]:
-                    continue
-            else:
-                if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                    continue
+        if repo_name not in allowed_repos:
+            continue
 
         test_info = example["test"]
         test_dir = test_info.get("test_dir", test_info.get("test_cmd", "./..."))

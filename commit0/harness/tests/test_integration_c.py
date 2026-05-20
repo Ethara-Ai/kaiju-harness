@@ -13,7 +13,7 @@ from commit0.harness.c_test_parser import (
     summarize_ctest_results,
 )
 from commit0.harness.constants import TestStatus
-from commit0.harness.constants_c import C_SPLIT, resolve_c_split
+from commit0.harness.constants_c import C_SPLIT
 from commit0.harness.spec_c import make_c_spec
 
 
@@ -62,14 +62,6 @@ class TestSpecWiring:
     def test_absolute_vs_relative_repo_directory(self) -> None:
         assert make_c_spec(_instance(), absolute=True).repo_directory == "/testbed"
         assert make_c_spec(_instance(), absolute=False).repo_directory == "testbed"
-
-
-class TestSplitResolution:
-    def test_c_lite_resolves_to_cjson(self) -> None:
-        assert C_SPLIT["c_lite"] == ["cJSON"]
-        resolved = resolve_c_split("dummy_dataset")
-        assert resolved["c_lite"] == ["cJSON"]
-
 
 class TestParserComposition:
     def test_realistic_ctest_xml_roundtrips(self) -> None:

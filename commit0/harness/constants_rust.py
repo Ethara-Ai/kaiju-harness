@@ -36,21 +36,10 @@ RUST_BASE_BRANCH = "commit0"
 # Entries to add to .gitignore for Rust repos
 RUST_GITIGNORE_ENTRIES = ["target/", ".aider*", "logs/"]
 
-# Repo split mapping for Rust repos
-RUST_SPLIT: Dict[str, list[str]] = {
-    "all": [
-        "Rust-commit0/taffy",
-        "Rust-commit0/bon",
-        "Rust-commit0/grex",
-        "Rust-commit0/tide",
-        "Rust-commit0/ocrs",
-        "Rust-commit0/gimli",
-        "Rust-commit0/Spartan",
-        "Rust-commit0/ta-rs",
-        "Ethara-Ai/grex",
-        "Ethara-Ai/Spartan",
-    ],
-}
+# Repo split mapping for Rust repos. Curated subsets only — the "all" subset is
+# derived dynamically from the loaded dataset by
+# ``commit0.harness.split_utils.resolve_split``.
+RUST_SPLIT: Dict[str, list[str]] = {}
 
 # cargo-nextest version for test execution
 CARGO_NEXTEST_VERSION = "0.9.96"

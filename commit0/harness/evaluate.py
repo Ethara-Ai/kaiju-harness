@@ -12,6 +12,7 @@ from typing import Iterator, Union
 from commit0.harness.run_pytest_ids import main as run_tests
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RepoInstance, SPLIT, RUN_PYTEST_LOG_DIR
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.spec import get_specs_from_dataset
 from commit0.harness.utils import (
     get_hash_string,
@@ -104,21 +105,17 @@ def main(
         )
     triples = []
     log_dirs = []
+    allowed_repos: set[str] = set()
+    if "swe" not in dataset_name.lower():
+        allowed_repos = set(resolve_split(repo_split, dataset_list, curated=SPLIT))
     for example in dataset_list:
         repo_name = example["repo"].split("/")[-1]
         if "swe" in dataset_name.lower():
             if repo_split != "all" and repo_split not in example["instance_id"]:
                 continue
         else:
-            if repo_split != "all":
-                if repo_split in SPLIT:
-                    if repo_name not in SPLIT[repo_split]:
-                        continue
-                else:
-                    # Normalize: hyphens/underscores are interchangeable
-                    # (e.g., repo "scrapy-redis" must match repo_split "scrapy_redis")
-                    if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                        continue
+            if repo_name not in allowed_repos:
+                continue
         hashed_test_ids = get_hash_string(example["test"]["test_dir"])
         repo_branch = branch
         if repo_branch is None:

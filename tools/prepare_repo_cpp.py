@@ -48,6 +48,13 @@ import sys
 import time
 from pathlib import Path
 
+from tools._git_auth import (
+    git,
+    fork_repo,
+    push_to_fork,
+    setup_git_credentials,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -59,23 +66,13 @@ TEST_IDS_DIR = DATA_DIR / "cpp_test_ids"
 CONSTANTS_CPP_FILE = PROJECT_ROOT / "commit0" / "harness" / "constants_cpp.py"
 SPECS_DIR = PROJECT_ROOT / "specs_cpp"
 
-DEFAULT_ORG = "zahgon"
+DEFAULT_ORG = "Zahgon"
 
 _CPP_EXTENSIONS = {".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++", ".h"}
 _SKIP_DIRS = {"build", "cmake-build-debug", "cmake-build-release", "builddir",
               ".cache", "_deps", "third_party", "vendor", "extern", ".git"}
 
 
-def git(repo_dir: Path, *args: str, check: bool = True, timeout: int = 120) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-    )
-    return result.stdout.strip()
 
 
 def get_head_sha(repo_dir: Path) -> str:
@@ -96,39 +93,6 @@ def get_default_branch(repo_dir: Path) -> str:
         return "main"
 
 
-def fork_repo(full_name: str, org: str) -> str:
-    fork_name = f"{org}/{full_name.split('/')[-1]}"
-    try:
-        result = subprocess.run(
-            ["gh", "repo", "view", fork_name, "--json", "name"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info("Fork already exists: %s", fork_name)
-            return fork_name
-    except Exception:
-        pass
-
-    logger.info("Forking %s to %s...", full_name, org)
-    subprocess.run(
-        ["gh", "repo", "fork", full_name, "--org", org, "--clone=false"],
-        capture_output=True, text=True, timeout=60, check=True,
-    )
-
-    for _ in range(10):
-        try:
-            result = subprocess.run(
-                ["gh", "repo", "view", fork_name, "--json", "name"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                logger.info("Fork ready: %s", fork_name)
-                return fork_name
-        except Exception:
-            pass
-        time.sleep(2)
-
-    raise RuntimeError(f"Fork {fork_name} not available after 20s")
 
 
 def clone_repo(full_name: str, clone_dir: Path) -> Path:
@@ -590,7 +554,7 @@ def prepare_cpp_repo(
     repo_name = upstream.split("/")[-1]
 
     if clone_dir is None:
-        clone_dir = Path("/tmp")
+        clone_dir = Path("repos_staging")
 
     logger.info("=" * 60)
     logger.info("Preparing: %s", upstream)
@@ -674,7 +638,7 @@ def prepare_cpp_repo(
         logger.info("[DRY RUN] Would push commit0_all to %s", fork_name)
     else:
         logger.info("Pushing commit0_all to %s...", fork_name)
-        git(repo_dir, "push", "origin", "commit0_all", "--force", timeout=120)
+        push_to_fork(repo_dir, fork_name, "commit0_all", remote_name="origin")
 
     git(repo_dir, "checkout", default_branch)
     test_ids = collect_test_ids(repo_dir, test_cmd, build_system)
@@ -736,8 +700,12 @@ def main() -> None:
         description="Prepare a C++ repo for commit0 dataset"
     )
     parser.add_argument(
-        "--upstream", required=True,
-        help="Upstream repo (e.g. fmtlib/fmt)",
+        "--repo", default=None,
+        help="Upstream repo (e.g. fmtlib/fmt). Falls back to --upstream.",
+    )
+    parser.add_argument(
+        "--upstream", default=None,
+        help="Alias for --repo (kept for backwards compatibility).",
     )
     parser.add_argument(
         "--src-dir", required=True,
@@ -752,8 +720,8 @@ def main() -> None:
         help=f"GitHub org to fork into (default: {DEFAULT_ORG})",
     )
     parser.add_argument(
-        "--clone-dir", type=Path, default=Path("/tmp"),
-        help="Directory for local clones (default: /tmp)",
+        "--clone-dir", type=Path, default=Path("repos_staging"),
+        help="Directory for local clones (default: ./repos_staging)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -787,8 +755,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.repo is None:
+        args.repo = args.upstream
+    if not args.repo:
+        parser.error("--repo (or --upstream) is required")
+
+    setup_git_credentials(dry_run=args.dry_run)
+
     entry = prepare_cpp_repo(
-        upstream=args.upstream,
+        upstream=args.repo,
         src_dir=args.src_dir,
         test_cmd=args.test_cmd,
         org=args.org,

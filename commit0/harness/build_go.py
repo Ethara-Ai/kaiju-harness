@@ -11,6 +11,7 @@ from typing import Iterator
 import docker
 
 from commit0.harness.constants_go import GoRepoInstance, GO_SPLIT
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.docker_build import build_repo_images
 from commit0.harness.health_check_go import run_go_health_checks
 from commit0.harness.spec_go import make_go_spec
@@ -21,16 +22,12 @@ logger = logging.getLogger(__name__)
 
 def _get_go_specs(dataset: list, split: str) -> list:
     """Build Commit0GoSpec instances from the dataset, filtered by split."""
+    allowed_repos = set(resolve_split(split, dataset, curated=GO_SPLIT))
     specs = []
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]
-        if split != "all":
-            if split in GO_SPLIT:
-                if repo_name not in GO_SPLIT[split]:
-                    continue
-            else:
-                if repo_name.replace("-", "_") != split.replace("-", "_"):
-                    continue
+        if repo_name not in allowed_repos:
+            continue
         spec = make_go_spec(example, absolute=True)
         specs.append(spec)
     return specs

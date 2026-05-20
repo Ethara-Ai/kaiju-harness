@@ -102,20 +102,6 @@ class TestTsRepoInstance:
         assert "instance_id" in k
 
 
-class TestTsSplit:
-    def test_is_dict(self):
-        assert isinstance(TS_SPLIT, dict)
-
-    def test_all_ts_key_exists(self):
-        assert "all_ts" in TS_SPLIT
-
-    def test_all_ts_is_list(self):
-        assert isinstance(TS_SPLIT["all_ts"], list)
-
-    def test_all_ts_entries_are_strings(self):
-        for repo in TS_SPLIT["all_ts"]:
-            assert isinstance(repo, str)
-
 
 class TestConstants:
     def test_base_branch_value(self):

@@ -52,21 +52,17 @@ sys.path.insert(0, str(TOOLS_DIR.parent))
 
 from commit0.harness.constants_java import JAVA_REMOTE_BRANCH as REMOTE_BRANCH
 
+from tools._git_auth import (
+    git,
+    fork_repo,
+    push_to_fork,
+    setup_git_credentials,
+)
+
 
 # ─── Git Helpers ──────────────────────────────────────────────────────────────
 
 
-def git(repo_dir: Path, *args: str, check: bool = True, timeout: int = 120) -> str:
-    """Run a git command in repo_dir, return stdout."""
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-    )
-    return result.stdout.strip()
 
 
 def get_head_sha(repo_dir: Path) -> str:
@@ -76,44 +72,6 @@ def get_head_sha(repo_dir: Path) -> str:
 # ─── Fork ─────────────────────────────────────────────────────────────────────
 
 
-def fork_repo(full_name: str, org: str) -> str:
-    """Fork a repo to the target org using gh CLI. Returns fork full_name."""
-    fork_name = f"{org}/{full_name.split('/')[-1]}"
-
-    # Check if fork already exists
-    try:
-        result = subprocess.run(
-            ["gh", "repo", "view", fork_name, "--json", "name"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info("  Fork already exists: %s", fork_name)
-            return fork_name
-    except Exception:
-        pass
-
-    # Create fork
-    logger.info("  Forking %s to %s...", full_name, org)
-    subprocess.run(
-        ["gh", "repo", "fork", full_name, "--org", org, "--clone=false"],
-        capture_output=True, text=True, timeout=60, check=True,
-    )
-
-    # Wait for fork to be available
-    for _ in range(15):
-        try:
-            result = subprocess.run(
-                ["gh", "repo", "view", fork_name, "--json", "name"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                logger.info("  Fork ready: %s", fork_name)
-                return fork_name
-        except Exception:
-            pass
-        time.sleep(2)
-
-    raise RuntimeError(f"Fork {fork_name} not available after 30s")
 
 
 # ─── Clone ────────────────────────────────────────────────────────────────────
@@ -303,19 +261,6 @@ def scrape_spec(repo_dir: Path, repo_short: str, spec_url: str, specs_dir: Path)
 # ─── Push to Fork ─────────────────────────────────────────────────────────────
 
 
-def push_to_fork(repo_dir: Path, fork_name: str, branch: str = REMOTE_BRANCH) -> None:
-    """Add fork as remote and push the base branch."""
-    fork_url = f"https://github.com/{fork_name}.git"
-
-    try:
-        git(repo_dir, "remote", "remove", "fork", check=False)
-    except Exception:
-        pass
-    git(repo_dir, "remote", "add", "fork", fork_url)
-
-    logger.info("  Pushing %s to %s...", branch, fork_name)
-    git(repo_dir, "push", "-f", "fork", branch, timeout=300)
-    logger.info("  Push complete")
 
 
 # ─── Dataset Entry ────────────────────────────────────────────────────────────
@@ -468,7 +413,7 @@ def prepare_java_repos(
         # Push to fork
         if not dry_run:
             try:
-                push_to_fork(repo_dir, fork_name)
+                push_to_fork(repo_dir, fork_name, REMOTE_BRANCH)
             except Exception as e:
                 logger.error("  Push failed: %s", e)
                 # Continue anyway — local clone still usable
@@ -545,6 +490,8 @@ def main() -> None:
 
     clone_dir = Path(args.clone_dir)
     clone_dir.mkdir(parents=True, exist_ok=True)
+
+    setup_git_credentials(dry_run=args.dry_run)
 
     dataset_entries = prepare_java_repos(
         entries,

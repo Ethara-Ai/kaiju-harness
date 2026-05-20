@@ -46,20 +46,9 @@ CPP_BUILD_SYSTEMS = ["cmake", "meson", "autotools", "make"]
 
 CPP_TEST_FRAMEWORKS = ["gtest", "catch2", "doctest", "boost_test", "ctest"]
 
-CPP_SPLIT: Dict[str, list[str]] = {
-    "all": [
-        "zahgon/fmt",
-        "zahgon/yaml-cpp",
-        "zahgon/CLI11",
-        "zahgon/spdlog",
-        "zahgon/re2",
-        "zahgon/tomlplusplus",
-        "zahgon/proxy",
-        "zahgon/cpr",
-        "zahgon/taskflow",
-        "zahgon/lexy",
-    ],
-}
+# Curated subsets only — the "all" subset is derived dynamically from the
+# loaded dataset by ``commit0.harness.split_utils.resolve_split``.
+CPP_SPLIT: Dict[str, list[str]] = {}
 
 RUN_CPP_TESTS_LOG_DIR = Path("logs/cpp_tests")
 

@@ -304,7 +304,7 @@ def load_dataset_from_config(dataset_name: str, split: str = "test") -> Any:
 
     from datasets import load_dataset
 
-    return load_dataset(dataset_name, split=split)  # type: ignore
+    return list(load_dataset(dataset_name, split=split))  # type: ignore
 
 
 __all__ = []

@@ -43,18 +43,18 @@ def _make_repo_mock(has_base_branch=False):
 class TestTsDatasetLoading:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_calls_load_dataset(self, mock_load):
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         main("ts_custom_dataset.json", "test", "all", "/base")
         mock_load.assert_called_once_with("ts_custom_dataset.json", split="test")
 
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_empty_dataset_no_clone(self, mock_load):
-        mock_load.return_value = iter([])
+        mock_load.return_value = list([])
         main("ts_custom_dataset.json", "test", "all", "/base")
 
 
 class TestTsSplitFiltering:
-    @patch(f"{MODULE}.TS_SPLIT", {"all_ts": ["zod", "effect"]})
+    @patch(f"{MODULE}.TS_SPLIT", {"curated": ["zod", "effect"]})
     @patch(f"{MODULE}.os.path.exists", return_value=False)
     @patch(f"{MODULE}.os.path.abspath", side_effect=lambda p: p)
     @patch(f"{MODULE}.clone_repo")
@@ -62,12 +62,12 @@ class TestTsSplitFiltering:
     def test_split_key_filters(self, mock_load, mock_clone, mock_abs, mock_exists):
         ex_in = _ts_repo_instance(repo="Zahgon/zod")
         ex_out = _ts_repo_instance(repo="Zahgon/excluded")
-        mock_load.return_value = iter([ex_in, ex_out])
+        mock_load.return_value = list([ex_in, ex_out])
         mock_clone.return_value = _make_repo_mock()
-        main("ts_custom_dataset.json", "test", "all_ts", "/base")
+        main("ts_custom_dataset.json", "test", "curated", "/base")
         assert mock_clone.call_count == 1
 
-    @patch(f"{MODULE}.TS_SPLIT", {"all_ts": ["other"]})
+    @patch(f"{MODULE}.TS_SPLIT", {"curated": ["other"]})
     @patch(f"{MODULE}.os.path.exists", return_value=False)
     @patch(f"{MODULE}.os.path.abspath", side_effect=lambda p: p)
     @patch(f"{MODULE}.clone_repo")
@@ -76,9 +76,9 @@ class TestTsSplitFiltering:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance(repo="Zahgon/zod")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
-        main("ts_custom_dataset.json", "test", "all_ts", "/base")
+        main("ts_custom_dataset.json", "test", "curated", "/base")
         mock_clone.assert_not_called()
 
     @patch(f"{MODULE}.TS_SPLIT", {})
@@ -90,7 +90,7 @@ class TestTsSplitFiltering:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance(repo="Zahgon/my-lib")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("ts_custom_dataset.json", "test", "my_lib", "/base")
         assert mock_clone.call_count == 1
@@ -104,7 +104,7 @@ class TestTsSplitFiltering:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance(repo="Zahgon/zod")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("ts_custom_dataset.json", "test", "unknown_split", "/base")
         mock_clone.assert_not_called()
@@ -117,7 +117,7 @@ class TestTsSplitFiltering:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         examples = [_ts_repo_instance(repo=f"Zahgon/lib{i}") for i in range(5)]
-        mock_load.return_value = iter(examples)
+        mock_load.return_value = list(examples)
         mock_clone.return_value = _make_repo_mock()
         main("ts_custom_dataset.json", "test", "all", "/base")
         assert mock_clone.call_count == 5
@@ -132,7 +132,7 @@ class TestTsBranch:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("path/to/ts_dataset.json", "test", "all", "/base")
         assert mock_clone.call_args[0][2] == "commit0_all"
@@ -146,7 +146,7 @@ class TestTsBranch:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("some\\local\\path", "test", "all", "/base")
         assert mock_clone.call_args[0][2] == "commit0_all"
@@ -160,7 +160,7 @@ class TestTsBranch:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("Ethara-Ai/commit0_typescript", "test", "all", "/base")
         assert mock_clone.call_args[0][2] == "commit0_typescript"
@@ -175,7 +175,7 @@ class TestTsBaseBranch:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         repo = _make_repo_mock(has_base_branch=True)
         mock_clone.return_value = repo
         main("ts_custom_dataset.json", "test", "all", "/base")
@@ -190,7 +190,7 @@ class TestTsBaseBranch:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         repo = _make_repo_mock(has_base_branch=False)
         mock_clone.return_value = repo
         main("ts_custom_dataset.json", "test", "all", "/base")
@@ -201,7 +201,7 @@ class TestTsBaseBranch:
 class TestTsGitignore:
     def _run_with_gitignore(self, exists_return, read_content):
         example = _ts_repo_instance()
-        mock_load = MagicMock(return_value=iter([example]))
+        mock_load = MagicMock(return_value=list([example]))
         repo = _make_repo_mock(has_base_branch=False)
         mock_clone = MagicMock(return_value=repo)
 
@@ -258,7 +258,7 @@ class TestTsGitignore:
 
     def test_gitignore_failure_logs_warning(self):
         example = _ts_repo_instance()
-        mock_load = MagicMock(return_value=iter([example]))
+        mock_load = MagicMock(return_value=list([example]))
         repo = _make_repo_mock(has_base_branch=False)
         mock_clone = MagicMock(return_value=repo)
 
@@ -282,7 +282,7 @@ class TestTsCloneArgs:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_url_format(self, mock_load, mock_clone, mock_abs, mock_exists):
         example = _ts_repo_instance(repo="Zahgon/zod")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("ts_custom_dataset.json", "test", "all", "/base")
         url = mock_clone.call_args[0][0]
@@ -296,7 +296,7 @@ class TestTsCloneArgs:
         self, mock_load, mock_clone, mock_abs, mock_exists
     ):
         example = _ts_repo_instance(repo="Zahgon/zod")
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("ts_custom_dataset.json", "test", "all", "/base")
         clone_dir = mock_clone.call_args[0][1]
@@ -308,7 +308,7 @@ class TestTsCloneArgs:
     @patch(f"{MODULE}.load_dataset_from_config")
     def test_clone_receives_logger(self, mock_load, mock_clone, mock_abs, mock_exists):
         example = _ts_repo_instance()
-        mock_load.return_value = iter([example])
+        mock_load.return_value = list([example])
         mock_clone.return_value = _make_repo_mock()
         main("ts_custom_dataset.json", "test", "all", "/base")
         logger_arg = mock_clone.call_args[0][3]

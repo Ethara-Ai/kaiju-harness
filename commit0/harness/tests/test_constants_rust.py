@@ -100,65 +100,6 @@ class TestRustGitignoreEntries:
         assert len(RUST_GITIGNORE_ENTRIES) == len(set(RUST_GITIGNORE_ENTRIES))
 
 
-# ===== RUST_SPLIT =====
-class TestRustSplit:
-    def test_is_dict(self):
-        assert isinstance(RUST_SPLIT, dict)
-
-    def test_has_all_key(self):
-        assert "all" in RUST_SPLIT
-
-    def test_all_is_list(self):
-        assert isinstance(RUST_SPLIT["all"], list)
-
-    def test_all_not_empty(self):
-        assert len(RUST_SPLIT["all"]) > 0
-
-    def test_all_repos_are_strings(self):
-        for repo in RUST_SPLIT["all"]:
-            assert isinstance(repo, str)
-
-    def test_all_repos_contain_slash(self):
-        for repo in RUST_SPLIT["all"]:
-            assert "/" in repo, f"Repo {repo} missing org/name format"
-
-    def test_all_repos_have_valid_org(self):
-        allowed_orgs = {"Rust-commit0", "Ethara-Ai"}
-        for repo in RUST_SPLIT["all"]:
-            org = repo.split("/")[0]
-            assert org in allowed_orgs, (
-                f"Repo {repo} not in an allowed org: {allowed_orgs}"
-            )
-
-    def test_taffy_in_all(self):
-        assert "Rust-commit0/taffy" in RUST_SPLIT["all"]
-
-    def test_bon_in_all(self):
-        assert "Rust-commit0/bon" in RUST_SPLIT["all"]
-
-    def test_grex_in_all(self):
-        assert "Rust-commit0/grex" in RUST_SPLIT["all"]
-
-    def test_tide_in_all(self):
-        assert "Rust-commit0/tide" in RUST_SPLIT["all"]
-
-    def test_ocrs_in_all(self):
-        assert "Rust-commit0/ocrs" in RUST_SPLIT["all"]
-
-    def test_gimli_in_all(self):
-        assert "Rust-commit0/gimli" in RUST_SPLIT["all"]
-
-    def test_no_duplicate_repos(self):
-        repos = RUST_SPLIT["all"]
-        assert len(repos) == len(set(repos))
-
-    def test_repo_count(self):
-        assert len(RUST_SPLIT["all"]) == 9
-
-    def test_no_empty_repo_names(self):
-        for repo in RUST_SPLIT["all"]:
-            assert len(repo.split("/")[1]) > 0
-
 
 # ===== CARGO_NEXTEST_VERSION =====
 class TestCargoNextestVersion:
@@ -506,21 +447,6 @@ class TestRustRepoInstanceEdge:
 
 
 class TestRustSplitEdge:
-    def test_all_key_exists(self):
-        assert "all" in RUST_SPLIT
-
-    def test_all_repos_are_strings(self):
-        for repo in RUST_SPLIT["all"]:
-            assert isinstance(repo, str)
-
-    def test_all_repos_contain_slash(self):
-        for repo in RUST_SPLIT["all"]:
-            assert "/" in repo
-
-    def test_all_repos_unique(self):
-        repos = RUST_SPLIT["all"]
-        assert len(repos) == len(set(repos))
-
     def test_split_is_dict(self):
         assert isinstance(RUST_SPLIT, dict)
 

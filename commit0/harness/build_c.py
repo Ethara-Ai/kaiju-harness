@@ -12,6 +12,7 @@ from typing import Iterator
 import docker
 
 from commit0.harness.constants_c import CRepoInstance, C_SPLIT
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.docker_build import build_repo_images
 from commit0.harness.health_check_c import run_c_health_checks
 from commit0.harness.spec_c import make_c_spec
@@ -22,16 +23,12 @@ logger = logging.getLogger(__name__)
 
 def _get_c_specs(dataset: list, split: str) -> list:
     """Build Commit0CSpec instances from the dataset, filtered by split."""
+    allowed_repos = set(resolve_split(split, dataset, curated=C_SPLIT))
     specs = []
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]
-        if split != "all":
-            if split in C_SPLIT:
-                if repo_name not in C_SPLIT[split]:
-                    continue
-            else:
-                if repo_name.replace("-", "_") != split.replace("-", "_"):
-                    continue
+        if repo_name not in allowed_repos:
+            continue
         spec = make_c_spec(example, absolute=True)
         specs.append(spec)
     return specs

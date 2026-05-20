@@ -6,6 +6,7 @@ from typing import Union
 
 from commit0.harness.constants import RepoInstance
 from commit0.harness.constants_ts import DEFAULT_NODE_VERSION, TS_SPLIT, TsRepoInstance
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.docker_build import build_repo_images
 from commit0.harness.health_check_ts import run_ts_health_checks
 from commit0.harness.spec_ts import Commit0TsSpec, make_ts_spec
@@ -14,24 +15,6 @@ from commit0.harness.utils import load_dataset_from_config
 logger = logging.getLogger(__name__)
 
 
-def _filter_by_split(
-    example: Union[TsRepoInstance, RepoInstance, dict],
-    split: str,
-) -> bool:
-    """Filter a dataset entry by TS split."""
-    if split == "all" or split == "all_ts":
-        return True
-    if isinstance(example, dict):
-        repo_full = example.get("repo", "")
-    else:
-        repo_full = example.repo
-    repo_name = repo_full.split("/")[-1]
-    if split in TS_SPLIT:
-        split_repos = TS_SPLIT[split]
-        if not split_repos:
-            return True  # empty = all
-        return repo_name in split_repos
-    return repo_name.replace("-", "_") == split.replace("-", "_")
 
 
 def main(
@@ -45,8 +28,11 @@ def main(
     dataset = load_dataset_from_config(dataset_name, split=dataset_split)
 
     specs: list[Commit0TsSpec] = []
+    allowed_repos = set(resolve_split(split, dataset, curated=TS_SPLIT))
+
     for example in dataset:
-        if not _filter_by_split(example, split):
+        repo_full = example.get("repo", "") if isinstance(example, dict) else example.repo
+        if repo_full.split("/")[-1] not in allowed_repos:
             continue
         specs.append(make_ts_spec(example, absolute=True))
 

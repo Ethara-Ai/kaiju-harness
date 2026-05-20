@@ -5,6 +5,7 @@ import docker
 from typing import Iterator, Union
 
 from commit0.harness.constants import RepoInstance, SimpleInstance, SPLIT
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.docker_build import build_repo_images
 from commit0.harness.health_check import run_health_checks
 from commit0.harness.spec import make_spec
@@ -36,19 +37,19 @@ def main(
         dataset_type = "simple"
     else:
         dataset_type = "commit0"
+    allowed_repos = (
+        set(resolve_split(split, dataset, curated=SPLIT))
+        if dataset_type == "commit0"
+        else set()
+    )
     for example in dataset:
         if "swe" in dataset_name or dataset_type == "simple":
             if split != "all" and split not in example["instance_id"]:
                 continue
         else:
             repo_name = example["repo"].split("/")[-1]
-            if split != "all":
-                if split in SPLIT:
-                    if repo_name not in SPLIT[split]:
-                        continue
-                else:
-                    if repo_name.replace("-", "_") != split.replace("-", "_"):
-                        continue
+            if repo_name not in allowed_repos:
+                continue
         spec = make_spec(example, dataset_type, absolute=True)
         specs.append(spec)
 

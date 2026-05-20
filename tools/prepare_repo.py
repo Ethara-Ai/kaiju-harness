@@ -52,6 +52,13 @@ TOOLS_DIR = Path(__file__).parent
 sys.path.insert(0, str(TOOLS_DIR.parent))
 from tools.stub import StubTransformer, is_test_file, collect_import_time_names
 
+from tools._git_auth import (
+    git,
+    fork_repo,
+    push_to_fork,
+    setup_git_credentials,
+)
+
 # Lazy import for spec scraping (optional dependency)
 _scrape_spec_sync = None
 
@@ -71,17 +78,6 @@ def _get_scrape_func():
 # ─── Git Helpers ──────────────────────────────────────────────────────────────
 
 
-def git(repo_dir: Path, *args: str, check: bool = True, timeout: int = 120) -> str:
-    """Run a git command in repo_dir, return stdout."""
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-    )
-    return result.stdout.strip()
 
 
 def get_head_sha(repo_dir: Path) -> str:
@@ -111,60 +107,6 @@ def get_default_branch(repo_dir: Path) -> str:
 # ─── Fork & Clone ────────────────────────────────────────────────────────────
 
 
-def fork_repo(full_name: str, org: str, token: str | None = None) -> str:
-    """Fork a repo to the target org using gh CLI. Returns fork full_name."""
-    fork_name = f"{org}/{full_name.split('/')[-1]}"
-
-    # Check if fork already exists
-    try:
-        result = subprocess.run(
-            ["gh", "repo", "view", fork_name, "--json", "name"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info("  Fork already exists: %s", fork_name)
-            return fork_name
-    except Exception as e:
-        logger.debug("Non-critical failure during fork check for %s: %s", fork_name, e)
-
-    # Create fork
-    logger.info("  Forking %s to %s...", full_name, org)
-    try:
-        subprocess.run(
-            ["gh", "repo", "fork", full_name, "--org", org, "--clone=false"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        logger.error(
-            "Fork failed for %s (exit %d): %s",
-            full_name,
-            e.returncode,
-            (e.stderr or e.stdout or "no output").strip(),
-        )
-        raise
-
-    # Wait for fork to be available
-    for _ in range(10):
-        try:
-            result = subprocess.run(
-                ["gh", "repo", "view", fork_name, "--json", "name"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                logger.info("  Fork ready: %s", fork_name)
-                return fork_name
-        except Exception as e:
-            logger.debug("Non-critical failure during fork availability check: %s", e)
-        time.sleep(2)
-
-    raise RuntimeError(f"Fork {fork_name} not available after 20s")
 
 
 def full_clone(
@@ -937,31 +879,6 @@ def resolve_commits_from_remote(fork_name: str, branch: str) -> tuple[str, str] 
         return None
 
 
-def push_to_fork(
-    repo_dir: Path,
-    fork_name: str,
-    branch: str | None = None,
-    removal_mode: str = "combined",
-    token: str | None = None,
-) -> None:
-    """Add fork as remote and push the commit0 branch."""
-    if branch is None:
-        branch = "commit0_all"
-    # Add fork as remote
-    if token:
-        fork_url = f"https://x-access-token:{token}@github.com/{fork_name}.git"
-    else:
-        fork_url = f"https://github.com/{fork_name}.git"
-
-    try:
-        git(repo_dir, "remote", "remove", "fork", check=False)
-    except Exception as e:
-        logger.debug("Non-critical failure during remote cleanup: %s", e)
-    git(repo_dir, "remote", "add", "fork", fork_url)
-
-    # Push branch
-    logger.info("  Pushing %s to %s...", branch, fork_name)
-    git(repo_dir, "push", "-f", "fork", branch, timeout=300)
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
@@ -1260,6 +1177,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    setup_git_credentials(dry_run=args.dry_run)
 
     # Load candidates
     if args.repo:

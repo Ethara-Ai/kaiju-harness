@@ -89,7 +89,7 @@ def read_commit0_ts_config_file(dot_file_path: str) -> dict:
 def setup(
     repo_split: str = typer.Argument(
         ...,
-        help=f"Split of TS repos, one of: all, {', '.join(TS_SPLIT.keys())}",
+        help="Split of TS repos — 'all', a curated subset, or any repo name in the dataset.",
     ),
     dataset_name: str = typer.Option(
         "ts_custom_dataset.json",
@@ -103,7 +103,7 @@ def setup(
         ".commit0.ts.yaml", help="Path for TS commit0 config file"
     ),
 ) -> None:
-    check_valid_ts(repo_split, TS_SPLIT)
+    # Split validation deferred to runtime in setup_ts.main.
 
     base_dir = str(Path(base_dir).resolve())
     if dataset_name.endswith(".json"):

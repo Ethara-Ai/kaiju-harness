@@ -14,7 +14,6 @@ from commit0.harness.constants_java import (
     JAVA_SKIP_FILENAMES,
     JAVA_SOURCE_EXT,
     JAVA_SPLIT,
-    JAVA_SPLIT_ALL,
     JAVA_SPLIT_LITE,
     JAVA_SRC_CONVENTION,
     JAVA_STUB_MARKER,
@@ -80,13 +79,6 @@ class TestConstants:
     def test_supported_versions_are_set(self) -> None:
         assert isinstance(SUPPORTED_JAVA_VERSIONS, set)
         assert len(SUPPORTED_JAVA_VERSIONS) > 0
-
-    def test_no_duplicates_in_split_all(self) -> None:
-        assert len(JAVA_SPLIT_ALL) == len(set(JAVA_SPLIT_ALL))
-
-    def test_lite_is_subset_of_all(self) -> None:
-        for repo in JAVA_SPLIT_LITE:
-            assert repo in JAVA_SPLIT_ALL, f"{repo!r} in LITE but not in ALL"
 
 
 class TestResolveBuildCmd:
@@ -233,7 +225,7 @@ class TestBranchAndConventionConstants:
         assert JAVA_BASE_BRANCH == "commit0_java"
 
     def test_java_remote_branch(self) -> None:
-        assert JAVA_REMOTE_BRANCH == "commit0_java_all"
+        assert JAVA_REMOTE_BRANCH == "commit0_all"
 
     def test_java_stub_marker_contains_unsupported(self) -> None:
         assert "UnsupportedOperationException" in JAVA_STUB_MARKER

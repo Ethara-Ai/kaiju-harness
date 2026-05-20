@@ -66,6 +66,13 @@ def _find_goimports() -> str:
 sys.path.insert(0, str(TOOLS_DIR.parent))
 from tools.stub_go import _ensure_gostubber, stub_go_repo
 
+from tools._git_auth import (
+    git,
+    fork_repo,
+    push_to_fork,
+    setup_git_credentials,
+)
+
 _scrape_spec_sync = None
 
 
@@ -79,16 +86,6 @@ def _get_scrape_func():
     return _scrape_spec_sync
 
 
-def git(repo_dir: Path, *args: str, check: bool = True, timeout: int = 120) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-    )
-    return result.stdout.strip()
 
 
 def get_head_sha(repo_dir: Path) -> str:
@@ -109,60 +106,6 @@ def get_default_branch(repo_dir: Path) -> str:
         return "main"
 
 
-def fork_repo(full_name: str, org: str) -> str:
-    fork_name = f"{org}/{full_name.split('/')[-1]}"
-    try:
-        result = subprocess.run(
-            ["gh", "api", f"repos/{fork_name}"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            repo_data = json.loads(result.stdout)
-            parent = (repo_data.get("parent") or {}).get("full_name", "")
-            if parent.lower() == full_name.lower():
-                logger.info("  Fork already exists: %s", fork_name)
-                return fork_name
-            raise RuntimeError(
-                f"Fork name collision: {fork_name} already exists but its parent is "
-                f"{parent!r}, not {full_name!r}. Cannot fork into {org}."
-            )
-    except RuntimeError:
-        raise
-    except Exception:
-        pass
-
-    logger.info("  Forking %s to %s...", full_name, org)
-    fork_result = subprocess.run(
-        ["gh", "repo", "fork", full_name, "--org", org, "--clone=false"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if fork_result.returncode != 0:
-        raise RuntimeError(
-            f"gh repo fork failed (exit {fork_result.returncode}) for {full_name} -> {org}.\n"
-            f"stdout: {fork_result.stdout.strip()}\n"
-            f"stderr: {fork_result.stderr.strip()}"
-        )
-
-    for _ in range(10):
-        try:
-            result = subprocess.run(
-                ["gh", "repo", "view", fork_name, "--json", "name"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                logger.info("  Fork ready: %s", fork_name)
-                return fork_name
-        except Exception:
-            pass
-        time.sleep(2)
-
-    raise RuntimeError(f"Fork {fork_name} not available after 20s")
 
 
 def full_clone(
@@ -317,28 +260,6 @@ def create_stubbed_branch(
     return base_commit, reference_commit
 
 
-def push_to_fork(
-    repo_dir: Path,
-    fork_name: str,
-    branch: str | None = None,
-    token: str | None = None,
-) -> None:
-    """Add fork as remote and push the commit0 branch."""
-    if branch is None:
-        branch = "commit0_all"
-    if token:
-        fork_url = f"https://x-access-token:{token}@github.com/{fork_name}.git"
-    else:
-        fork_url = f"https://github.com/{fork_name}.git"
-
-    try:
-        git(repo_dir, "remote", "remove", "fork", check=False)
-    except Exception:
-        pass
-    git(repo_dir, "remote", "add", "fork", fork_url)
-
-    logger.info("  Pushing %s to %s...", branch, fork_name)
-    git(repo_dir, "push", "-f", "fork", branch, timeout=300)
 
 
 def resolve_commits_from_remote(fork_name: str, branch: str) -> tuple[str, str] | None:
@@ -444,11 +365,10 @@ def prepare_single_repo(
         base_commit, reference_commit = create_stubbed_branch(repo_dir, full_name)
 
         if not dry_run:
-            token = os.environ.get("GITHUB_TOKEN")
             branch_name = "commit0_all"
             try:
                 git(repo_dir, "checkout", branch_name)
-                push_to_fork(repo_dir, forked_name, branch=branch_name, token=token)
+                push_to_fork(repo_dir, forked_name, branch=branch_name)
             except Exception as e:
                 logger.error("  Push failed: %s", e)
                 remote_commits = resolve_commits_from_remote(forked_name, branch_name)
@@ -492,10 +412,9 @@ def prepare_single_repo(
                     logger.info("  Updated base_commit with spec: %s", base_commit[:12])
 
                     if not dry_run:
-                        token = os.environ.get("GITHUB_TOKEN")
                         try:
                             push_to_fork(
-                                repo_dir, forked_name, branch=branch_name, token=token
+                                repo_dir, forked_name, branch=branch_name
                             )
                         except Exception as e:
                             logger.warning("  Spec push failed: %s", e)
@@ -531,10 +450,9 @@ def prepare_single_repo(
                         "  Updated base_commit with README spec: %s", base_commit[:12]
                     )
                     if not dry_run:
-                        token = os.environ.get("GITHUB_TOKEN")
                         try:
                             push_to_fork(
-                                repo_dir, forked_name, branch=branch_name, token=token
+                                repo_dir, forked_name, branch=branch_name
                             )
                         except Exception as push_err:
                             logger.warning("  README spec push failed: %s", push_err)
@@ -620,6 +538,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    setup_git_credentials(dry_run=args.dry_run)
 
     args.clone_dir.mkdir(parents=True, exist_ok=True)
 

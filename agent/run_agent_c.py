@@ -41,6 +41,7 @@ from commit0.harness.constants_c import (
     C_SPLIT,
     RUN_C_TEST_LOG_DIR,
 )
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_c_test_ids import main as get_c_test_ids
 from commit0.harness.utils import load_dataset_from_config
 
@@ -416,29 +417,15 @@ def run_agent(
         config["dataset_name"], split=config["dataset_split"]
     )
     repo_split = config["repo_split"]
-    if repo_split == "all":
-        filtered_dataset = list(dataset)
-    elif repo_split in C_SPLIT:
-        filtered_dataset = [
-            example
-            for example in dataset
-            if isinstance(example, dict)
-            and "repo" in example
-            and isinstance(example["repo"], str)
-            and example["repo"].split("/")[-1] in C_SPLIT[repo_split]
-        ]
-    else:
-        filtered_dataset = [
-            example
-            for example in dataset
-            if isinstance(example, dict)
-            and "repo" in example
-            and isinstance(example["repo"], str)
-            and example["repo"].split("/")[-1].replace("-", "_")
-            == repo_split.replace("-", "_")
-        ]
-        if not filtered_dataset:
-            filtered_dataset = list(dataset)
+    dataset = list(dataset)
+    allowed_repos = set(resolve_split(repo_split, dataset, curated=C_SPLIT))
+    filtered_dataset = [
+        example
+        for example in dataset
+        if isinstance(example, dict)
+        and isinstance(example.get("repo"), str)
+        and example["repo"].split("/")[-1] in allowed_repos
+    ]
     assert len(filtered_dataset) > 0, (
         f"No examples available for repo_split={repo_split!r}. "
         f"If using a custom dataset, ensure the JSON file is non-empty."

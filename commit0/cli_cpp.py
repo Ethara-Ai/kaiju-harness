@@ -393,11 +393,10 @@ def list_repos(
     if isinstance(dataset, dict):
         dataset = list(dataset.values())
 
-    if effective_split in CPP_SPLIT:
-        allowed = set(CPP_SPLIT[effective_split])
-        filtered = [e for e in dataset if e["repo"] in allowed]
-    else:
-        filtered = dataset
+    from commit0.harness.split_utils import resolve_split
+
+    allowed = set(resolve_split(effective_split, dataset, curated=CPP_SPLIT))
+    filtered = [e for e in dataset if e.get("repo", "").split("/")[-1] in allowed]
 
     for entry in filtered:
         typer.echo(entry["repo"])

@@ -33,6 +33,7 @@ from agent.thinking_capture import ThinkingCapture, SummarizerCost
 from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_rust import RUST_SPLIT
+from commit0.harness.split_utils import resolve_split
 from commit0.harness.utils import load_dataset_from_config
 
 logger = logging.getLogger(__name__)
@@ -564,38 +565,15 @@ def run_rust_agent(
         commit0_config["dataset_name"], split=commit0_config["dataset_split"]
     )
     repo_split = commit0_config.get("repo_split", "all")
-    if repo_split == "all":
-        rust_repo_names = {r.split("/")[-1] for r in RUST_SPLIT.get("all", [])}
-        filtered_dataset = [
-            example
-            for example in dataset
-            if isinstance(example, dict)
-            and "repo" in example
-            and isinstance(example["repo"], str)
-            and example["repo"].split("/")[-1] in rust_repo_names
-        ]
-    elif repo_split in RUST_SPLIT:
-        rust_names = {r.split("/")[-1] for r in RUST_SPLIT[repo_split]}
-        filtered_dataset = [
-            example
-            for example in dataset
-            if isinstance(example, dict)
-            and "repo" in example
-            and isinstance(example["repo"], str)
-            and example["repo"].split("/")[-1] in rust_names
-        ]
-    else:
-        filtered_dataset = [
-            example
-            for example in dataset
-            if isinstance(example, dict)
-            and "repo" in example
-            and isinstance(example["repo"], str)
-            and example["repo"].split("/")[-1].replace("-", "_")
-            == repo_split.replace("-", "_")
-        ]
-        if not filtered_dataset:
-            filtered_dataset = list(dataset)
+    dataset = list(dataset)
+    allowed_repos = set(resolve_split(repo_split, dataset, curated=RUST_SPLIT))
+    filtered_dataset = [
+        example
+        for example in dataset
+        if isinstance(example, dict)
+        and isinstance(example.get("repo"), str)
+        and example["repo"].split("/")[-1] in allowed_repos
+    ]
 
     assert len(filtered_dataset) > 0, (
         f"No Rust examples available for repo_split={repo_split!r}. "

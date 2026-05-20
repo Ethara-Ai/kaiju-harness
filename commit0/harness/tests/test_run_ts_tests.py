@@ -76,7 +76,7 @@ def _setup_base_mocks(
     spec=None,
     logger=None,
 ):
-    mock_load.return_value = iter(examples)
+    mock_load.return_value = list(examples)
     if spec is None:
         spec = _make_spec_mock()
     mock_make_spec.return_value = spec
@@ -1043,7 +1043,7 @@ class TestMiscEdgeCases:
     def test_no_matching_spec_raises(self):
         example = _make_repo_example(repo="org/unrelated-repo")
         with (
-            patch(f"{MODULE}.load_dataset_from_config", return_value=iter([example])),
+            patch(f"{MODULE}.load_dataset_from_config", return_value=list([example])),
             patch(f"{MODULE}.make_ts_spec") as mock_make_spec,
         ):
             mock_make_spec.return_value = None
