@@ -132,23 +132,9 @@ _STDLIB_REMOVED_IN: dict[str, str] = {
 
 # Modules backed by system libraries (apt-only, no pip path). Their absence
 # means the runtime is missing system deps — not a Python version problem.
-_SYSTEM_DEP_MODULES: frozenset[str] = frozenset(
-    {
-        "qgis",
-        "cv2",
-        "osgeo",
-        "gdal",
-        "rasterio",
-        "gi",  # pygobject (GTK)
-        "PyQt5",
-        "PyQt6",
-        "PySide2",
-        "PySide6",
-        "rospy",
-        "tkinter",
-        "_tkinter",
-    }
-)
+# Single source of truth lives in ``tools.system_deps_scanner.SYSTEM_DEP_MODULES``
+# so the pre-flight gate and the failure classifier always agree.
+from tools.system_deps_scanner import SYSTEM_DEP_MODULES as _SYSTEM_DEP_MODULES  # noqa: E402
 
 
 _MODULE_NOT_FOUND_RE = re.compile(
@@ -391,6 +377,39 @@ class LocalRuntime(Runtime):
         return result.stdout, result.stderr, result.returncode
 
 
+def _detect_install_extras(repo_dir: Path) -> list[str]:
+    """Detect which ``[project.optional-dependencies]`` extras to install.
+
+    Picks test-related extras (``test``, ``tests``, ``testing``) so that
+    ``conftest.py`` imports of test-only deps (matplotlib, pyhf, etc.)
+    resolve. Falls back to ``dev`` / ``develop`` when no explicit test extra
+    exists. Returns an empty list when no relevant extras are declared.
+    """
+    pyproject = repo_dir / "pyproject.toml"
+    if not pyproject.is_file():
+        return []
+    import tomllib
+
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="replace"))
+    except (tomllib.TOMLDecodeError, OSError):
+        return []
+    extras_dict = (data.get("project") or {}).get("optional-dependencies") or {}
+    if not isinstance(extras_dict, dict):
+        return []
+    available = set(extras_dict.keys())
+    # Priority: explicit test extras > dev > generic 'all'
+    preferred = [n for n in ("test", "tests", "testing") if n in available]
+    if preferred:
+        return preferred
+    if "dev" in available:
+        return ["dev"]
+    if "develop" in available:
+        return ["develop"]
+    return []
+
+
+
 class UvRuntime(Runtime):
     """Resolve a Python via ``uv`` and install the repo so collection works.
 
@@ -506,16 +525,38 @@ class UvRuntime(Runtime):
             self.interpreter = venv_python
             self.description = f"uv-managed python{self.version} at {venv_python} (ephemeral venv)"
 
-        # --- Editable install of the repo so conftests / package imports work ---
+        # --- Editable install with test extras so conftest imports resolve ---
+        # Most repos put pytest/matplotlib/etc. in [project.optional-dependencies]
+        # under a 'test'/'tests'/'testing' extra. Install with those so
+        # `import matplotlib` in conftest.py actually works.
+        extras = _detect_install_extras(self.repo_dir)
+        spec = f".[{','.join(extras)}]" if extras else "."
+        logger.info("  uv pip install -e %s", spec)
         try:
-            subprocess.run(
-                ["uv", "pip", "install", "--python", str(self.interpreter), "-e", "."],
+            install_result = subprocess.run(
+                ["uv", "pip", "install", "--python", str(self.interpreter), "-e", spec],
                 cwd=self.repo_dir,
                 capture_output=True,
                 text=True,
-                timeout=600,
+                timeout=900,
                 check=False,
             )
+            if install_result.returncode != 0:
+                logger.warning(
+                    "  uv pip install -e %s failed (rc=%d); last 400 chars: %s",
+                    spec, install_result.returncode,
+                    (install_result.stderr or install_result.stdout)[-400:],
+                )
+                if extras:
+                    logger.info("  Retrying without extras: uv pip install -e .")
+                    subprocess.run(
+                        ["uv", "pip", "install", "--python", str(self.interpreter), "-e", "."],
+                        cwd=self.repo_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=600,
+                        check=False,
+                    )
         except subprocess.TimeoutExpired:
             logger.warning(
                 "uv pip install . timed out in %s; collection may fail",

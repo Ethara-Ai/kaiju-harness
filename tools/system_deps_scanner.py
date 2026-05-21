@@ -63,15 +63,14 @@ SYSTEM_DEP_MODULES: frozenset[str] = frozenset(
 def scan_imports(source: str) -> set[str]:
     """Extract top-level import module names from a Python source string.
 
-    Handles both ``import x.y.z`` (top-level: ``x``) and ``from x.y import z``
-    (top-level: ``x``). Falls back to regex when AST parsing fails (syntax
-    errors are common in stubbed test fixtures, etc.).
+    Includes BOTH unconditional and conditional imports (those wrapped in
+    ``try/except ImportError``). For the pre-flight gate use
+    :func:`scan_required_imports`, which excludes the conditional ones.
     """
     names: set[str] = set()
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
-        # Fallback regex: catch common ``import X`` / ``from X import ...`` lines
         import re
 
         for m in re.finditer(
@@ -92,6 +91,87 @@ def scan_imports(source: str) -> set[str]:
             if node.module and node.level == 0:
                 names.add(node.module.split(".")[0])
     return names
+
+
+# Exception classes treated as "optional-import signaling" — catching any of
+# these around an import means the code is prepared for it to be absent.
+_OPTIONAL_IMPORT_EXCEPTIONS = frozenset(
+    {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
+)
+
+
+def _handler_catches_optional_import(handler: ast.ExceptHandler) -> bool:
+    """True if this ``except`` clause would swallow an ImportError."""
+    if handler.type is None:  # bare ``except:``
+        return True
+    if isinstance(handler.type, ast.Name):
+        return handler.type.id in _OPTIONAL_IMPORT_EXCEPTIONS
+    if isinstance(handler.type, ast.Tuple):
+        return any(
+            isinstance(e, ast.Name) and e.id in _OPTIONAL_IMPORT_EXCEPTIONS
+            for e in handler.type.elts
+        )
+    if isinstance(handler.type, ast.Attribute):
+        # e.g. ``except builtins.ImportError`` (rare but legal)
+        return handler.type.attr in _OPTIONAL_IMPORT_EXCEPTIONS
+    return False
+
+
+class _RequiredImportCollector(ast.NodeVisitor):
+    """Collect top-level imports NOT wrapped in ``try/except ImportError``."""
+
+    def __init__(self) -> None:
+        self.required: set[str] = set()
+        self._optional_depth = 0
+
+    def visit_Try(self, node: ast.Try) -> None:
+        catches_optional = any(
+            _handler_catches_optional_import(h) for h in node.handlers
+        )
+        if catches_optional:
+            self._optional_depth += 1
+            for stmt in node.body:
+                self.visit(stmt)
+            self._optional_depth -= 1
+        else:
+            for stmt in node.body:
+                self.visit(stmt)
+        for handler in node.handlers:
+            self.visit(handler)
+        for stmt in node.orelse:
+            self.visit(stmt)
+        for stmt in node.finalbody:
+            self.visit(stmt)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        if self._optional_depth > 0:
+            return
+        for alias in node.names:
+            self.required.add(alias.name.split(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if self._optional_depth > 0:
+            return
+        if node.module and node.level == 0:
+            self.required.add(node.module.split(".")[0])
+
+
+def scan_required_imports(source: str) -> set[str]:
+    """Like :func:`scan_imports` but excludes imports inside ``try/except``
+    blocks that catch ``ImportError`` (or one of its supertypes).
+
+    Why: these are *optional* imports — the surrounding code already handles
+    their absence (e.g. ``try: import ROOT; except ImportError: pytest.skip()``).
+    A pre-flight gate that short-circuits on them produces false positives.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        # Regex fallback can't see try-blocks — caller will treat all as required.
+        return scan_imports(source)
+    collector = _RequiredImportCollector()
+    collector.visit(tree)
+    return collector.required
 
 
 def scan_repo_for_system_deps(
@@ -144,7 +224,7 @@ def scan_repo_for_system_deps(
         except OSError:
             continue
         scanned += 1
-        imports = scan_imports(source)
+        imports = scan_required_imports(source)
         hits = imports & SYSTEM_DEP_MODULES
         if hits:
             found.update(hits)
