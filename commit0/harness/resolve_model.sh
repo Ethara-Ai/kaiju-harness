@@ -65,7 +65,7 @@ resolve_model() {
             MODEL_NAME="$arg"
             MODEL_SHORT=$(echo "$arg" | sed 's|.*/||' | tr -dc 'a-zA-Z0-9._-' | cut -c1-20)
             [[ -z "$MODEL_SHORT" ]] && MODEL_SHORT="custom"
-            if [[ "$arg" == bedrock/*claude* || "$arg" == bedrock/*anthropic* ]]; then
+            if [[ "$arg" == bedrock/*claude* || "$arg" == bedrock/*anthropic* || "$arg" == anthropic/*claude* || "$arg" == anthropic/* ]]; then
                 CACHE_PROMPTS="true"
             else
                 CACHE_PROMPTS="false"

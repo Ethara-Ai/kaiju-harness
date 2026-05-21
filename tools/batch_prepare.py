@@ -349,7 +349,7 @@ def generate_and_install_test_ids(
     results = generate_for_dataset(
         dataset_path=dataset_path,
         output_dir=output_dir,
-        use_docker=True,
+        prefer=["docker"],
         validate_base=validate_base,
     )
 

@@ -43,7 +43,8 @@ REQUIRED_FIELDS = {
     "src_dir": str,
 }
 
-SETUP_FIELDS = {
+# Required setup fields — every entry must have these.
+REQUIRED_SETUP_FIELDS = {
     "install",
     "packages",
     "pip_packages",
@@ -51,6 +52,15 @@ SETUP_FIELDS = {
     "python",
     "specification",
 }
+# Optional setup fields produced by newer pipeline runs. Missing is OK; the
+# validator only flags presence-with-wrong-type.
+OPTIONAL_SETUP_FIELDS = {
+    "version_source",
+    "version_conflicts",
+    "system_deps_hint",
+    "test_collection_status",
+}
+SETUP_FIELDS = REQUIRED_SETUP_FIELDS | OPTIONAL_SETUP_FIELDS
 TEST_FIELDS = {"test_cmd", "test_dir"}
 
 
@@ -67,7 +77,7 @@ def validate_entry(entry: dict, index: int) -> list[str]:
             )
 
     if "setup" in entry and isinstance(entry["setup"], dict):
-        missing_setup = SETUP_FIELDS - set(entry["setup"].keys())
+        missing_setup = REQUIRED_SETUP_FIELDS - set(entry["setup"].keys())
         if missing_setup:
             issues.append(f"[{index}] setup missing fields: {missing_setup}")
 

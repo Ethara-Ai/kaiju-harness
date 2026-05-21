@@ -728,12 +728,46 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
 
     spec_url = _detect_spec_url(repo_dir)
 
+    # Detect node version via canonical detector (single source of truth shared with spec_ts.py).
+    from commit0.harness.constants_ts import (
+        DEFAULT_NODE_VERSION,
+        SUPPORTED_NODE_VERSIONS,
+    )
+    from tools.node_version import detect as _detect_node
+    from tools._versioning import NoSignalsError, VersionConflictError
+
+    try:
+        det = _detect_node(
+            repo_dir,
+            SUPPORTED_NODE_VERSIONS,
+            fallback=DEFAULT_NODE_VERSION,
+        )
+        node_version_value = det.version or DEFAULT_NODE_VERSION
+        version_source = det.source
+        version_conflicts = det.conflicts
+    except VersionConflictError as exc:
+        logger.error("Node version conflict: %s", exc)
+        node_version_value = DEFAULT_NODE_VERSION
+        version_source = "conflict-fallback"
+        version_conflicts = [
+            f"{src}: {reason}" for src, reason in exc.rejecting_sources.items()
+        ]
+    except NoSignalsError:  # only when strict=True; defensive
+        node_version_value = DEFAULT_NODE_VERSION
+        version_source = "default"
+        version_conflicts = []
+
     setup_dict = {
-        "node_version": "20",
+        # IMPORTANT: spec_ts.py:_get_node_version reads setup["node"] — NOT
+        # setup["node_version"]. The legacy hardcoded "node_version" key was
+        # never read by the spec, silently defaulting every entry.
+        "node": node_version_value,
         "install": install_cmd,
         "packages": packages,
         "pre_install": [],
         "specification": spec_url,
+        "version_source": version_source,
+        "version_conflicts": version_conflicts,
     }
 
     prefix = _exec_prefix(pkg_manager)

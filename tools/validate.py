@@ -242,37 +242,22 @@ def count_python_files(repo_dir: Path) -> dict:
 
 
 def detect_python_version(repo_dir: Path) -> str | None:
-    """Detect required Python version from config files."""
-    # Check pyproject.toml
-    pyproject = repo_dir / "pyproject.toml"
-    if pyproject.exists():
-        content = pyproject.read_text(errors="replace")
-        # requires-python = ">=3.8"
-        m = re.search(r'requires-python\s*=\s*["\']([^"\']+)["\']', content)
-        if m:
-            return m.group(1)
-        # python_requires = ">=3.8"
-        m = re.search(r'python_requires\s*=\s*["\']([^"\']+)["\']', content)
-        if m:
-            return m.group(1)
+    """Detect the canonical Python ``X.Y`` version for ``repo_dir``.
 
-    # Check setup.cfg
-    setup_cfg = repo_dir / "setup.cfg"
-    if setup_cfg.exists():
-        content = setup_cfg.read_text(errors="replace")
-        m = re.search(r"python_requires\s*=\s*(.+)", content)
-        if m:
-            return m.group(1).strip()
-
-    # Check setup.py
-    setup_py = repo_dir / "setup.py"
-    if setup_py.exists():
-        content = setup_py.read_text(errors="replace")
-        m = re.search(r'python_requires\s*=\s*["\']([^"\']+)["\']', content)
-        if m:
-            return m.group(1)
-
-    return None
+    Delegates to :func:`tools.python_version.detect` — the single source of
+    truth shared with :mod:`tools.prepare_repo`. Returns ``None`` if no
+    signals exist or if signals conflict (so the caller can flag the repo).
+    """
+    from commit0.harness.constants import SUPPORTED_PYTHON_VERSIONS
+    from tools.python_version import (
+        NoSignalsError,
+        VersionConflictError,
+        detect as _detect,
+    )
+    try:
+        return _detect(repo_dir, SUPPORTED_PYTHON_VERSIONS).version
+    except (VersionConflictError, NoSignalsError):
+        return None
 
 
 def detect_install_method(repo_dir: Path) -> dict:
@@ -695,12 +680,8 @@ def validate_candidates(
         # Docker-based test execution (optional)
         if run_tests and not issues:
             logger.info("  Running tests in Docker...")
-            python_ver = "3.12"
-            if analysis["python_version"]:
-                # Extract minimum version from requires-python
-                m = re.search(r"(\d+\.\d+)", analysis["python_version"])
-                if m:
-                    python_ver = m.group(1)
+            from commit0.harness.constants import DEFAULT_PYTHON_VERSION
+            python_ver = analysis["python_version"] or DEFAULT_PYTHON_VERSION
 
             test_results = run_tests_in_docker(
                 repo_dir, full_name, python_version=python_ver

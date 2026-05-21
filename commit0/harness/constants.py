@@ -4,7 +4,13 @@ from typing import Dict, ItemsView, KeysView
 from pydantic import BaseModel
 
 # Supported Python versions for per-version base Docker images
-SUPPORTED_PYTHON_VERSIONS = {"3.10", "3.12", "3.13"}
+SUPPORTED_PYTHON_VERSIONS = {"3.9", "3.10", "3.11", "3.12", "3.13"}
+
+# Default Python version when a dataset entry has no `setup.python` field.
+# Should only be used as a last-resort fallback — `prepare_repo.py` is
+# responsible for populating this field for every entry. If you see this
+# default being hit at runtime, something upstream skipped detection.
+DEFAULT_PYTHON_VERSION = "3.12"
 
 # Path to the directory containing per-version Dockerfile templates
 DOCKERFILES_DIR = Path(__file__).parent / "dockerfiles"

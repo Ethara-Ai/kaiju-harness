@@ -259,25 +259,36 @@ def _scrape_and_commit_spec(
 
 
 def _detect_c_standard(repo_dir: Path) -> str:
-    """Detect the C language standard from CMakeLists.txt.
+    """Backward-compat wrapper around :func:`tools.cpp_version.detect_c`."""
+    from tools.cpp_version import detect_c
 
-    Looks for ``set(CMAKE_C_STANDARD <N>)`` and ``-std=cNN`` patterns.
-    Defaults to ``"11"`` (widely supported) when no standard is declared.
-    """
-    import re
+    return detect_c(repo_dir).version or "11"
 
-    cmake = repo_dir / "CMakeLists.txt"
-    if cmake.exists():
-        text = cmake.read_text(errors="replace")
-        m = re.search(
-            r"set\s*\(\s*CMAKE_C_STANDARD\s+(\d+)\s*\)", text, re.IGNORECASE
-        )
-        if m:
-            return m.group(1)
-        m = re.search(r"-std=c(\d+)", text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-    return "11"
+
+def _detect_c_standard_full(repo_dir: Path):
+    """Return the full :class:`CDetectionResult` for provenance tracking."""
+    from tools.cpp_version import detect_c
+
+    return detect_c(repo_dir)
+
+
+def _build_c_setup(repo_path: Path, cmake_flags: str, spec_url: str) -> dict:
+    """Build the ``setup`` dict for a C entry with full version provenance."""
+    det = _detect_c_standard_full(repo_path)
+    return {
+        "build_system": "cmake",
+        "c_standard": det.version or "11",
+        "packages": "",
+        "cmake_flags": cmake_flags,
+        "pre_install": [],
+        "specification": spec_url,
+        "install": (
+            "cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "
+            "-DBUILD_TESTING=ON && cmake --build build -j$(nproc)"
+        ),
+        "version_source": det.source,
+        "version_conflicts": det.conflicts,
+    }
 
 
 def prepare_one(
@@ -399,15 +410,7 @@ def prepare_one(
         "reference_commit": reference_commit,
         "language": "c",
         "src_dir": ".",
-        "setup": {
-            "build_system": "cmake",
-            "c_standard": _detect_c_standard(repo_path),
-            "packages": "",
-            "cmake_flags": cmake_flags,
-            "pre_install": [],
-            "specification": spec_url,
-            "install": "cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON && cmake --build build -j$(nproc)",
-        },
+        "setup": _build_c_setup(repo_path, cmake_flags, spec_url),
         "test": {
             "framework": "ctest",
             "test_cmd": (

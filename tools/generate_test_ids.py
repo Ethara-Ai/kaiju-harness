@@ -1,20 +1,30 @@
-"""
-Generate pytest test ID files (.bz2) for custom commit0 repos.
+"""Generate pytest test ID files (.bz2) for commit0 repos.
 
-Runs `pytest --collect-only -q` against each repo to discover all test node IDs,
-then saves them as bz2-compressed files compatible with commit0's evaluation harness.
+Runs ``pytest --collect-only`` against each repo via the resolved runtime
+(commit0 venv → uv → docker), discovers test node IDs, and writes bz2-
+compressed lists compatible with the commit0 evaluation harness.
+
+Per-status upload policy (see :class:`tools.python_runtime.TestCollectionStatus`):
+
+* ``OK``                  → upload
+* ``NO_TESTS``            → skip (use ``--lenient`` to upload tagged)
+* ``IMPORT_ERROR``        → skip (use ``--lenient``)
+* ``VERSION_MISMATCH``    → auto-retry once with next-lower compatible Python
+* ``MISSING_SYSTEM_DEPS`` → quarantine (write status, no test IDs)
+* ``TIMEOUT``             → auto-retry once with ``timeout * 2``
+* ``COLLECTION_FAILED``   → skip (use ``--lenient``)
 
 Usage:
-    # From dataset entries JSON:
+    # From a dataset entries JSON (uses entry['setup']['python']):
     python -m tools.generate_test_ids dataset_entries.json --output-dir ./test_ids
 
-    # From a local repo directory:
+    # From a local repo directory (auto-detects version):
     python -m tools.generate_test_ids --repo-dir /path/to/repo --name mylib --output-dir ./test_ids
 
-    # Using Docker (builds image first if needed):
-    python -m tools.generate_test_ids dataset_entries.json --docker --output-dir ./test_ids
+    # Force Docker tier:
+    python -m tools.generate_test_ids dataset_entries.json --prefer docker
 
-    # Install into commit0 data directory:
+    # Install bz2 files into commit0's data directory:
     python -m tools.generate_test_ids dataset_entries.json --install
 """
 
@@ -27,17 +37,42 @@ import logging
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
-import docker
-import docker.errors
-import requests.exceptions
-
-from commit0.harness.docker_utils import get_docker_platform
+from tools.python_runtime import (
+    NoRuntimeError,
+    TestCollectionResult,
+    TestCollectionStatus,
+    next_lower_supported,
+    resolve_runtime,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# Statuses that auto-retry once
+_RETRY_STATUSES = {
+    TestCollectionStatus.VERSION_MISMATCH,
+    TestCollectionStatus.TIMEOUT,
+}
+
+# Statuses where the entry should be written (with status tag) even though
+# no test IDs were collected. Distinct from the upload-or-skip decision,
+# which is policy-controlled via --lenient.
+_NON_OK_STATUSES = {
+    TestCollectionStatus.NO_TESTS,
+    TestCollectionStatus.IMPORT_ERROR,
+    TestCollectionStatus.VERSION_MISMATCH,
+    TestCollectionStatus.MISSING_SYSTEM_DEPS,
+    TestCollectionStatus.TIMEOUT,
+    TestCollectionStatus.COLLECTION_FAILED,
+    TestCollectionStatus.RUNTIME_UNAVAILABLE,
+}
+
+
+# ---------------------------------------------------------------------------
+# Test ID parsing (unchanged from pre-refactor — battle-tested)
+# ---------------------------------------------------------------------------
 
 
 def _normalize_test_ids(test_ids: list[str], test_dir: str) -> list[str]:
@@ -59,7 +94,6 @@ def _normalize_test_ids(test_ids: list[str], test_dir: str) -> list[str]:
     for tid in test_ids:
         if not tid.strip():
             continue
-        # Extract the file path part (before first ::)
         file_part = tid.split("::")[0]
         if not file_part.startswith(prefix) and not file_part.startswith("/"):
             tid = prefix + tid
@@ -80,24 +114,18 @@ def _parse_collect_output(stdout: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        # Skip separator / summary / error lines
         if line.startswith(("=", "-", "no tests ran")):
             continue
         if "error" in line.lower() and "::" not in line:
             continue
 
-        # Verbose format: <Module path>::<Class name>::<Function name>
         if line.startswith("<") and "::" in line:
-            # Extract node-id: strip <Type ...> wrappers
             parts = line.split("::")
             id_parts: list[str] = []
             for part in parts:
                 part = part.strip()
                 if part.startswith("<") and part.endswith(">"):
-                    # <Module tests/test_foo.py> → tests/test_foo.py
-                    # <Class TestFoo> → TestFoo
                     inner = part[1:-1]
-                    # First word is the type, rest is the name
                     idx = inner.find(" ")
                     if idx != -1:
                         id_parts.append(inner[idx + 1 :])
@@ -109,7 +137,6 @@ def _parse_collect_output(stdout: str) -> list[str]:
                 test_ids.append("::".join(id_parts))
             continue
 
-        # Quiet format: path::class::method or path::method
         if "::" in line:
             test_id = line.split(" ")[0]
             if test_id:
@@ -118,171 +145,134 @@ def _parse_collect_output(stdout: str) -> list[str]:
     return test_ids
 
 
-def collect_test_ids_local(
+# ---------------------------------------------------------------------------
+# Collection entry points
+# ---------------------------------------------------------------------------
+
+
+def collect_test_ids(
     repo_dir: Path,
-    test_dir: str = "tests",
-    test_cmd: str = "pytest",
-    timeout: int = 300,
-) -> list[str]:
-    """Run pytest --collect-only in a local repo directory to discover test IDs.
-
-    Uses verbose output first (handles unittest-style tests), falls back to
-    quiet mode if verbose yields nothing.
-    """
-    # Try verbose first (handles unittest-style tests that don't show :: in -q mode)
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        "--collect-only",
-        "--override-ini=addopts=",
-        "-p",
-        "no:cacheprovider",
-        test_dir,
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("  pytest --collect-only timed out after %ds", timeout)
-        return []
-
-    test_ids = _parse_collect_output(result.stdout)
-
-    # Fallback: try quiet mode (faster, works for standard test suites)
-    if not test_ids:
-        cmd_q = [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--collect-only",
-            "-q",
-            "--no-header",
-            "--override-ini=addopts=",
-            "-p",
-            "no:cacheprovider",
-            test_dir,
-        ]
-        try:
-            result_q = subprocess.run(
-                cmd_q,
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            test_ids = _parse_collect_output(result_q.stdout)
-        except subprocess.TimeoutExpired:
-            logger.debug("Quiet-mode collect timed out for %s", repo_dir)
-
-    return test_ids
-
-
-def _find_docker_image(repo_name: str) -> str | None:
-    """Find a built Docker image for this repo by searching commit0.repo.<name>.* tags."""
-    try:
-        client = docker.from_env()
-        short_name = repo_name.split("__")[-1].split("-")[0].lower()
-        needle = f"commit0.repo.{short_name}."
-        for image in client.images.list():
-            for tag in image.tags:
-                if tag.startswith(needle):
-                    return tag
-        return None
-    except Exception:
-        logger.debug("Failed to find Docker image for %s", repo_name, exc_info=True)
-        return None
-
-
-def collect_test_ids_docker(
-    repo_name: str,
-    test_dir: str = "tests",
-    image_name: str | None = None,
+    python_version: str,
+    *,
+    repo_name: str | None = None,
     reference_commit: str | None = None,
+    test_dir: str = "tests",
     timeout: int = 300,
-) -> list[str]:
-    """Run pytest --collect-only inside a Docker container.
+    prefer: list[str] | None = None,
+    explicit_interpreter: Path | None = None,
+    supported_versions: set[str] | None = None,
+    allow_retry: bool = True,
+) -> TestCollectionResult:
+    """Resolve the right runtime for ``python_version`` and collect test IDs.
 
-    If reference_commit is provided, checks out the original (un-stubbed) code first
-    so that test collection doesn't fail on import errors from removed functions.
+    Auto-retries on :attr:`TestCollectionStatus.VERSION_MISMATCH` (next lower
+    supported Python) and :attr:`TestCollectionStatus.TIMEOUT` (2x timeout).
+    Set ``allow_retry=False`` to disable the retry pass.
     """
-    if image_name is None:
-        image_name = _find_docker_image(repo_name)
-        if image_name is None:
-            image_name = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
+    if supported_versions is None:
+        from commit0.harness.constants import SUPPORTED_PYTHON_VERSIONS
 
-    checkout = f"git checkout {reference_commit} -- . && " if reference_commit else ""
+        supported_versions = set(SUPPORTED_PYTHON_VERSIONS)
 
-    client = docker.from_env()
+    try:
+        runtime = resolve_runtime(
+            python_version=python_version,
+            repo_dir=repo_dir,
+            repo_name=repo_name,
+            reference_commit=reference_commit,
+            prefer=prefer,
+            explicit_interpreter=explicit_interpreter,
+        )
+    except NoRuntimeError as exc:
+        logger.error("No runtime for %s @ python%s: %s", repo_dir, python_version, exc)
+        return TestCollectionResult(
+            test_ids=[],
+            status=TestCollectionStatus.RUNTIME_UNAVAILABLE,
+            stderr_snippet=str(exc),
+        )
 
-    bash_cmd = (
-        f"cd /testbed && {checkout}"
-        f"python -m pytest --collect-only --override-ini='addopts=' "
-        f"-p no:cacheprovider {test_dir} 2>&1; true"
+    logger.info("  Runtime: %s", runtime.describe())
+    result = runtime.collect_test_ids(
+        repo_dir=repo_dir,
+        test_dir=test_dir,
+        timeout=timeout,
+        parse_fn=_parse_collect_output,
     )
 
-    try:
-        raw = client.containers.run(
-            image_name,
-            command=f"bash -c '{bash_cmd}'",
-            remove=True,
-            platform=get_docker_platform(),
+    if result.status == TestCollectionStatus.OK:
+        result = TestCollectionResult(
+            test_ids=_normalize_test_ids(result.test_ids, test_dir),
+            status=TestCollectionStatus.OK,
         )
-        stdout = (
-            raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-        )
-    except docker.errors.ContainerError as e:
-        raw_err = e.stderr
-        stdout = (
-            raw_err.decode("utf-8", errors="replace")
-            if isinstance(raw_err, bytes)
-            else (raw_err or "")
-        )
-    except requests.exceptions.ReadTimeout:
-        logger.warning("  Docker pytest --collect-only timed out after %ds", timeout)
-        return []
+        return result
 
-    test_ids = _parse_collect_output(stdout)
+    if not allow_retry or result.status not in _RETRY_STATUSES:
+        return result
 
-    if not test_ids:
-        bash_cmd_q = (
-            f"cd /testbed && {checkout}"
-            f"python -m pytest --collect-only -q --no-header --override-ini='addopts=' "
-            f"-p no:cacheprovider {test_dir} 2>&1; true"
-        )
-        try:
-            raw_q = client.containers.run(
-                image_name,
-                command=f"bash -c '{bash_cmd_q}'",
-                remove=True,
-                platform=get_docker_platform(),
-            )
-            stdout_q = (
-                raw_q.decode("utf-8", errors="replace")
-                if isinstance(raw_q, bytes)
-                else raw_q
-            )
-        except docker.errors.ContainerError as e:
-            raw_err_q = e.stderr
-            stdout_q = (
-                raw_err_q.decode("utf-8", errors="replace")
-                if isinstance(raw_err_q, bytes)
-                else (raw_err_q or "")
-            )
-        except requests.exceptions.ReadTimeout:
+    # ---- retry pass ----
+    if result.status == TestCollectionStatus.TIMEOUT:
+        # Two-step retry ladder: 2x then 4x (capped at 900s).
+        # Most timeouts that aren't true infinite-loops finish well under 2x;
+        # 4x catches large-suite outliers without unbounded waits.
+        retry_result: TestCollectionResult = result
+        for factor in (2, 4):
+            retry_timeout = min(timeout * factor, 900)
+            if retry_timeout <= timeout:
+                break  # nothing to gain from a non-increasing retry
             logger.warning(
-                "Docker pytest --collect-only -q fallback timed out for %s", repo_name
+                "  Collection timed out; retrying with %ds (was %ds, factor=%dx)",
+                retry_timeout, timeout, factor,
             )
-            return []
-        test_ids = _parse_collect_output(stdout_q)
+            retry_result = runtime.collect_test_ids(
+                repo_dir=repo_dir,
+                test_dir=test_dir,
+                timeout=retry_timeout,
+                parse_fn=_parse_collect_output,
+            )
+            if retry_result.status == TestCollectionStatus.OK:
+                return TestCollectionResult(
+                    test_ids=_normalize_test_ids(retry_result.test_ids, test_dir),
+                    status=TestCollectionStatus.OK,
+                )
+            if retry_result.status != TestCollectionStatus.TIMEOUT:
+                return retry_result  # different failure now — stop retrying
+        return retry_result
 
-    return test_ids
+    if result.status == TestCollectionStatus.VERSION_MISMATCH:
+        next_ver = next_lower_supported(python_version, supported_versions)
+        if next_ver is None:
+            logger.warning(
+                "  Version mismatch but no lower supported Python available "
+                "(current %s, missing %s)",
+                python_version,
+                result.failing_module,
+            )
+            return result
+        logger.warning(
+            "  Version mismatch on '%s' — retrying with Python %s (was %s)",
+            result.failing_module,
+            next_ver,
+            python_version,
+        )
+        return collect_test_ids(
+            repo_dir=repo_dir,
+            python_version=next_ver,
+            repo_name=repo_name,
+            reference_commit=reference_commit,
+            test_dir=test_dir,
+            timeout=timeout,
+            prefer=prefer,
+            explicit_interpreter=None,  # let the resolver re-pick for new version
+            supported_versions=supported_versions,
+            allow_retry=False,  # one retry only — no infinite chain
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Base-commit validation (Docker only — exercised by --validate-base)
+# ---------------------------------------------------------------------------
 
 
 def validate_base_commit_docker(
@@ -291,77 +281,52 @@ def validate_base_commit_docker(
     image_name: str | None = None,
     timeout: int = 300,
 ) -> tuple[int, str]:
-    """Run pytest --collect-only at base_commit (stubbed code) inside Docker.
+    """Run ``pytest --collect-only`` at base_commit (stubbed code) inside Docker.
 
-    Returns (tests_collected, stderr_snippet).
-    If tests_collected == 0, the stubbed code breaks imports and the pipeline will fail.
+    Returns ``(tests_collected, stderr_snippet)``. ``tests_collected == 0``
+    means the stubbed code broke imports — the pipeline will produce a 0%
+    pass rate.
     """
-    if image_name is None:
-        image_name = _find_docker_image(repo_name)
-        if image_name is None:
-            image_name = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
+    from tools.python_runtime import DockerRuntime, find_docker_image_for_repo
 
-    client = docker.from_env()
-
-    bash_cmd = (
-        f"cd /testbed && "
-        f"python -m pytest --collect-only --override-ini='addopts=' "
-        f"-p no:cacheprovider {test_dir} 2>&1; true"
-    )
+    image = image_name or find_docker_image_for_repo(repo_name)
+    if image is None:
+        image = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
 
     try:
-        raw = client.containers.run(
-            image_name,
-            command=f"bash -c '{bash_cmd}'",
-            remove=True,
-            platform=get_docker_platform(),
-        )
-        stdout = (
-            raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-        )
-    except docker.errors.ContainerError as e:
-        raw_err = e.stderr
-        stdout = (
-            raw_err.decode("utf-8", errors="replace")
-            if isinstance(raw_err, bytes)
-            else (raw_err or "")
-        )
-    except requests.exceptions.ReadTimeout:
-        return 0, "timeout"
+        runtime = DockerRuntime(image=image)
+    except Exception as exc:  # noqa: BLE001
+        return 0, f"docker init failed: {exc}"
 
-    test_ids = _parse_collect_output(stdout)
-    # Fallback: if parser found 0 IDs but pytest summary reports tests were collected,
-    # return the summary count so the pipeline knows collection partially worked.
-    if not test_ids:
-        m = re.search(r"(\d+)\s+tests?\s+collected", stdout)
-        if m:
-            count = int(m.group(1))
-            logger.info(
-                "  Parser found 0 individual test IDs but summary reports %d collected; "
-                "reporting summary count",
-                count,
-            )
-            stderr_snippet = stdout[-500:] if stdout else ""
-            return count, stderr_snippet
-    stderr_snippet = stdout[-500:] if stdout else ""
-    return len(test_ids), stderr_snippet
+    result = runtime.collect_test_ids(
+        repo_dir=Path.cwd(),  # ignored by DockerRuntime (uses container path)
+        test_dir=test_dir,
+        timeout=timeout,
+        parse_fn=_parse_collect_output,
+    )
+    if result.status == TestCollectionStatus.OK:
+        return len(result.test_ids), ""
+    # Try parsing the summary line for a count even when individual IDs failed
+    snippet = result.stderr_snippet
+    m = re.search(r"(\d+)\s+tests?\s+collected", snippet)
+    if m:
+        return int(m.group(1)), snippet[-500:]
+    return 0, snippet[-500:]
 
 
-def save_test_ids(
-    test_ids: list[str],
-    name: str,
-    output_dir: Path,
-) -> Path:
+# ---------------------------------------------------------------------------
+# Output writers
+# ---------------------------------------------------------------------------
+
+
+def save_test_ids(test_ids: list[str], name: str, output_dir: Path) -> Path:
     """Save test IDs as a bz2-compressed file."""
     output_dir.mkdir(parents=True, exist_ok=True)
-
     name = name.lower().replace(".", "-")
     output_file = output_dir / f"{name}.bz2"
-
     content = "\n".join(test_ids)
     with bz2.open(output_file, "wt") as f:
         f.write(content)
-
     return output_file
 
 
@@ -372,23 +337,21 @@ def install_test_ids(
     """Copy test ID .bz2 files into commit0's data directory."""
     try:
         import commit0
-
-        data_dir = Path(os.path.dirname(commit0.__file__)) / "data" / "test_ids"
     except ImportError:
         logger.error("commit0 package not found — cannot install test IDs")
         return 0
 
+    data_dir = Path(os.path.dirname(commit0.__file__)) / "data" / "test_ids"
     data_dir.mkdir(parents=True, exist_ok=True)
     installed = 0
+
+    import shutil
 
     for bz2_file in sorted(source_dir.glob("*.bz2")):
         name = bz2_file.stem
         if repo_names and name not in [r.lower().replace(".", "-") for r in repo_names]:
             continue
-
         dest = data_dir / bz2_file.name
-        import shutil
-
         shutil.copy2(bz2_file, dest)
         logger.info("  Installed: %s -> %s", bz2_file.name, dest)
         installed += 1
@@ -406,27 +369,52 @@ def _find_repo_dir(
     candidates = [fork_repo]
     if original_repo and original_repo != fork_repo:
         candidates.append(original_repo)
-
     for name in candidates:
         candidate = base / name.replace("/", "__")
         if candidate.is_dir():
             return candidate
-
     return None
+
+
+# ---------------------------------------------------------------------------
+# Per-entry orchestration
+# ---------------------------------------------------------------------------
+
+
+def _should_upload(status: TestCollectionStatus, lenient: bool) -> bool:
+    """Per-status upload decision.
+
+    OK is always uploaded. Non-OK statuses are uploaded only when ``lenient``
+    is set — and even then, MISSING_SYSTEM_DEPS is always quarantined because
+    the test list would be misleading.
+    """
+    if status == TestCollectionStatus.OK:
+        return True
+    if status == TestCollectionStatus.MISSING_SYSTEM_DEPS:
+        return False
+    if status == TestCollectionStatus.RUNTIME_UNAVAILABLE:
+        return False
+    return lenient
 
 
 def generate_for_dataset(
     dataset_path: Path,
     output_dir: Path,
-    use_docker: bool = False,
+    *,
     clone_dir: Path | None = None,
     timeout: int = 300,
     max_repos: int | None = None,
     validate_base: bool = False,
-) -> dict[str, int]:
-    """Generate test IDs for all repos in a dataset entries JSON file."""
-    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    prefer: list[str] | None = None,
+    lenient: bool = False,
+    quarantine_dir: Path | None = None,
+) -> dict[str, dict]:
+    """Generate test IDs for all repos in a dataset entries JSON.
 
+    Returns a map ``{repo_name: {status, count, source}}`` for the caller's
+    summary line.
+    """
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and "data" in data:
         entries = data["data"]
     elif isinstance(data, list):
@@ -434,7 +422,7 @@ def generate_for_dataset(
     else:
         raise ValueError(f"Unknown dataset format in {dataset_path}")
 
-    results: dict[str, int] = {}
+    results: dict[str, dict] = {}
 
     for i, entry in enumerate(entries):
         if max_repos and i >= max_repos:
@@ -444,81 +432,344 @@ def generate_for_dataset(
         repo_name = repo.split("/")[-1] if "/" in repo else repo
         test_dir = entry.get("test", {}).get("test_dir", "tests")
         instance_id = entry.get("instance_id", repo_name)
+        python_version = entry.get("setup", {}).get("python")
+        reference_commit = entry.get("reference_commit")
+
+        if not python_version:
+            logger.error(
+                "  Entry %s has no setup.python — run prepare_repo first",
+                instance_id,
+            )
+            results[repo_name] = {
+                "status": TestCollectionStatus.RUNTIME_UNAVAILABLE.value,
+                "count": 0,
+                "source": "no-python-field",
+            }
+            continue
 
         logger.info(
-            "\n[%d/%d] Collecting test IDs for %s...",
+            "\n[%d/%d] Collecting test IDs for %s (python=%s)...",
             i + 1,
             min(len(entries), max_repos or len(entries)),
             instance_id,
+            python_version,
         )
 
-        if use_docker:
-            test_ids = collect_test_ids_docker(
-                repo_name=repo_name,
-                test_dir=test_dir,
-                reference_commit=entry.get("reference_commit"),
-                timeout=timeout,
+        repo_dir = _find_repo_dir(clone_dir, repo, entry.get("original_repo", ""))
+        if repo_dir is None and "docker" not in (prefer or ["docker"]):
+            logger.warning(
+                "  Repo dir not found — skipping (tried fork + original name)"
             )
-            test_ids = _normalize_test_ids(test_ids, test_dir)
-        else:
-            repo_dir = _find_repo_dir(clone_dir, repo, entry.get("original_repo", ""))
+            results[repo_name] = {
+                "status": TestCollectionStatus.RUNTIME_UNAVAILABLE.value,
+                "count": 0,
+                "source": "no-repo-dir",
+            }
+            continue
 
-            if not repo_dir or not repo_dir.is_dir():
-                logger.warning(
-                    "  Repo dir not found — skipping (tried fork + original name)"
+        if repo_dir is not None and reference_commit:
+            try:
+                subprocess.run(
+                    ["git", "checkout", reference_commit],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True,
                 )
-                results[repo_name] = 0
-                continue
+            except Exception as e:  # noqa: BLE001
+                logger.warning("  Could not checkout reference_commit: %s", e)
 
-            reference_commit = entry.get("reference_commit")
-            if reference_commit:
-                try:
-                    subprocess.run(
-                        ["git", "checkout", reference_commit],
-                        cwd=repo_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        check=True,
-                    )
-                except Exception as e:
-                    logger.warning("  Could not checkout reference_commit: %s", e)
+        result = collect_test_ids(
+            repo_dir=repo_dir or Path.cwd(),
+            python_version=python_version,
+            repo_name=repo,
+            reference_commit=reference_commit,
+            test_dir=test_dir,
+            timeout=timeout,
+            prefer=prefer,
+        )
 
-            test_ids = collect_test_ids_local(
-                repo_dir=repo_dir,
-                test_dir=test_dir,
-                timeout=timeout,
-            )
-            test_ids = _normalize_test_ids(test_ids, test_dir)
+        upload = _should_upload(result.status, lenient)
 
-        if test_ids:
-            out_file = save_test_ids(test_ids, repo_name, output_dir)
-            logger.info("  Saved %d test IDs to %s", len(test_ids), out_file)
-            results[repo_name] = len(test_ids)
+        if result.status == TestCollectionStatus.OK:
+            out_file = save_test_ids(result.test_ids, repo_name, output_dir)
+            logger.info("  Saved %d test IDs to %s", len(result.test_ids), out_file)
 
-            if validate_base and use_docker:
+            if validate_base and "docker" in (prefer or []):
                 base_collected, stderr = validate_base_commit_docker(
-                    repo_name=repo_name,
+                    repo_name=repo,
                     test_dir=test_dir,
                     timeout=timeout,
                 )
                 if base_collected == 0:
                     logger.warning(
                         "  ⚠ BASE COMMIT VALIDATION FAILED: 0 tests collected at base_commit (stubbed code)."
-                        " The import chain is broken — pipeline will produce 0%% pass rate."
                     )
                     logger.warning("  Last output: %s", stderr[:200])
-                    results[repo_name] = -len(test_ids)
-                else:
-                    logger.info(
-                        "  ✓ Base commit validation: %d tests collected at base_commit",
-                        base_collected,
-                    )
         else:
-            logger.warning("  No test IDs collected for %s", repo_name)
-            results[repo_name] = 0
+            logger.warning(
+                "  status=%s (failing_module=%s)",
+                result.status.value,
+                result.failing_module,
+            )
+            if upload:
+                save_test_ids(
+                    result.test_ids,
+                    repo_name,
+                    output_dir,
+                )
+                logger.info(
+                    "  --lenient: wrote %d test IDs (status=%s)",
+                    len(result.test_ids),
+                    result.status.value,
+                )
+            elif quarantine_dir is not None:
+                quarantine_dir.mkdir(parents=True, exist_ok=True)
+                (quarantine_dir / f"{repo_name.lower().replace('.', '-')}.json").write_text(
+                    json.dumps(
+                        {
+                            "repo": repo,
+                            "status": result.status.value,
+                            "failing_module": result.failing_module,
+                            "stderr_snippet": result.stderr_snippet,
+                        },
+                        indent=2,
+                    )
+                )
+
+        results[repo_name] = {
+            "status": result.status.value,
+            "count": len(result.test_ids),
+            "source": result.failing_module or "",
+        }
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# --repo-dir mode helpers (P0-A/P0-B/P1-B — see MISSING_TEST_IDS_BZ2_ISSUE.md)
+# ---------------------------------------------------------------------------
+
+
+_BREADCRUMB_RELATIVE = Path(".kaiju/entries.json")
+
+
+def _discover_breadcrumb(
+    repo_dir: Path,
+    *,
+    name: str | None,
+    output_dir: Path | None,
+    explicit: Path | None,
+) -> dict | None:
+    """Locate the ``.kaiju/entries.json`` breadcrumb for ``repo_dir``.
+
+    Search order (first hit wins):
+
+      1. ``explicit`` (CLI ``--entries-json`` override)
+      2. ``repo_dir/.kaiju/entries.json`` (written by ``prepare_repo.py``)
+      3. ``output_dir/<name>_entries.json`` (Argo-wrapper convention)
+      4. ``repo_dir/../<name>_entries.json``
+      5. ``repo_dir/../entries.json``
+    """
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit)
+    candidates.append(repo_dir / _BREADCRUMB_RELATIVE)
+    if name:
+        if output_dir is not None:
+            candidates.append(output_dir / f"{name}_entries.json")
+        candidates.append(repo_dir.parent / f"{name}_entries.json")
+    candidates.append(repo_dir.parent / "entries.json")
+
+    for path in candidates:
+        if not path or not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        # Accept either the breadcrumb schema or a raw entries list/dict
+        if isinstance(data, list) and data:
+            data = data[0]
+        if isinstance(data, dict) and ("setup" in data or "test" in data):
+            logger.info("Using breadcrumb: %s", path)
+            return data
+    return None
+
+
+def _resolve_repo_dir_args(
+    *,
+    repo_dir: Path,
+    name: str,
+    cli_python_version: str | None,
+    cli_test_dir: str | None,
+    cli_reference_commit: str | None,
+    cli_entries_json: Path | None,
+    output_dir: Path,
+) -> tuple[str, str, str | None, dict | None]:
+    """Resolve (python_version, test_dir, reference_commit, breadcrumb).
+
+    CLI flags > breadcrumb > python_version.detect() / sensible defaults.
+    Returns the breadcrumb dict too so callers can also pull system_deps_hint.
+    """
+    from commit0.harness.constants import (
+        DEFAULT_PYTHON_VERSION,
+        SUPPORTED_PYTHON_VERSIONS,
+    )
+    from tools.python_version import detect as detect_python
+
+    breadcrumb = _discover_breadcrumb(
+        repo_dir,
+        name=name,
+        output_dir=output_dir,
+        explicit=cli_entries_json,
+    )
+    setup = (breadcrumb or {}).get("setup") or {}
+    test_block = (breadcrumb or {}).get("test") or {}
+
+    python_version = (
+        cli_python_version
+        or setup.get("python")
+        or None
+    )
+    if not python_version:
+        det = detect_python(
+            repo_dir,
+            SUPPORTED_PYTHON_VERSIONS,
+            fallback=DEFAULT_PYTHON_VERSION,
+        )
+        python_version = det.version or DEFAULT_PYTHON_VERSION
+        logger.info(
+            "Auto-detected python=%s (source=%s)", python_version, det.source,
+        )
+    test_dir = cli_test_dir or test_block.get("test_dir") or "tests"
+    reference_commit = (
+        cli_reference_commit
+        or (breadcrumb or {}).get("reference_commit")
+    )
+    return python_version, test_dir, reference_commit, breadcrumb
+
+
+class _ReferenceCommitCheckout:
+    """Context manager: checkout ``reference_commit``, restore HEAD on exit.
+
+    Stashes any uncommitted changes (e.g. the stubbed code from prepare_repo)
+    so the checkout doesn't abort with "Your local changes would be overwritten".
+    On exit, restores the original HEAD and pops the stash. Always safe to use
+    — a no-op when ``reference_commit`` is ``None``.
+    """
+
+    def __init__(self, repo_dir: Path, reference_commit: str | None):
+        self.repo_dir = repo_dir
+        self.reference_commit = reference_commit
+        self._prior_head: str | None = None
+        self._stashed = False
+
+    def __enter__(self) -> "_ReferenceCommitCheckout":
+        if not self.reference_commit:
+            return self
+        try:
+            self._prior_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.repo_dir, text=True, timeout=15,
+            ).strip()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            logger.warning("  Cannot rev-parse HEAD before checkout: %s", exc)
+            return self
+        # Stash if dirty (stubbed code is uncommitted at this stage)
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=self.repo_dir, capture_output=True, text=True, timeout=15,
+        )
+        if dirty.stdout.strip():
+            stash = subprocess.run(
+                ["git", "stash", "push", "-u", "-m", "kaiju-generate-test-ids"],
+                cwd=self.repo_dir, capture_output=True, text=True, timeout=30,
+            )
+            self._stashed = stash.returncode == 0
+        try:
+            subprocess.run(
+                ["git", "checkout", self.reference_commit],
+                cwd=self.repo_dir, capture_output=True, text=True,
+                timeout=30, check=True,
+            )
+            logger.info("  Checked out reference_commit=%s", self.reference_commit[:12])
+        except subprocess.CalledProcessError as exc:
+            logger.warning(
+                "  Could not checkout reference_commit %s: %s",
+                self.reference_commit, exc.stderr or exc.stdout,
+            )
+            # Roll back the stash if checkout failed so the worktree returns
+            # to the state the caller expected.
+            self._pop_stash()
+            self._prior_head = None
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._prior_head:
+            subprocess.run(
+                ["git", "checkout", self._prior_head],
+                cwd=self.repo_dir, capture_output=True, text=True,
+                timeout=30, check=False,
+            )
+        self._pop_stash()
+
+    def _pop_stash(self) -> None:
+        if not self._stashed:
+            return
+        subprocess.run(
+            ["git", "stash", "pop"],
+            cwd=self.repo_dir, capture_output=True, text=True,
+            timeout=30, check=False,
+        )
+        self._stashed = False
+
+
+def _write_status_json(
+    *,
+    output_dir: Path,
+    name: str,
+    repo_dir: Path,
+    result: TestCollectionResult,
+    python_version: str,
+    test_dir: str,
+    reference_commit: str | None,
+    bz2_written: bool,
+    extra: dict | None = None,
+) -> Path:
+    """Write the always-emit ``<name>.status.json`` artifact.
+
+    Schema documented in :mod:`MISSING_TEST_IDS_BZ2_ISSUE.md` follow-up.
+    """
+    import datetime
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "name": name,
+        "repo_dir": str(repo_dir),
+        "reference_commit": reference_commit,
+        "python_version": python_version,
+        "test_dir": test_dir,
+        "status": result.status.value,
+        "test_count": len(result.test_ids),
+        "bz2_written": bz2_written,
+        "failing_module": result.failing_module,
+        "stderr_snippet": result.stderr_snippet,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "_schema": "kaiju-test-id-status/1",
+    }
+    if extra:
+        payload.update(extra)
+    out = output_dir / f"{name.lower().replace('.', '-')}.status.json"
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return out
+
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -530,15 +781,13 @@ def main() -> None:
         nargs="?",
         help="Input dataset_entries.json or custom_dataset.json",
     )
+    parser.add_argument("--repo-dir", type=str, help="Single local repo directory")
+    parser.add_argument("--name", type=str, help="Repo name (required with --repo-dir)")
     parser.add_argument(
-        "--repo-dir",
+        "--python-version",
         type=str,
-        help="Generate for a single local repo directory",
-    )
-    parser.add_argument(
-        "--name",
-        type=str,
-        help="Repo name (required with --repo-dir)",
+        default=None,
+        help="Python X.Y for --repo-dir mode (auto-detected if omitted)",
     )
     parser.add_argument(
         "--test-dir",
@@ -559,9 +808,15 @@ def main() -> None:
         help="Directory where repos are cloned (default: ./repos_staging)",
     )
     parser.add_argument(
+        "--prefer",
+        type=str,
+        default=None,
+        help="Comma-separated runtime tier order (default: local,uv,docker)",
+    )
+    parser.add_argument(
         "--docker",
         action="store_true",
-        help="Run pytest inside Docker containers (requires built images)",
+        help="Shortcut for --prefer docker",
     )
     parser.add_argument(
         "--install",
@@ -574,38 +829,128 @@ def main() -> None:
         default=300,
         help="Timeout per repo for pytest collection (default: 300s)",
     )
-    parser.add_argument(
-        "--max-repos",
-        type=int,
-        default=None,
-        help="Max repos to process",
-    )
+    parser.add_argument("--max-repos", type=int, default=None, help="Max repos to process")
     parser.add_argument(
         "--validate-base",
         action="store_true",
-        help="After collecting IDs at reference_commit, validate that base_commit (stubbed code) can also collect tests. Requires --docker.",
+        help="After collecting IDs, validate base_commit (stubbed code) also collects. Requires Docker tier.",
+    )
+    parser.add_argument(
+        "--lenient",
+        action="store_true",
+        help="Upload entries even when status != OK (excluding MISSING_SYSTEM_DEPS).",
+    )
+    parser.add_argument(
+        "--quarantine-dir",
+        type=str,
+        default=None,
+        help="Write per-repo failure reports here for non-OK entries that are skipped.",
+    )
+    parser.add_argument(
+        "--strict-exit",
+        action="store_true",
+        help="In --repo-dir mode, exit non-zero on any non-OK status (default: only exit 1 when truly unrecoverable).",
+    )
+    parser.add_argument(
+        "--entries-json",
+        type=str,
+        default=None,
+        help="Explicit path to a breadcrumb / entries.json with setup.python + test.test_dir + reference_commit.",
+    )
+    parser.add_argument(
+        "--reference-commit",
+        type=str,
+        default=None,
+        help="Git SHA to checkout before collection (auto-discovered from breadcrumb if omitted).",
+    )
+    parser.add_argument(
+        "--no-checkout",
+        action="store_true",
+        help="Skip the auto-checkout of reference_commit (collect against current worktree state).",
     )
 
     args = parser.parse_args()
     output_dir = Path(args.output_dir)
+    prefer = (
+        args.prefer.split(",") if args.prefer else (["docker"] if args.docker else None)
+    )
 
     if args.repo_dir:
         if not args.name:
             parser.error("--name is required with --repo-dir")
         repo_dir = Path(args.repo_dir)
-        logger.info("Collecting test IDs from %s...", repo_dir)
 
-        test_ids = collect_test_ids_local(
+        python_version, test_dir, reference_commit, breadcrumb = _resolve_repo_dir_args(
             repo_dir=repo_dir,
-            test_dir=args.test_dir,
-            timeout=args.timeout,
+            name=args.name,
+            cli_python_version=args.python_version,
+            cli_test_dir=args.test_dir if args.test_dir != "tests" else None,
+            cli_reference_commit=args.reference_commit,
+            cli_entries_json=Path(args.entries_json) if args.entries_json else None,
+            output_dir=output_dir,
         )
-        if test_ids:
-            out_file = save_test_ids(test_ids, args.name, output_dir)
-            logger.info("Saved %d test IDs to %s", len(test_ids), out_file)
+        # If breadcrumb-less and CLI didn't override --test-dir, fall back to "tests"
+        if not test_dir:
+            test_dir = "tests"
+        sys_deps_hint = ((breadcrumb or {}).get("setup") or {}).get("system_deps_hint") or []
+
+        logger.info(
+            "Collecting test IDs from %s (python=%s, test_dir=%s, ref=%s)",
+            repo_dir, python_version, test_dir,
+            (reference_commit or "<none>")[:12],
+        )
+
+        # Checkout reference_commit (un-stubbed code) so pytest collection works.
+        do_checkout = (not args.no_checkout) and bool(reference_commit)
+        ctx_ref = reference_commit if do_checkout else None
+        with _ReferenceCommitCheckout(repo_dir, ctx_ref):
+            result = collect_test_ids(
+                repo_dir=repo_dir,
+                python_version=python_version,
+                repo_name=args.name,
+                reference_commit=reference_commit,
+                test_dir=test_dir,
+                timeout=args.timeout,
+                prefer=prefer,
+            )
+
+        bz2_written = False
+        if result.status == TestCollectionStatus.OK:
+            out_file = save_test_ids(result.test_ids, args.name, output_dir)
+            bz2_written = True
+            logger.info("Saved %d test IDs to %s", len(result.test_ids), out_file)
         else:
-            logger.error("No test IDs collected")
-            sys.exit(1)
+            logger.warning(
+                "status=%s (failing_module=%s)",
+                result.status.value,
+                result.failing_module,
+            )
+            if args.lenient and result.test_ids:
+                save_test_ids(result.test_ids, args.name, output_dir)
+                bz2_written = True
+                logger.info("--lenient: wrote %d test IDs anyway", len(result.test_ids))
+
+        # ALWAYS write the .status.json artifact so downstream sweep tools can
+        # detect the gap (the Argo wrapper's *.bz2-only glob silently ignores
+        # this file today; a post-prep sweep can read it).
+        status_path = _write_status_json(
+            output_dir=output_dir,
+            name=args.name,
+            repo_dir=repo_dir,
+            result=result,
+            python_version=python_version,
+            test_dir=test_dir,
+            reference_commit=reference_commit,
+            bz2_written=bz2_written,
+            extra={"system_deps_hint": sys_deps_hint} if sys_deps_hint else None,
+        )
+        logger.info("Status: %s -> %s", result.status.value, status_path)
+
+        # Default: exit 0 even on non-OK (the .status.json carries the signal).
+        # --strict-exit promotes any non-OK to exit code 1 for callers that
+        # DO check return codes.
+        if args.strict_exit and result.status != TestCollectionStatus.OK:
+            raise SystemExit(1)
 
     elif args.dataset_file:
         dataset_path = Path(args.dataset_file)
@@ -613,25 +958,38 @@ def main() -> None:
             parser.error(f"File not found: {dataset_path}")
 
         clone_dir = Path(args.clone_dir) if args.clone_dir else None
+        quarantine_dir = Path(args.quarantine_dir) if args.quarantine_dir else None
 
         results = generate_for_dataset(
             dataset_path=dataset_path,
             output_dir=output_dir,
-            use_docker=args.docker,
             clone_dir=clone_dir,
             timeout=args.timeout,
             max_repos=args.max_repos,
             validate_base=args.validate_base,
+            prefer=prefer,
+            lenient=args.lenient,
+            quarantine_dir=quarantine_dir,
         )
 
-        total = sum(results.values())
-        repos_with_tests = sum(1 for v in results.values() if v > 0)
+        total = sum(r["count"] for r in results.values())
+        ok_count = sum(
+            1 for r in results.values() if r["status"] == TestCollectionStatus.OK.value
+        )
         logger.info(
-            "\nDone: %d test IDs across %d repos (%d repos had no tests)",
+            "\nDone: %d test IDs across %d repos (%d OK, %d non-OK)",
             total,
             len(results),
-            len(results) - repos_with_tests,
+            ok_count,
+            len(results) - ok_count,
         )
+        # Status breakdown
+        from collections import Counter
+
+        status_counts = Counter(r["status"] for r in results.values())
+        for status, count in sorted(status_counts.items()):
+            logger.info("  %-22s %d", status, count)
+
     else:
         parser.error("Provide either dataset_file or --repo-dir")
         return
@@ -639,6 +997,20 @@ def main() -> None:
     if args.install:
         installed = install_test_ids(output_dir)
         logger.info("Installed %d test ID files into commit0 data directory", installed)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat shim. Pre-refactor, this private helper was imported by
+# sibling generators (generate_test_ids_rust.py, generate_test_ids_ts.py).
+# Keep it as a thin alias to avoid churning the language-specific files.
+# ---------------------------------------------------------------------------
+
+
+def _find_docker_image(repo_name: str) -> str | None:
+    """Backward-compat alias for :func:`tools.python_runtime.find_docker_image_for_repo`."""
+    from tools.python_runtime import find_docker_image_for_repo
+
+    return find_docker_image_for_repo(repo_name)
 
 
 if __name__ == "__main__":

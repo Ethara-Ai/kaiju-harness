@@ -383,6 +383,8 @@ def create_dataset_entry(
     test_framework: str = "",
     packages: str = "",
     spec_url: str = "",
+    version_source: str = "default",
+    version_conflicts: list[str] | None = None,
 ) -> dict:
     test_dir = src_dir.rsplit("/src", 1)[0] if "/src" in src_dir else "."
 
@@ -403,6 +405,8 @@ def create_dataset_entry(
             else "meson setup builddir && ninja -C builddir"
             if build_system == "meson"
             else "make -j$(nproc)",
+            "version_source": version_source,
+            "version_conflicts": version_conflicts or [],
         },
         "test": {
             "test_cmd": test_cmd,
@@ -659,6 +663,21 @@ def prepare_cpp_repo(
                 test_framework = tf_name
                 break
 
+    # Canonical C++ standard detection (CMakeLists/Makefile/meson). CLI
+    # kwarg wins only when user explicitly overrode the default.
+    from tools.cpp_version import detect_cpp as _detect_cpp
+
+    cpp_det = _detect_cpp(repo_dir)
+    detected_std = cpp_det.version or cpp_standard
+    version_source = cpp_det.source
+    version_conflicts = cpp_det.conflicts
+    if cpp_standard == "17":  # default — honor detection
+        cpp_standard = detected_std
+    logger.info(
+        "C++ detection: standard=%s (src=%s) conflicts=%s",
+        cpp_standard, version_source, version_conflicts or "(none)",
+    )
+
     entry = create_dataset_entry(
         upstream=upstream,
         fork_name=fork_name,
@@ -669,6 +688,8 @@ def prepare_cpp_repo(
         reference_commit=reference_commit,
         build_system=build_system,
         cpp_standard=cpp_standard,
+        version_source=version_source,
+        version_conflicts=version_conflicts,
         test_framework=test_framework,
         packages=packages,
         spec_url=readme_spec_url or spec_url,

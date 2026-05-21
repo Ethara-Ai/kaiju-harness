@@ -9,7 +9,7 @@ from commit0.harness.dockerfiles import get_dockerfile_base, get_dockerfile_repo
 
 
 class TestGetDockerfileBase:
-    @pytest.mark.parametrize("version", ["3.10", "3.12", "3.13"])
+    @pytest.mark.parametrize("version", ["3.9", "3.10", "3.11", "3.12", "3.13"])
     def test_valid_version_returns_content(self, version: str) -> None:
         result = get_dockerfile_base(version)
         assert isinstance(result, str)
@@ -18,7 +18,7 @@ class TestGetDockerfileBase:
 
     def test_invalid_version_raises_valueerror(self) -> None:
         with pytest.raises(ValueError, match="Unsupported"):
-            get_dockerfile_base("3.9")
+            get_dockerfile_base("3.8")
 
     def test_version_with_spaces_raises(self) -> None:
         with pytest.raises(ValueError, match="Unsupported"):

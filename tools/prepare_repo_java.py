@@ -267,41 +267,44 @@ def scrape_spec(repo_dir: Path, repo_short: str, spec_url: str, specs_dir: Path)
 
 
 def _detect_java_version(repo_dir: Path) -> str:
-    pom = repo_dir / "pom.xml"
-    if pom.exists():
-        try:
-            import re
-            content = pom.read_text()
-            content_no_ns = re.sub(r'\sxmlns="[^"]+"', "", content, count=1)
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(content_no_ns)
-            for xpath in [
-                ".//maven.compiler.release",
-                ".//maven.compiler.target",
-                ".//java.version",
-                "./properties/maven.compiler.release",
-                "./properties/maven.compiler.target",
-            ]:
-                el = root.find(xpath)
-                if el is not None and el.text:
-                    v = el.text.strip().lstrip("1.")
-                    if v.isdigit():
-                        return v
-        except Exception:
-            pass
-    for gradle in [repo_dir / "build.gradle", repo_dir / "build.gradle.kts"]:
-        if gradle.exists():
-            try:
-                import re
-                m = re.search(
-                    r"sourceCompatibility\s*=\s*['\"]?(?:JavaVersion\.VERSION_)?(\d+)",
-                    gradle.read_text(),
-                )
-                if m:
-                    return m.group(1)
-            except Exception:
-                continue
-    return "17"
+    """Backward-compat wrapper around :func:`tools.java_version.detect`."""
+    from commit0.harness.constants_java import (
+        JAVA_VERSION_DEFAULT,
+        SUPPORTED_JAVA_VERSIONS,
+    )
+    from tools.java_version import detect as _detect
+    from tools._versioning import NoSignalsError, VersionConflictError
+
+    try:
+        return _detect(repo_dir, SUPPORTED_JAVA_VERSIONS, fallback=JAVA_VERSION_DEFAULT).version or JAVA_VERSION_DEFAULT
+    except (VersionConflictError, NoSignalsError):
+        return JAVA_VERSION_DEFAULT
+
+
+def _detect_java_version_full(repo_dir: Path):
+    """Return the full DetectionResult so callers can capture provenance."""
+    from commit0.harness.constants_java import (
+        JAVA_VERSION_DEFAULT,
+        SUPPORTED_JAVA_VERSIONS,
+    )
+    from tools.java_version import detect as _detect
+    from tools._versioning import NoSignalsError, VersionConflictError
+
+    try:
+        return _detect(repo_dir, SUPPORTED_JAVA_VERSIONS, fallback=JAVA_VERSION_DEFAULT)
+    except VersionConflictError as exc:
+        from tools._versioning import DetectionResult
+        return DetectionResult(
+            version=JAVA_VERSION_DEFAULT,
+            source="conflict-fallback",
+            conflicts=[f"{src}: {reason}" for src, reason in exc.rejecting_sources.items()],
+            all_signals={},
+        )
+    except NoSignalsError:
+        from tools._versioning import DetectionResult
+        return DetectionResult(
+            version=JAVA_VERSION_DEFAULT, source="default", conflicts=[], all_signals={},
+        )
 
 
 def create_dataset_entry(
@@ -316,7 +319,10 @@ def create_dataset_entry(
     repo_short = full_name.split("/")[-1]
     setup = dict(entry.get("setup") or {})
     if repo_dir is not None and "java_version" not in setup:
-        setup["java_version"] = _detect_java_version(repo_dir)
+        det = _detect_java_version_full(repo_dir)
+        setup["java_version"] = det.version
+        setup["version_source"] = det.source
+        setup["version_conflicts"] = det.conflicts
     return {
         "instance_id": f"commit-0/{repo_short}",
         "repo": fork_name,

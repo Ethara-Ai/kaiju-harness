@@ -307,13 +307,21 @@ def build_setup_dict(repo_dir: Path, go_info: dict, full_name: str) -> dict:
 
     spec_url = _find_docs_url(go_info.get("module_path", ""))
 
+    # Canonical Go version detection (toolchain > go.mod > GHA matrix > Dockerfile)
+    from tools.go_version import detect as _detect_go
+
+    det = _detect_go(repo_dir, fallback=go_info.get("go_version") or "1.22")
+    go_version = det.version or "1.22"
+
     return {
         "install": "go mod download && go build ./...",
         "packages": "",
         "pip_packages": "",
         "pre_install": pre_install,
-        "go_version": go_info.get("go_version", "1.23"),
+        "go_version": go_version,
         "specification": spec_url,
+        "version_source": det.source,
+        "version_conflicts": det.conflicts,
     }
 
 

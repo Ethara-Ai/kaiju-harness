@@ -225,6 +225,8 @@ def create_dataset_entry(
     edition: str = "2021",
     packages: str = "pkg-config libssl-dev",
     specification: str = "",
+    version_source: str = "default",
+    version_conflicts: list[str] | None = None,
 ) -> dict:
     """Create a dataset entry compatible with RustRepoInstance."""
     # Determine test_dir from src_dir (parent of /src usually)
@@ -243,6 +245,8 @@ def create_dataset_entry(
             "pre_install": [],
             "install": "cargo fetch",
             "specification": specification,
+            "version_source": version_source,
+            "version_conflicts": version_conflicts or [],
         },
         "test": {
             "test_cmd": test_cmd,
@@ -358,6 +362,25 @@ def prepare_rust_repo(
     # Step 2: Clone (from fork so we can push)
     repo_dir = clone_repo(fork_name, clone_dir)
 
+    # Detect rust toolchain + edition from the cloned repo. CLI kwargs win
+    # only when the user explicitly overrode the defaults; otherwise the
+    # detected values flow through.
+    from tools.rust_version import detect as _detect_rust
+
+    det = _detect_rust(repo_dir)
+    detected_version = det.version or rust_version
+    detected_edition = det.edition
+    version_source = det.source
+    version_conflicts = det.conflicts
+    if rust_version == "stable":  # only override on default
+        rust_version = detected_version
+    if edition == "2021":  # only override on default
+        edition = detected_edition
+    logger.info(
+        "Rust detection: version=%s (src=%s) edition=%s (src=%s) conflicts=%s",
+        rust_version, version_source, edition, det.edition_source, det.conflicts or "(none)",
+    )
+
     # Step 3: Record reference commit
     reference_commit = get_head_sha(repo_dir)
     logger.info("Reference commit: %s", reference_commit[:12])
@@ -438,6 +461,8 @@ def prepare_rust_repo(
         reference_commit=reference_commit,
         rust_version=rust_version,
         edition=edition,
+        version_source=version_source,
+        version_conflicts=version_conflicts,
         packages=packages,
         specification=readme_spec_url or f"https://docs.rs/{crate}",
     )

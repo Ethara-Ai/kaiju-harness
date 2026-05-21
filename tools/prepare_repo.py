@@ -51,6 +51,12 @@ DEFAULT_ORG = "Zahgon"
 TOOLS_DIR = Path(__file__).parent
 sys.path.insert(0, str(TOOLS_DIR.parent))
 from tools.stub import StubTransformer, is_test_file, collect_import_time_names
+from tools.python_version import (
+    NoSignalsError,
+    VersionConflictError,
+    detect as detect_python_version_result,
+)
+from tools.system_deps_scanner import scan_repo_for_system_deps
 
 from tools._git_auth import (
     git,
@@ -578,6 +584,49 @@ def extract_test_dependencies(repo_dir: Path) -> list[str]:
     return sorted(merged.values(), key=lambda s: _parse_dep_name(s).lower())
 
 
+def _write_kaiju_breadcrumb(
+    *,
+    repo_dir: Path,
+    full_name: str,
+    reference_commit: str,
+    setup_dict: dict,
+    test_dict: dict,
+) -> Path | None:
+    """Drop a ``.kaiju/entries.json`` breadcrumb inside ``repo_dir``.
+
+    Lets downstream invocations of :mod:`tools.generate_test_ids` in
+    ``--repo-dir`` mode discover the per-repo Python version, test
+    directory, and reference commit — without depending on the calling
+    orchestrator to pass them explicitly. See Oracle review in
+    ``MISSING_TEST_IDS_BZ2_ISSUE.md`` and ``tools/generate_test_ids.py``
+    discovery chain.
+
+    Writes only the fields downstream consumers need (stripped subset).
+    Never raises — prepare_repo is the lifecycle owner, breadcrumb is a
+    best-effort hint.
+    """
+    try:
+        kaiju_dir = repo_dir / ".kaiju"
+        kaiju_dir.mkdir(parents=True, exist_ok=True)
+        target = kaiju_dir / "entries.json"
+        payload = {
+            "repo": full_name,
+            "reference_commit": reference_commit,
+            "setup": setup_dict,
+            "test": test_dict,
+            "_schema": "kaiju-breadcrumb/1",
+        }
+        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return target
+    except OSError as exc:
+        logger.warning(
+            "Could not write .kaiju/entries.json breadcrumb in %s: %s",
+            repo_dir, exc,
+        )
+        return None
+
+
+
 def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
     """
     Generate the 'setup' dict for a RepoInstance.
@@ -589,16 +638,40 @@ def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
         "packages": "",
         "pip_packages": [],
         "pre_install": [],
-        "python": "3.12",
+        "python": "",
         "specification": "",
+        "version_source": "",
+        "version_conflicts": [],
+        "system_deps_hint": [],
     }
 
     repo_name = full_name.split("/")[-1]
 
-    # Detect Python version
-    python_ver = _detect_python_version(repo_dir)
-    if python_ver:
-        setup["python"] = python_ver
+    # Detect Python version via canonical detector (see tools/python_version.py)
+    from commit0.harness.constants import (
+        DEFAULT_PYTHON_VERSION,
+        SUPPORTED_PYTHON_VERSIONS,
+    )
+    try:
+        det = detect_python_version_result(
+            repo_dir,
+            SUPPORTED_PYTHON_VERSIONS,
+            fallback=DEFAULT_PYTHON_VERSION,
+        )
+        setup["python"] = det.version or DEFAULT_PYTHON_VERSION
+        setup["version_source"] = det.source
+        setup["version_conflicts"] = det.conflicts
+    except VersionConflictError as exc:
+        logger.error("Python version conflict for %s: %s", full_name, exc)
+        # Fall back to default but record the conflict so downstream tooling sees it
+        setup["python"] = DEFAULT_PYTHON_VERSION
+        setup["version_source"] = "conflict-fallback"
+        setup["version_conflicts"] = [
+            f"{src}: {reason}" for src, reason in exc.rejecting_sources.items()
+        ]
+    except NoSignalsError:  # only raised with strict=True; defensive
+        setup["python"] = DEFAULT_PYTHON_VERSION
+        setup["version_source"] = "default"
 
     # Detect install method
     pyproject = repo_dir / "pyproject.toml"
@@ -652,6 +725,15 @@ def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
         pre_install.append(f"apt-get install -y {' '.join(apt_pkgs)}")
     setup["pre_install"] = pre_install
 
+    # Detect system-level dependencies in test imports (QGIS, GTK, Qt, etc.)
+    # This is a hint, not authoritative — downstream collection still catches misses.
+    try:
+        sys_deps = scan_repo_for_system_deps(repo_dir)
+        if sys_deps:
+            setup["system_deps_hint"] = sys_deps
+    except Exception:  # noqa: BLE001 - scanner must never block prepare
+        logger.exception("system_deps_scanner crashed on %s", full_name)
+
     # Documentation URL
     homepage = _find_docs_url(repo_dir, full_name)
     if homepage:
@@ -692,52 +774,19 @@ def generate_test_dict(repo_dir: Path, test_dir: str | None) -> dict:
 
 
 def _detect_python_version(repo_dir: Path) -> str | None:
-    """Extract Python version and clamp to the highest available Docker base.
-
-    Strategy: find the repo's minimum required version, then pick the HIGHEST
-    available base that satisfies it (prefer newest for best ecosystem support).
-    Available bases are derived from SUPPORTED_PYTHON_VERSIONS in constants.py.
-    """
-    from commit0.harness.constants import SUPPORTED_PYTHON_VERSIONS
-
-    available = sorted(
-        (tuple(int(x) for x in v.split(".")) for v in SUPPORTED_PYTHON_VERSIONS),
+    """Backward-compatible thin wrapper around :func:`tools.python_version.detect`."""
+    from commit0.harness.constants import (
+        DEFAULT_PYTHON_VERSION,
+        SUPPORTED_PYTHON_VERSIONS,
     )
-    if not available:
+    try:
+        return detect_python_version_result(
+            repo_dir,
+            SUPPORTED_PYTHON_VERSIONS,
+            fallback=DEFAULT_PYTHON_VERSION,
+        ).version
+    except (VersionConflictError, NoSignalsError):
         return None
-
-    highest = available[-1]
-
-    required_min: tuple[int, int] | None = None
-
-    for config_name in ["pyproject.toml", "setup.cfg", "setup.py"]:
-        config = repo_dir / config_name
-        if not config.exists():
-            continue
-        content = config.read_text(errors="replace")
-        m = re.search(
-            r'(?:requires-python|python_requires)\s*=\s*["\']?>=?\s*(\d+\.\d+)', content
-        )
-        if m:
-            parts = m.group(1).split(".")
-            required_min = (int(parts[0]), int(parts[1]))
-            break
-
-    pyver_file = repo_dir / ".python-version"
-    if required_min is None and pyver_file.exists():
-        raw = pyver_file.read_text(encoding="utf-8").strip().split(".")[0:2]
-        if len(raw) == 2 and raw[0].isdigit() and raw[1].isdigit():
-            required_min = (int(raw[0]), int(raw[1]))
-
-    if required_min is None:
-        return f"{highest[0]}.{highest[1]}"
-
-    compatible = [v for v in available if v >= required_min]
-    if compatible:
-        best = compatible[-1]
-        return f"{best[0]}.{best[1]}"
-
-    return f"{highest[0]}.{highest[1]}"
 
 
 def _find_docs_url(repo_dir: Path, full_name: str) -> str:
@@ -1072,6 +1121,19 @@ def prepare_repos(
             pinned_tag=release_tag,
         )
 
+        # Write a breadcrumb file inside the cloned repo so that
+        # `tools.generate_test_ids --repo-dir` can later auto-discover the
+        # exact test_dir / python / reference_commit it should use — even
+        # when invoked by an external orchestrator (e.g. Argo) that doesn't
+        # pass the relevant flags. See MISSING_TEST_IDS_BZ2_ISSUE.md.
+        _write_kaiju_breadcrumb(
+            repo_dir=repo_dir,
+            full_name=full_name,
+            reference_commit=reference_commit,
+            setup_dict=setup_dict,
+            test_dict=test_dict,
+        )
+
         logger.info("  Entry created: instance_id=%s", entry["instance_id"])
         logger.info(
             "  base_commit=%s, reference_commit=%s",
@@ -1102,6 +1164,103 @@ def print_entries_summary(entries: list[dict]) -> None:
 
     print(f"\n{'=' * 90}")
 
+
+def _run_detect_only(
+    candidates: list[dict],
+    clone_dir: Path,
+    report_path: str | None,
+) -> None:
+    """Run version + system-dep detection on each candidate without prepping."""
+    from commit0.harness.constants import (
+        DEFAULT_PYTHON_VERSION,
+        SUPPORTED_PYTHON_VERSIONS,
+    )
+
+    rows: list[dict] = []
+    for c in candidates:
+        full_name = c.get("full_name") or c.get("repo", "")
+        repo_dir = clone_dir / full_name.replace("/", "__")
+        if not repo_dir.is_dir():
+            rows.append(
+                {
+                    "repo": full_name,
+                    "version": None,
+                    "source": "missing-clone",
+                    "conflicts": [],
+                    "system_deps": [],
+                    "all_signals": {},
+                }
+            )
+            continue
+        try:
+            det = detect_python_version_result(
+                repo_dir,
+                SUPPORTED_PYTHON_VERSIONS,
+                fallback=DEFAULT_PYTHON_VERSION,
+            )
+            version = det.version
+            source = det.source
+            conflicts = det.conflicts
+            signals = det.all_signals
+        except VersionConflictError as exc:
+            version = None
+            source = "conflict"
+            conflicts = [
+                f"{src}: {reason}" for src, reason in exc.rejecting_sources.items()
+            ]
+            signals = {}
+        except NoSignalsError:
+            version = None
+            source = "no-signals"
+            conflicts = []
+            signals = {}
+
+        try:
+            sys_deps = scan_repo_for_system_deps(repo_dir)
+        except Exception:  # noqa: BLE001
+            sys_deps = []
+
+        rows.append(
+            {
+                "repo": full_name,
+                "version": version,
+                "source": source,
+                "conflicts": conflicts,
+                "system_deps": sys_deps,
+                "all_signals": signals,
+            }
+        )
+        logger.info(
+            "  %-45s py=%s src=%s sys_deps=%s",
+            full_name,
+            version or "?",
+            source,
+            sys_deps or "-",
+        )
+
+    if report_path:
+        out = Path(report_path)
+        if out.suffix == ".csv":
+            import csv
+
+            with out.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    ["repo", "version", "source", "conflicts", "system_deps"]
+                )
+                for r in rows:
+                    writer.writerow(
+                        [
+                            r["repo"],
+                            r["version"] or "",
+                            r["source"],
+                            "; ".join(r["conflicts"]),
+                            "; ".join(r["system_deps"]),
+                        ]
+                    )
+        else:
+            out.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        logger.info("Wrote detection report to %s", out)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare repos for commit0 dataset")
@@ -1175,6 +1334,17 @@ def main() -> None:
         default=None,
         help="Source directory within repo (e.g., 'src/flask'). Auto-detected if omitted.",
     )
+    parser.add_argument(
+        "--detect-only",
+        action="store_true",
+        help="Skip cloning/forking; just run version + system-dep detection and exit.",
+    )
+    parser.add_argument(
+        "--report",
+        type=str,
+        default=None,
+        help="Write detection results to this JSON/CSV file (CSV if path ends in .csv).",
+    )
 
     args = parser.parse_args()
 
@@ -1209,6 +1379,10 @@ def main() -> None:
 
     clone_dir = Path(args.clone_dir)
     clone_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.detect_only:
+        _run_detect_only(candidates, clone_dir, args.report)
+        return
 
     entries = prepare_repos(
         candidates,

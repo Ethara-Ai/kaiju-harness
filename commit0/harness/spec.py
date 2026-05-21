@@ -9,6 +9,7 @@ from typing import Union, cast, Optional
 
 from commit0.harness.constants import (
     ABSOLUTE_REPO_DIR,
+    DEFAULT_PYTHON_VERSION,
     RELATIVE_REPO_DIR,
     RepoInstance,
     SimpleInstance,
@@ -51,10 +52,16 @@ class Spec(ABC):
 
     def _get_python_version(self) -> str:
         setup = self._get_setup_dict()
-        if "python" in setup:
+        if "python" in setup and setup["python"]:
             return str(setup["python"])
-        logger.debug("No python version specified, defaulting to 3.12")
-        return "3.12"
+        logger.warning(
+            "Instance %s has no setup.python; falling back to %s. "
+            "This indicates the entry was not produced by tools/prepare_repo.py "
+            "or version detection failed. See tools/python_version.py.",
+            getattr(self.instance, "instance_id", "<unknown>"),
+            DEFAULT_PYTHON_VERSION,
+        )
+        return DEFAULT_PYTHON_VERSION
 
     def _get_setup_dict(self) -> dict:
         """Extract setup dict from instance regardless of whether it's a Pydantic model or plain dict."""

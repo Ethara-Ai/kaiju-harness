@@ -188,7 +188,7 @@ class TestConstants:
         assert BASE_BRANCH == "commit0"
 
     def test_supported_python_versions(self):
-        assert SUPPORTED_PYTHON_VERSIONS == {"3.10", "3.12", "3.13"}
+        assert SUPPORTED_PYTHON_VERSIONS == {"3.9", "3.10", "3.11", "3.12", "3.13"}
 
     def test_non_test_exts_is_list_of_strings(self):
         assert isinstance(NON_TEST_EXTS, list)
