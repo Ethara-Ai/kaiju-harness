@@ -67,3 +67,74 @@ class TestParseCollectOutput:
         output = "tests/test_foo.py::test_bar[param1-param2]\n"
         result = _parse_collect_output(output)
         assert result == ["tests/test_foo.py::test_bar[param1-param2]"]
+
+    def test_per_file_summary_fallback(self):
+        """Case A (``adaptive-classifier`` / ``bake``): pytest emits a
+        ``path: count`` summary instead of individual node IDs.
+
+        Falls back to file-level IDs (which pytest accepts as run targets).
+        """
+        output = (
+            "tests/test_classifier.py: 11\n"
+            "tests/test_enterprise_classifiers_integration.py: 104\n"
+            "tests/test_memory.py: 13\n"
+            "\n"
+            "== 175 tests collected in 2.34s ==\n"
+        )
+        result = _parse_collect_output(output)
+        assert result == [
+            "tests/test_classifier.py",
+            "tests/test_enterprise_classifiers_integration.py",
+            "tests/test_memory.py",
+        ]
+
+    def test_per_file_summary_with_parametrize_suffix(self):
+        """Summary lines may include a parametrize suffix in brackets."""
+        output = (
+            "tests/test_foo.py[fast]: 5\n"
+            "tests/test_bar.py: 7\n"
+        )
+        result = _parse_collect_output(output)
+        assert result == ["tests/test_foo.py", "tests/test_bar.py"]
+
+    def test_per_test_ids_preferred_over_summary(self):
+        """When both per-test IDs and summary lines appear, per-test IDs win.
+
+        Per-test IDs preserve harness ``fail_to_pass`` / ``pass_to_pass``
+        granularity; the summary fallback would lose it.
+        """
+        output = (
+            "tests/test_a.py::test_one\n"
+            "tests/test_a.py::test_two\n"
+            "tests/test_b.py: 5\n"
+        )
+        result = _parse_collect_output(output)
+        assert result == [
+            "tests/test_a.py::test_one",
+            "tests/test_a.py::test_two",
+        ]
+
+    def test_summary_does_not_match_module_docstrings(self):
+        """Lines like ``description: foo`` (no .py, no integer) are ignored."""
+        output = (
+            "description: This is a docstring\n"
+            "author: someone\n"
+            "file.py: not_a_count\n"
+        )
+        result = _parse_collect_output(output)
+        assert result == []
+
+    def test_summary_requires_path_ends_in_py(self):
+        """Only ``.py`` paths should be picked up as summary entries."""
+        output = (
+            "some/path/data.txt: 11\n"
+            "tests/test_real.py: 11\n"
+        )
+        result = _parse_collect_output(output)
+        assert result == ["tests/test_real.py"]
+
+    def test_summary_ignores_lines_without_whitespace_after_colon(self):
+        """``path:11`` (no space) should NOT match — reserved for IDs like ``ns::class``."""
+        output = "tests/test_foo.py:11\n"
+        result = _parse_collect_output(output)
+        assert result == []

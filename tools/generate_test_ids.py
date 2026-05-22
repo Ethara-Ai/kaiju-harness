@@ -102,14 +102,29 @@ def _normalize_test_ids(test_ids: list[str], test_dir: str) -> list[str]:
 
 
 def _parse_collect_output(stdout: str) -> list[str]:
-    """Parse pytest --collect-only output in any format (verbose or quiet).
+    """Parse pytest ``--collect-only`` output in any of three formats.
 
     Handles:
-    - Verbose format: ``<Module tests/test_foo.py>::<Class TestFoo>::<Function test_bar>``
-    - Quiet format:   ``tests/test_foo.py::TestFoo::test_bar``
-    - Mixed output with separator lines, errors, and empty lines
+    - **Verbose tree** (``-v`` or default ``--collect-only``):
+      ``<Module tests/test_foo.py>::<Class TestFoo>::<Function test_bar>``
+    - **Quiet node IDs** (``-q``): ``tests/test_foo.py::TestFoo::test_bar``
+    - **Per-file summary** (custom reporters, ``-qq`` style, or pytest plugins
+      that suppress node IDs): ``tests/test_foo.py: 11`` — emitted as a
+      file-level pseudo-ID (``tests/test_foo.py``) that pytest still accepts
+      as a run target. Used **only as a fallback** when no per-test IDs were
+      found in the same output; per-test IDs are always preferred when both
+      are present, since the harness's ``fail_to_pass``/``pass_to_pass``
+      machinery operates at test-level granularity.
+
+    Robust to mixed output with separator lines, error lines, and empty lines.
     """
     test_ids: list[str] = []
+    summary_paths: list[str] = []
+    # Matches ``tests/test_foo.py: 11`` and ``tests/test_foo.py[param]: 11``.
+    # Anchored to the start of the line and requires at least one whitespace
+    # between the colon and the count to avoid eating IDs like ``foo:bar``.
+    summary_re = re.compile(r"^(\S+\.py)(?:\[[^\]]+\])?:\s+(\d+)\s*$")
+
     for line in stdout.strip().split("\n"):
         line = line.strip()
         if not line:
@@ -141,8 +156,16 @@ def _parse_collect_output(stdout: str) -> list[str]:
             test_id = line.split(" ")[0]
             if test_id:
                 test_ids.append(test_id)
+            continue
 
-    return test_ids
+        m = summary_re.match(line)
+        if m:
+            summary_paths.append(m.group(1))
+
+    # Prefer per-test IDs. Fall back to file-level IDs only when the quiet
+    # and verbose attempts both failed to produce any — a degraded but
+    # actionable signal for the rare repos that ship a custom collector.
+    return test_ids if test_ids else summary_paths
 
 
 # ---------------------------------------------------------------------------
