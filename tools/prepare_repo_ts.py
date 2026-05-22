@@ -1291,7 +1291,7 @@ def main() -> None:
                     full_name=full_name,
                     clone_dir=args.clone_dir,
                     org=args.org,
-                    src_dir_override=None,
+                    src_dir_override=candidate.get("src_dir_override") or candidate.get("src_dir"),
                     release_tag=candidate.get("tag") or args.tag,
                     dry_run=args.dry_run,
                     specs_dir=args.specs_dir,
