@@ -43,7 +43,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from tools._git_auth import (
@@ -52,7 +51,6 @@ from tools._git_auth import (
     push_to_fork,
     setup_git_credentials,
 )
-
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -63,13 +61,12 @@ PROJECT_ROOT = TOOLS_DIR.parent
 RUSTSTUBBER = TOOLS_DIR / "ruststubber" / "target" / "release" / "ruststubber"
 SPECS_DIR = PROJECT_ROOT / "specs"
 
-# GitHub org to fork repos into
 DEFAULT_ORG = "Zahgon"
 
 
 # ─── Git Helpers ──────────────────────────────────────────────────────────────
-
-
+# git(), fork_repo(), push_to_fork() are imported from tools._git_auth
+# (the single source of truth for all prepare_repo_* pipelines).
 
 
 def get_head_sha(repo_dir: Path) -> str:
@@ -93,8 +90,6 @@ def get_default_branch(repo_dir: Path) -> str:
 # ─── Fork & Clone ────────────────────────────────────────────────────────────
 
 
-
-
 def clone_repo(full_name: str, clone_dir: Path) -> Path:
     """Full clone of a repo. Returns repo dir."""
     repo_name = full_name.split("/")[-1]
@@ -106,13 +101,17 @@ def clone_repo(full_name: str, clone_dir: Path) -> Path:
 
     url = f"https://github.com/{full_name}.git"
     logger.info("Cloning %s...", full_name)
-    subprocess.run(
+    result = subprocess.run(
         ["git", "clone", url, str(repo_dir)],
         capture_output=True,
         text=True,
         timeout=600,
-        check=True,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git clone failed (exit {result.returncode}) for {full_name}:\n"
+            f"  stderr: {result.stderr.strip()}"
+        )
     return repo_dir
 
 
@@ -162,9 +161,6 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str) -> tuple[int, int]:
 
     logger.info("Stubbed %d files (%d errors)", ok, fail)
     return ok, fail
-
-
-
 
 
 # ─── Spec Scraping ───────────────────────────────────────────────────────────
@@ -378,7 +374,11 @@ def prepare_rust_repo(
         edition = detected_edition
     logger.info(
         "Rust detection: version=%s (src=%s) edition=%s (src=%s) conflicts=%s",
-        rust_version, version_source, edition, det.edition_source, det.conflicts or "(none)",
+        rust_version,
+        version_source,
+        edition,
+        det.edition_source,
+        det.conflicts or "(none)",
     )
 
     # Step 3: Record reference commit
@@ -423,16 +423,28 @@ def prepare_rust_repo(
         else:
             if not dry_run:
                 try:
-                    from tools.scrape_pdf import scrape_readme_spec as _scrape_readme_spec
-                    readme_spec_path, readme_spec_url = _scrape_readme_spec(repo_dir, specs_dir, crate)
+                    from tools.scrape_pdf import (
+                        scrape_readme_spec as _scrape_readme_spec,
+                    )
+
+                    readme_spec_path, readme_spec_url = _scrape_readme_spec(
+                        repo_dir, specs_dir, crate
+                    )
                 except ImportError:
                     readme_spec_path = None
                 if readme_spec_path:
                     try:
                         git(repo_dir, "checkout", "commit0_all")
-                        shutil.copy2(str(readme_spec_path), str(repo_dir / "spec.pdf.bz2"))
+                        shutil.copy2(
+                            str(readme_spec_path), str(repo_dir / "spec.pdf.bz2")
+                        )
                         git(repo_dir, "add", "spec.pdf.bz2")
-                        git(repo_dir, "commit", "-m", f"Add README-based spec for {crate}")
+                        git(
+                            repo_dir,
+                            "commit",
+                            "-m",
+                            f"Add README-based spec for {crate}",
+                        )
                         base_commit = get_head_sha(repo_dir)
                         spec_filename = "spec.pdf.bz2"
                         logger.info("  README spec committed")
@@ -445,8 +457,10 @@ def prepare_rust_repo(
     if dry_run:
         logger.info("[DRY RUN] Would push commit0_all to %s", fork_name)
     else:
-        logger.info("Pushing commit0_all to %s...", fork_name)
-        push_to_fork(repo_dir, fork_name, "commit0_all", remote_name="origin")
+        try:
+            push_to_fork(repo_dir, fork_name, "commit0_all", remote_name="origin")
+        except Exception as e:
+            logger.error("Push failed for %s: %s", fork_name, e)
 
     # Step 9: Test ID collection removed — use tools/generate_test_ids_rust.py separately
 
@@ -491,9 +505,12 @@ def prepare_rust_repo(
 
 def _fetch_cargo_toml(upstream: str, sub_path: str = "") -> str | None:
     import urllib.request
+
     suffix = f"/{sub_path.strip('/')}" if sub_path else ""
     for branch in ("main", "master"):
-        url = f"https://raw.githubusercontent.com/{upstream}/{branch}{suffix}/Cargo.toml"
+        url = (
+            f"https://raw.githubusercontent.com/{upstream}/{branch}{suffix}/Cargo.toml"
+        )
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "kaiju-prepare"})
             with urllib.request.urlopen(req, timeout=15) as r:
