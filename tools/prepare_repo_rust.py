@@ -235,7 +235,7 @@ def create_dataset_entry(
         "base_commit": base_commit,
         "reference_commit": reference_commit,
         "setup": {
-            "rust": rust_version,
+            "rust_version": rust_version,
             "edition": edition,
             "packages": packages,
             "pre_install": [],
@@ -661,7 +661,9 @@ def main() -> None:
             args.test_cmd = derived["test_cmd"]
         logger.info(
             "Resolved Rust args — crate=%s src_dir=%s test_cmd=%r",
-            args.crate, args.src_dir, args.test_cmd,
+            args.crate,
+            args.src_dir,
+            args.test_cmd,
         )
 
     if not RUSTSTUBBER.exists():
