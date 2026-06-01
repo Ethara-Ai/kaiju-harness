@@ -39,8 +39,8 @@ class Commit0TsSpec(Spec):
 
     def _get_node_version(self) -> str:
         setup = self._get_setup_dict()
-        if "node" in setup:
-            return str(setup["node"])
+        if "node_version" in setup:
+            return str(setup["node_version"])
         logger.debug(
             "No node version specified, defaulting to %s", DEFAULT_NODE_VERSION
         )

@@ -15,8 +15,6 @@ from commit0.harness.utils import load_dataset_from_config
 logger = logging.getLogger(__name__)
 
 
-
-
 def main(
     dataset_name: str,
     dataset_split: str,
@@ -31,7 +29,9 @@ def main(
     allowed_repos = set(resolve_split(split, dataset, curated=TS_SPLIT))
 
     for example in dataset:
-        repo_full = example.get("repo", "") if isinstance(example, dict) else example.repo
+        repo_full = (
+            example.get("repo", "") if isinstance(example, dict) else example.repo
+        )
         if repo_full.split("/")[-1] not in allowed_repos:
             continue
         specs.append(make_ts_spec(example, absolute=True))
@@ -61,7 +61,7 @@ def main(
             results = run_ts_health_checks(
                 client,
                 image_key,
-                node_version=setup.get("node", DEFAULT_NODE_VERSION),
+                node_version=setup.get("node_version", DEFAULT_NODE_VERSION),
                 packages=setup.get("packages"),
             )
             for passed, check_name, detail in results:

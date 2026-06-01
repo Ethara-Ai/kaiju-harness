@@ -15,7 +15,7 @@ def _make_valid_ts_entry() -> dict:
         "base_commit": "a" * 40,
         "reference_commit": "b" * 40,
         "setup": {
-            "node": "20",
+            "node_version": "20",
             "install": "npm install",
             "packages": ["jest"],
             "pre_install": [],
@@ -62,7 +62,7 @@ def test_validate_ts_entry_missing_setup():
 
 def test_validate_ts_entry_bad_node_version():
     entry = _make_valid_ts_entry()
-    entry["setup"]["node"] = "14"
+    entry["setup"]["node_version"] = "14"
     issues = validate_ts_entry(entry, 0)
     assert len(issues) == 1
     assert "14" in issues[0]
@@ -71,7 +71,7 @@ def test_validate_ts_entry_bad_node_version():
 @pytest.mark.parametrize("version", ["20", "22"])
 def test_validate_ts_entry_valid_node_versions(version: str) -> None:
     entry = _make_valid_ts_entry()
-    entry["setup"]["node"] = version
+    entry["setup"]["node_version"] = version
     assert validate_ts_entry(entry, 0) == []
 
 

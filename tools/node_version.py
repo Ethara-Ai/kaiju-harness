@@ -4,10 +4,8 @@ Replaces the silent hardcoded ``node_version = "20"`` in
 ``tools/prepare_repo_ts.py``. Same two-tier algorithm as
 ``tools/python_version.py`` but with Node-specific signal sources.
 
-**Schema note:** the dataset entry key is ``setup["node"]`` (read by
-``commit0/harness/spec_ts.py:_get_node_version``). The legacy
-``prepare_repo_ts.py`` wrote ``"node_version"`` which was never read by the
-spec — silently defaulting every entry to ``DEFAULT_NODE_VERSION``.
+**Schema note:** the dataset entry key is ``setup["node_version"]`` (read by
+``commit0/harness/spec_ts.py:_get_node_version`` and the kaiju build wrapper).
 """
 
 from __future__ import annotations
@@ -102,7 +100,10 @@ def _collect_nvmrc(repo_root: Path) -> Signal | None:
         # Bare "lts/iron" / "lts/*" — not actionable, skip
         return None
     return Signal(
-        source=_NVMRC, tier=Tier.A_DECLARED, constraint=spec, raw=raw,
+        source=_NVMRC,
+        tier=Tier.A_DECLARED,
+        constraint=spec,
+        raw=raw,
     )
 
 

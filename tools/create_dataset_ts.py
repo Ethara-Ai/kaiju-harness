@@ -117,12 +117,11 @@ def validate_ts_entry(entry: dict, index: int) -> list[str]:
 
     if "reference_commit" in entry and len(entry.get("reference_commit", "")) < 7:
         issues.append(
-            f"[{index}] reference_commit too short: "
-            f"{entry.get('reference_commit', '')}"
+            f"[{index}] reference_commit too short: {entry.get('reference_commit', '')}"
         )
 
     if "setup" in entry and isinstance(entry["setup"], dict):
-        node_version = entry["setup"].get("node")
+        node_version = entry["setup"].get("node_version")
         if node_version and node_version not in SUPPORTED_NODE_VERSIONS:
             issues.append(
                 f"[{index}] Unsupported Node.js version '{node_version}'. "

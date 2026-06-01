@@ -182,9 +182,7 @@ def _assert_monorepo_safety(
     )
 
 
-def resolve_commits_from_remote(
-    fork_name: str, branch: str
-) -> tuple[str, str] | None:
+def resolve_commits_from_remote(fork_name: str, branch: str) -> tuple[str, str] | None:
     """Resolve (base, reference) commits from an existing remote branch.
 
     Used as a fallback when the initial push fails but the fork already
@@ -223,6 +221,7 @@ def resolve_commits_from_remote(
         logger.debug("Non-critical failure during remote commit resolution: %s", e)
         return None
 
+
 DEFAULT_ORG = "Zahgon"
 
 KNOWN_TEST_PACKAGES = {
@@ -243,8 +242,6 @@ from commit0.harness.constants_ts import TS_DATASET_BRANCH
 def _exec_prefix(pkg_manager: str) -> str:
     """Return the local-binary runner for the given package manager."""
     return {"pnpm": "pnpm exec", "yarn": "yarn", "bun": "bunx"}.get(pkg_manager, "npx")
-
-
 
 
 def detect_ts_src_dir(repo_dir: Path) -> str:
@@ -297,7 +294,8 @@ def detect_ts_src_dir(repo_dir: Path) -> str:
         ws_dir = repo_dir / workspace_root
         if ws_dir.is_dir():
             ts_files = [
-                f for f in ws_dir.rglob("*.ts")
+                f
+                for f in ws_dir.rglob("*.ts")
                 if not f.name.endswith(".d.ts")
                 and "node_modules" not in f.parts
                 and "dist" not in f.parts
@@ -308,10 +306,16 @@ def detect_ts_src_dir(repo_dir: Path) -> str:
     for child in sorted(repo_dir.iterdir()):
         if not child.is_dir():
             continue
-        if child.name.startswith(".") or child.name in {"node_modules", "dist", "build", "coverage"}:
+        if child.name.startswith(".") or child.name in {
+            "node_modules",
+            "dist",
+            "build",
+            "coverage",
+        }:
             continue
         ts_files = [
-            f for f in child.rglob("*.ts")
+            f
+            for f in child.rglob("*.ts")
             if not f.name.endswith(".d.ts") and "node_modules" not in f.parts
         ]
         if ts_files:
@@ -447,9 +451,7 @@ def _detect_test_dirs_from_config(repo_dir: Path) -> list[Path]:
         "spec",
     )
     _cfg_key_value_re = re.compile(
-        r"(?:"
-        + "|".join(re.escape(k) for k in _TEST_LOCATION_KEYS)
-        + r")"
+        r"(?:" + "|".join(re.escape(k) for k in _TEST_LOCATION_KEYS) + r")"
         r"""['"]*\s*[:=]\s*"""
         r"""[\[]*\s*['"` ]?([^'"`\n\],]{1,300})['"` \]]?""",
     )
@@ -502,7 +504,8 @@ def _detect_test_dirs_from_config(repo_dir: Path) -> list[Path]:
     for d in resolved:
         for _, _, files in _walk_repo_filtered(d):
             if any(
-                f.endswith((".ts", ".tsx", ".js", ".jsx", ".mts", ".cjs")) for f in files
+                f.endswith((".ts", ".tsx", ".js", ".jsx", ".mts", ".cjs"))
+                for f in files
             ):
                 kept.append(d)
                 break
@@ -532,18 +535,20 @@ def _detect_test_dirs_recursive_scan(repo_dir: Path) -> list[Path]:
             if f.endswith(_TEST_FILE_SUFFIXES):
                 counts[dirpath] = counts.get(dirpath, 0) + 1
     # Sort by count desc, then by shortest path (closer to root = more canonical).
-    return [p for p, _ in sorted(counts.items(), key=lambda kv: (-kv[1], len(kv[0].parts)))]
+    return [
+        p for p, _ in sorted(counts.items(), key=lambda kv: (-kv[1], len(kv[0].parts)))
+    ]
 
 
 def detect_ts_test_dirs(repo_dir: Path) -> list[Path]:
     """Find test directories containing TypeScript test files.
 
-   uses 3-tier detection (config-driven → recursive scan → empty).
+    uses 3-tier detection (config-driven → recursive scan → empty).
 
-    Returns
-    -------
-        List of absolute Paths to test directories, ranked by confidence. Empty when
-        no tests found anywhere (callers must handle this explicitly).
+     Returns
+     -------
+         List of absolute Paths to test directories, ranked by confidence. Empty when
+         no tests found anywhere (callers must handle this explicitly).
 
     """
     # Tier 1: config-driven
@@ -652,9 +657,6 @@ _BLOCKED_HOMEPAGE_DOMAINS = (
 )
 
 
-
-
-
 def _detect_spec_url(repo_dir: Path) -> str:
     """Detect documentation URL from package.json homepage field.
 
@@ -758,10 +760,9 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
         version_conflicts = []
 
     setup_dict = {
-        # IMPORTANT: spec_ts.py:_get_node_version reads setup["node"] — NOT
-        # setup["node_version"]. The legacy hardcoded "node_version" key was
-        # never read by the spec, silently defaulting every entry.
-        "node": node_version_value,
+        # kaiju-build-repo.yaml reads .setup.node_version for the base image tag.
+        # spec_ts.py:_get_node_version also reads setup["node_version"].
+        "node_version": node_version_value,
         "install": install_cmd,
         "packages": packages,
         "pre_install": [],
@@ -921,9 +922,7 @@ def create_ts_stubbed_branch(
             "rates with trivial baselines. Investigate the stubber output above."
         )
 
-    diff_ts = git(
-        repo_dir, "diff", "--cached", "--unified=0", "--", "*.ts", "*.tsx"
-    )
+    diff_ts = git(repo_dir, "diff", "--cached", "--unified=0", "--", "*.ts", "*.tsx")
     stub_marker_count = sum(
         1
         for line in diff_ts.splitlines()
@@ -1022,9 +1021,7 @@ def _run_post_stub_tsc_check(repo_dir: Path) -> None:
             f"First 2000 chars of project tsc errors:\n{project_errors[:2000]}"
         )
     if err_line_count == 0:
-        logger.info(
-            "  Post-stub tsc check: clean (node_modules/ errors ignored)"
-        )
+        logger.info("  Post-stub tsc check: clean (node_modules/ errors ignored)")
         return
     logger.warning(
         "  Post-stub tsc check: %d type errors in project code (non-fatal -- "
@@ -1096,9 +1093,7 @@ def prepare_ts_repo(
                     reference_commit[:12],
                 )
             else:
-                logger.warning(
-                    "  No remote branch found -- using local commits only"
-                )
+                logger.warning("  No remote branch found -- using local commits only")
 
     # ------------------------------------------------------------------
     # Scrape spec PDF and commit into repo (mirrors prepare_repo_go.py).
@@ -1127,9 +1122,7 @@ def prepare_ts_repo(
                 git(repo_dir, "add", "spec.pdf.bz2")
                 git(repo_dir, "commit", "-m", f"Add spec PDF for {repo_name}")
                 base_commit = get_head_sha(repo_dir)
-                logger.info(
-                    "  Updated base_commit with spec: %s", base_commit[:12]
-                )
+                logger.info("  Updated base_commit with spec: %s", base_commit[:12])
                 if not dry_run:
                     try:
                         push_to_fork(
@@ -1154,7 +1147,10 @@ def prepare_ts_repo(
         repo_short = full_name.split("/")[-1]
         try:
             from tools.scrape_pdf import scrape_readme_spec as _scrape_readme_spec
-            readme_spec_path, readme_spec_url = _scrape_readme_spec(repo_dir, specs_dir, repo_short)
+
+            readme_spec_path, readme_spec_url = _scrape_readme_spec(
+                repo_dir, specs_dir, repo_short
+            )
         except ImportError:
             readme_spec_path, readme_spec_url = None, ""
         if readme_spec_path:
@@ -1207,14 +1203,18 @@ def main() -> None:
         nargs="?",
         help="Batch input JSON (e.g. validated_ts.json). Mutually exclusive with --repo.",
     )
-    parser.add_argument("--repo", default=None, help="owner/name of a single GitHub repo")
+    parser.add_argument(
+        "--repo", default=None, help="owner/name of a single GitHub repo"
+    )
     parser.add_argument(
         "--org",
         default=DEFAULT_ORG,
         help=f"GitHub org for fork (default: {DEFAULT_ORG})",
     )
     parser.add_argument(
-        "--src-dir", default=None, help="Override auto-detected src dir (single-repo mode only)"
+        "--src-dir",
+        default=None,
+        help="Override auto-detected src dir (single-repo mode only)",
     )
     parser.add_argument("--tag", default=None, help="Pin to a specific release tag")
     parser.add_argument(
@@ -1276,7 +1276,7 @@ def main() -> None:
         if not isinstance(candidates, list):
             parser.error(
                 f"input_file {args.input_file} must contain a JSON list "
-                "or {\"data\": [...]}."
+                'or {"data": [...]}.'
             )
 
         for i, candidate in enumerate(candidates):
@@ -1291,7 +1291,8 @@ def main() -> None:
                     full_name=full_name,
                     clone_dir=args.clone_dir,
                     org=args.org,
-                    src_dir_override=candidate.get("src_dir_override") or candidate.get("src_dir"),
+                    src_dir_override=candidate.get("src_dir_override")
+                    or candidate.get("src_dir"),
                     release_tag=candidate.get("tag") or args.tag,
                     dry_run=args.dry_run,
                     specs_dir=args.specs_dir,
