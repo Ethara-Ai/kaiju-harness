@@ -22,6 +22,7 @@ from agent.agents_ts import TsAiderAgents
 from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
+from agent.llm_cost_capture import capture_module_calls
 from commit0.harness.constants_ts import TS_SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_ts_test_ids import main as get_ts_tests
@@ -215,19 +216,24 @@ def run_agent_for_repo_ts(
 
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
-                    _ = agent.run(
-                        "",
-                        test_cmd,
-                        lint_cmd,
-                        target_edit_files,
-                        test_log_dir,
-                        test_first=True,
-                        thinking_capture=thinking_capture,
-                        current_stage="test",
-                        current_module=test_file_name,
-                        max_test_output_length=agent_config.max_test_output_length,
-                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                    )
+                    with capture_module_calls(
+                        thinking_capture,
+                        module=test_file_name,
+                        log_dir=test_log_dir,
+                    ):
+                        _ = agent.run(
+                            "",
+                            test_cmd,
+                            lint_cmd,
+                            target_edit_files,
+                            test_log_dir,
+                            test_first=True,
+                            thinking_capture=thinking_capture,
+                            current_stage="test",
+                            current_module=test_file_name,
+                            max_test_output_length=agent_config.max_test_output_length,
+                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -282,17 +288,22 @@ def run_agent_for_repo_ts(
 
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
-                    _ = agent.run(
-                        "",
-                        "",
-                        lint_cmd,
-                        [lint_file],
-                        lint_log_dir,
-                        lint_first=True,
-                        thinking_capture=thinking_capture,
-                        current_stage="lint",
-                        current_module=lint_file_name,
-                    )
+                    with capture_module_calls(
+                        thinking_capture,
+                        module=lint_file_name,
+                        log_dir=lint_log_dir,
+                    ):
+                        _ = agent.run(
+                            "",
+                            "",
+                            lint_cmd,
+                            [lint_file],
+                            lint_log_dir,
+                            lint_first=True,
+                            thinking_capture=thinking_capture,
+                            current_stage="lint",
+                            current_module=lint_file_name,
+                        )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(lint_log_dir)
 
@@ -345,16 +356,21 @@ def run_agent_for_repo_ts(
                     )
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
-                    _ = agent.run(
-                        iter_message,
-                        "",
-                        lint_cmd,
-                        [f],
-                        file_log_dir,
-                        thinking_capture=thinking_capture,
-                        current_stage="draft",
-                        current_module=file_name,
-                    )
+                    with capture_module_calls(
+                        thinking_capture,
+                        module=file_name,
+                        log_dir=file_log_dir,
+                    ):
+                        _ = agent.run(
+                            iter_message,
+                            "",
+                            lint_cmd,
+                            [f],
+                            file_log_dir,
+                            thinking_capture=thinking_capture,
+                            current_stage="draft",
+                            current_module=file_name,
+                        )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

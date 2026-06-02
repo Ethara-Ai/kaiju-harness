@@ -26,11 +26,16 @@ _logger = logging.getLogger(__name__)
 #   3. Add the matching case to ``commit0/harness/resolve_model.sh``
 _BEDROCK_ENV_TO_BASE_MODEL: dict[str, str] = {
     "BEDROCK_OPUS_ARN": "anthropic.claude-opus-4-6-v1",
+    "BEDROCK_OPUS47_ARN": "anthropic.claude-opus-4-7-v1",
     "BEDROCK_GLM5_ARN": "zai.glm-5",
     "BEDROCK_KIMI_ARN": "moonshotai.kimi-k2.5",
     "BEDROCK_MINIMAX_ARN": "minimax.minimax-m2.5",
     "BEDROCK_NOVA2_LITE_ARN": "amazon.nova-2-lite-v1:0",
     "BEDROCK_NOVA_PREMIER_ARN": "amazon.nova-premier-v1:0",
+}
+
+_ARN_PROFILE_STATIC: dict[str, str] = {
+    "up13zed8728o": "anthropic.claude-opus-4-7-v1",
 }
 
 
@@ -48,12 +53,13 @@ def _extract_profile_id(arn: str) -> Optional[str]:
 
 
 def _build_arn_profile_map() -> dict[str, str]:
-    """Collect ``profile_id -> base_model`` from environment variables.
+    """Collect ``profile_id -> base_model`` from env vars + static defaults.
 
-    Unset / empty env vars are skipped silently so a teammate who has only
-    configured a subset of models still gets correct cost tracking for those.
+    Static entries cover ARNs that may be hit via tokenless fallback (when the
+    matching BEDROCK_*_ARN env var is unset). Env-var entries take precedence
+    if both define the same profile id.
     """
-    out: dict[str, str] = {}
+    out: dict[str, str] = dict(_ARN_PROFILE_STATIC)
     for env_key, base_model in _BEDROCK_ENV_TO_BASE_MODEL.items():
         arn = os.environ.get(env_key, "").strip()
         profile_id = _extract_profile_id(arn)
@@ -309,7 +315,8 @@ def _apply_thinking_capture_patches(
 
         coder._last_reasoning_content = ""
         saw_finish_reason = False
-        for chunk in completion:
+        completion_iter = iter(completion)
+        for chunk in completion_iter:
             try:
                 rc = chunk.choices[0].delta.reasoning_content
             except AttributeError:
@@ -333,12 +340,16 @@ def _apply_thinking_capture_patches(
 
             yield chunk
 
+        try:
+            for trailing in completion_iter:
+                if hasattr(trailing, "usage") and trailing.usage:
+                    coder._last_completion_usage = trailing.usage
+        except Exception:
+            pass
+
         if not coder._last_reasoning_content:
             coder._last_reasoning_content = None
 
-        # Bedrock Converse streaming silently truncates at max_tokens without
-        # sending messageStop/stopReason. Inject a synthetic finish_reason so
-        # aider's FinishReasonLength handler triggers prefill continuation.
         if not saw_finish_reason:
             yield ModelResponseStream(
                 choices=[StreamingChoices(finish_reason="length", delta=Delta())]

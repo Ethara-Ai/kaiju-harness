@@ -29,6 +29,11 @@ resolve_model() {
             MODEL_SHORT="opus4.6"
             CACHE_PROMPTS="true"
             ;;
+        opus47)
+            arn="${BEDROCK_OPUS47_ARN:-}"
+            MODEL_SHORT="opus4.7"
+            CACHE_PROMPTS="true"
+            ;;
         kimi)
             arn="${BEDROCK_KIMI_ARN:-}"
             MODEL_SHORT="kimi-k2.5"
@@ -79,13 +84,29 @@ resolve_model() {
     esac
 
     if [[ -z "$arn" ]]; then
-        echo "ERROR: alias '$arg' requires an inference-profile ARN in .env." >&2
+        local _default_model=""
+        local _default_cache_prompts=""
+        case "$arg" in
+            opus)
+                _default_model="bedrock/global.anthropic.claude-opus-4-6-v1"
+                _default_cache_prompts="true"
+                ;;
+            opus47)
+                _default_model="bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/up13zed8728o"
+                _default_cache_prompts="true"
+                ;;
+        esac
+        if [[ -n "$_default_model" ]]; then
+            MODEL_NAME="$_default_model"
+            CACHE_PROMPTS="$_default_cache_prompts"
+            return 0
+        fi
+        echo "ERROR: alias '$arg' requires an inference-profile ARN in .env," >&2
+        echo "       or a tokenless default for this alias." >&2
         echo "       Set the corresponding BEDROCK_*_ARN variable and retry." >&2
         echo "       See .env.example for the full list." >&2
         exit 2
     fi
-    # Accept either the routed form (bedrock/converse/arn:...) or the bare
-    # ARN (arn:aws:bedrock:...) in .env; normalise to the form litellm wants.
     if [[ "$arn" == arn:aws:bedrock:* ]]; then
         MODEL_NAME="bedrock/converse/${arn}"
     elif [[ "$arn" == bedrock/* && "$arn" != bedrock/converse/* ]]; then

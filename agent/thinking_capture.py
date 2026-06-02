@@ -1,7 +1,10 @@
 """Capture and store model thinking/reasoning tokens from aider runs."""
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from agent.llm_cost_capture import LlmCallLog
 
 
 @dataclass
@@ -70,6 +73,8 @@ class ThinkingCapture:
     summarizer_costs: SummarizerCostTracker = field(
         default_factory=SummarizerCostTracker
     )
+    module_llm_calls: dict[str, "LlmCallLog"] = field(default_factory=dict)
+    capture_mismatches: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def add_user_turn(
         self,
@@ -141,11 +146,17 @@ class ThinkingCapture:
         return [t for t in self.turns if t.module == module]
 
     def get_module_metrics(self, module: str) -> dict:
-        """Aggregate metrics for a single module."""
+        """Aggregate metrics for a single module.
+
+        When llm_cost_capture recorded calls for this module, totals come from
+        the full call log (main loop + aider auxiliaries + our summarizers) so
+        the numbers reconcile against provider billing. Otherwise fall back to
+        turn-derived totals which only see the main loop.
+        """
         module_turns = [
             t for t in self.turns if t.role == "assistant" and t.module == module
         ]
-        return {
+        metrics: dict = {
             "total_cost": sum(t.cost for t in module_turns),
             "total_prompt_tokens": sum(t.prompt_tokens for t in module_turns),
             "total_completion_tokens": sum(t.completion_tokens for t in module_turns),
@@ -154,6 +165,24 @@ class ThinkingCapture:
             "cache_write_tokens": sum(t.cache_write_tokens for t in module_turns),
             "num_turns": len(module_turns),
         }
+
+        call_log = self.module_llm_calls.get(module)
+        if call_log is not None and call_log.calls:
+            totals = call_log.grand_totals()
+            metrics["total_cost"] = totals["cost_usd"]
+            metrics["total_prompt_tokens"] = totals["prompt_tokens"]
+            metrics["total_completion_tokens"] = totals["completion_tokens"]
+            metrics["total_thinking_tokens"] = totals["thinking_tokens"]
+            metrics["cache_hit_tokens"] = totals["cache_read_tokens"]
+            metrics["cache_write_tokens"] = totals["cache_write_tokens"]
+            metrics["by_source"] = call_log.by_source()
+            metrics["llm_calls"] = [c.to_dict() for c in call_log.calls]
+
+        mismatch = self.capture_mismatches.get(module)
+        if mismatch is not None:
+            metrics["capture_mismatch"] = mismatch
+
+        return metrics
 
     def get_metrics(self) -> dict:
         """Aggregate metrics across all turns."""
@@ -182,7 +211,7 @@ class ThinkingCapture:
             per_stage[t.stage]["completion_tokens"] += t.completion_tokens
             per_stage[t.stage]["thinking_tokens"] += t.thinking_tokens
 
-        return {
+        result: dict = {
             "total_cost": total_cost + self.summarizer_costs.total_cost,
             "total_prompt_tokens": total_prompt
             + self.summarizer_costs.total_prompt_tokens,
@@ -192,3 +221,51 @@ class ThinkingCapture:
             "per_stage": per_stage,
             **self.summarizer_costs.to_dict(),
         }
+
+        if self.module_llm_calls:
+            aggregated: dict[str, dict[str, Any]] = {}
+            grand_cost = 0.0
+            grand_prompt = 0
+            grand_completion = 0
+            grand_thinking = 0
+            grand_cache_read = 0
+            grand_cache_write = 0
+            grand_calls = 0
+            for log in self.module_llm_calls.values():
+                for src, b in log.by_source().items():
+                    a = aggregated.setdefault(
+                        src,
+                        {
+                            "calls": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "cache_read_tokens": 0,
+                            "cache_write_tokens": 0,
+                            "thinking_tokens": 0,
+                            "cost_usd": 0.0,
+                        },
+                    )
+                    for k, v in b.items():
+                        a[k] = a[k] + v
+                totals = log.grand_totals()
+                grand_calls += totals["calls"]
+                grand_cost += totals["cost_usd"]
+                grand_prompt += totals["prompt_tokens"]
+                grand_completion += totals["completion_tokens"]
+                grand_thinking += totals["thinking_tokens"]
+                grand_cache_read += totals["cache_read_tokens"]
+                grand_cache_write += totals["cache_write_tokens"]
+
+            result["total_cost"] = grand_cost
+            result["total_prompt_tokens"] = grand_prompt
+            result["total_completion_tokens"] = grand_completion
+            result["total_thinking_tokens"] = grand_thinking
+            result["cache_hit_tokens"] = grand_cache_read
+            result["cache_write_tokens"] = grand_cache_write
+            result["total_llm_calls"] = grand_calls
+            result["by_source"] = aggregated
+
+        if self.capture_mismatches:
+            result["capture_mismatches"] = dict(self.capture_mismatches)
+
+        return result
