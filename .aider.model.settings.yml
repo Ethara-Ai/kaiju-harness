@@ -61,4 +61,8 @@
   use_temperature: false
   extra_params:
     max_tokens: 128000
+    thinking:
+      type: adaptive
   cache_control: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking

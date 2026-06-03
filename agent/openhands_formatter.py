@@ -250,6 +250,15 @@ def _make_id() -> str:
 
 
 def _make_timestamp_from_turn(turn: "Turn", offset_ms: int = 0) -> str:
+    ts_raw = getattr(turn, "timestamp", "") or ""
+    if ts_raw:
+        try:
+            ts = datetime.fromisoformat(ts_raw)
+            if offset_ms:
+                ts += timedelta(milliseconds=offset_ms)
+            return ts.isoformat()
+        except ValueError:
+            pass
     base = datetime(2025, 1, 1, tzinfo=timezone.utc)
     ts = base + timedelta(seconds=turn.turn_number * 10, milliseconds=offset_ms)
     return ts.isoformat()
@@ -334,6 +343,8 @@ def make_action_event(
     tool_call_id: str | None = None,
     timestamp: str | None = None,
     summary: str | None = None,
+    llm_response_id: str | None = None,
+    usage: dict | None = None,
 ) -> dict:
     thought_content = [{"type": "text", "text": thought}] if thought else []
     thinking = thinking_blocks or []
@@ -371,10 +382,11 @@ def make_action_event(
                 "arguments": arguments,
                 "origin": "completion",
             },
-            "llm_response_id": None,
+            "llm_response_id": llm_response_id,
             "security_risk": "UNKNOWN",
             "summary": summary or f"Edit {edit.path}",
             "kind": "ActionEvent",
+            **({"usage": usage} if usage else {}),
         }
 
     tcid = _make_id()
@@ -390,6 +402,8 @@ def make_action_event(
         "tool_call": None,
         "summary": summary or "Agent thinking (no edits)",
         "kind": "ActionEvent",
+        "llm_response_id": llm_response_id,
+        **({"usage": usage} if usage else {}),
     }
 
 
@@ -521,6 +535,19 @@ def _convert_assistant_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
     reasoning, edits = parse_edit_blocks(turn.content)
     thinking_blocks = _make_thinking_blocks(turn.thinking)
     events: list[dict] = []
+    rid = getattr(turn, "llm_response_id", None)
+    turn_usage = {
+        "prompt_tokens": int(getattr(turn, "prompt_tokens", 0) or 0),
+        "completion_tokens": int(getattr(turn, "completion_tokens", 0) or 0),
+        "cache_read_tokens": int(getattr(turn, "cache_hit_tokens", 0) or 0),
+        "cache_write_tokens": int(getattr(turn, "cache_write_tokens", 0) or 0),
+        "thinking_tokens": int(getattr(turn, "thinking_tokens", 0) or 0),
+        "cost_usd": float(getattr(turn, "cost", 0.0) or 0.0),
+    }
+    if not any(v for v in turn_usage.values()):
+        turn_usage_payload: dict | None = None
+    else:
+        turn_usage_payload = turn_usage
 
     if not edits:
         events.append(
@@ -530,6 +557,8 @@ def _convert_assistant_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
                 thinking_blocks=thinking_blocks,
                 timestamp=base_timestamp,
                 summary=f"Reasoning (no edits) — {turn.stage}/{turn.module}",
+                llm_response_id=rid,
+                usage=turn_usage_payload,
             )
         )
         return events
@@ -548,6 +577,8 @@ def _convert_assistant_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
                 tool_call_id=tool_call_id,
                 timestamp=ts,
                 summary=f"str_replace in {edit.path}",
+                llm_response_id=rid if idx == 0 else None,
+                usage=turn_usage_payload if idx == 0 else None,
             )
         )
         events.append(

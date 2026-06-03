@@ -63,6 +63,8 @@ class Turn:
     module: str = ""  # e.g., "src__itsdangerous___json"
     turn_number: int = 0
     edit_error: str | None = None
+    timestamp: str = ""
+    llm_response_id: str | None = None
 
 
 @dataclass
@@ -82,8 +84,12 @@ class ThinkingCapture:
         stage: str,
         module: str,
         turn_number: int,
+        timestamp: str = "",
     ) -> None:
         """Record a user message turn."""
+        if not timestamp:
+            from datetime import datetime, timezone
+            timestamp = datetime.now(timezone.utc).isoformat()
         self.turns.append(
             Turn(
                 role="user",
@@ -91,6 +97,7 @@ class ThinkingCapture:
                 stage=stage,
                 module=module,
                 turn_number=turn_number,
+                timestamp=timestamp,
             )
         )
 
@@ -107,8 +114,13 @@ class ThinkingCapture:
         stage: str,
         module: str,
         turn_number: int,
+        timestamp: str = "",
+        llm_response_id: str | None = None,
     ) -> None:
         """Record an assistant response turn with optional thinking content."""
+        if not timestamp:
+            from datetime import datetime, timezone
+            timestamp = datetime.now(timezone.utc).isoformat()
         self.turns.append(
             Turn(
                 role="assistant",
@@ -123,6 +135,8 @@ class ThinkingCapture:
                 stage=stage,
                 module=module,
                 turn_number=turn_number,
+                timestamp=timestamp,
+                llm_response_id=llm_response_id,
             )
         )
 

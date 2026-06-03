@@ -277,6 +277,7 @@ def _apply_thinking_capture_patches(
     coder._turn_counter = getattr(coder, "_turn_counter", 0)
     coder._last_reasoning_content = None
     coder._last_completion_usage = None
+    coder._last_response_id = None
 
     _original_show_send_output = coder.show_send_output
     _original_show_send_output_stream = coder.show_send_output_stream
@@ -302,6 +303,7 @@ def _apply_thinking_capture_patches(
             except AttributeError:
                 coder._last_reasoning_content = None
         coder._last_completion_usage = getattr(completion, "usage", None)
+        coder._last_response_id = getattr(completion, "id", None) or coder._last_response_id
         _original_show_send_output(completion)
 
     # Patch 2: Streaming response — intercept reasoning from chunks
@@ -329,6 +331,9 @@ def _apply_thinking_capture_patches(
 
             if hasattr(chunk, "usage") and chunk.usage:
                 coder._last_completion_usage = chunk.usage
+            chunk_id = getattr(chunk, "id", None)
+            if chunk_id:
+                coder._last_response_id = chunk_id
 
             if (
                 not saw_finish_reason
@@ -344,6 +349,9 @@ def _apply_thinking_capture_patches(
             for trailing in completion_iter:
                 if hasattr(trailing, "usage") and trailing.usage:
                     coder._last_completion_usage = trailing.usage
+                trailing_id = getattr(trailing, "id", None)
+                if trailing_id:
+                    coder._last_response_id = trailing_id
         except Exception:
             pass
 
@@ -387,6 +395,7 @@ def _apply_thinking_capture_patches(
                     if details and hasattr(details, "get"):
                         thinking_tokens = details.get("reasoning_tokens", 0) or 0
 
+            from datetime import datetime, timezone
             coder._thinking_capture.add_assistant_turn(
                 content=coder.partial_response_content,
                 thinking=coder._last_reasoning_content,
@@ -399,6 +408,8 @@ def _apply_thinking_capture_patches(
                 stage=coder._current_stage,
                 module=coder._current_module,
                 turn_number=coder._turn_counter,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                llm_response_id=coder._last_response_id,
             )
         _original_add_assistant_reply()
 
