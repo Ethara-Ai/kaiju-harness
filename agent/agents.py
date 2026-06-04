@@ -417,14 +417,11 @@ def _apply_thinking_capture_patches(
     # Patch 5: Propagate thinking patches to clones (used by cmd_lint)
     _original_clone = coder.clone
 
-    # Patch 6: Snapshot tokens/cost before show_usage_report resets them
     def patched_show_usage_report() -> None:
-        coder._snapshot_prompt_tokens = getattr(coder, "message_tokens_sent", 0)
-        coder._snapshot_completion_tokens = getattr(coder, "message_tokens_received", 0)
-        coder._snapshot_cost = getattr(coder, "message_cost", 0.0)
-
         usage = coder._last_completion_usage
-        if usage:
+        if usage is not None:
+            coder._snapshot_prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            coder._snapshot_completion_tokens = getattr(usage, "completion_tokens", 0) or 0
             coder._snapshot_cache_hit_tokens = (
                 getattr(usage, "prompt_cache_hit_tokens", 0)
                 or getattr(usage, "cache_read_input_tokens", 0)
@@ -433,6 +430,25 @@ def _apply_thinking_capture_patches(
             coder._snapshot_cache_write_tokens = (
                 getattr(usage, "cache_creation_input_tokens", 0) or 0
             )
+            try:
+                from agent.llm_cost_capture import _compute_cost
+                model_name = getattr(coder, "main_model", None)
+                model_str = getattr(model_name, "name", None) or str(model_name) or ""
+                coder._snapshot_cost = _compute_cost(
+                    model_str,
+                    coder._snapshot_prompt_tokens,
+                    coder._snapshot_completion_tokens,
+                    coder._snapshot_cache_hit_tokens,
+                    coder._snapshot_cache_write_tokens,
+                )
+            except Exception:
+                coder._snapshot_cost = getattr(coder, "message_cost", 0.0)
+        else:
+            coder._snapshot_prompt_tokens = getattr(coder, "message_tokens_sent", 0)
+            coder._snapshot_completion_tokens = getattr(coder, "message_tokens_received", 0)
+            coder._snapshot_cache_hit_tokens = 0
+            coder._snapshot_cache_write_tokens = 0
+            coder._snapshot_cost = getattr(coder, "message_cost", 0.0)
 
         _original_show_usage_report()
 
