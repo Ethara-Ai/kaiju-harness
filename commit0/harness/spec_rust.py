@@ -67,6 +67,7 @@ class RustSpec(Spec):
             f"git checkout {base_commit} -- "
             f"tests/ '**/tests/' benches/ '**/benches/' "
             f"Cargo.toml '**/Cargo.toml' Cargo.lock '**/Cargo.lock' "
+            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )
 

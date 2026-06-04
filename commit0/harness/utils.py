@@ -163,6 +163,19 @@ _PROTECTED_TEST_PATHSPECS: tuple[str, ...] = (
     ":(exclude,icase)**/*.feature",
     ":(exclude,icase)features/**",
     ":(exclude,icase)**/features/**",
+    # ── Issue 3 extension: Python startup hooks, env, git metadata ──
+    ":(exclude,icase)sitecustomize.py",
+    ":(exclude,icase)**/sitecustomize.py",
+    ":(exclude,icase)usercustomize.py",
+    ":(exclude,icase)**/usercustomize.py",
+    ":(exclude,icase)*.pth",
+    ":(exclude,icase)**/*.pth",
+    ":(exclude,icase).env",
+    ":(exclude,icase)**/.env",
+    ":(exclude,icase).gitmodules",
+    ":(exclude,icase)**/.gitmodules",
+    ":(exclude,icase).gitattributes",
+    ":(exclude,icase)**/.gitattributes",
 )
 
 
@@ -353,6 +366,7 @@ def generate_patch_between_commits(
     """
     try:
         patch = repo.git.diff(
+            "--no-renames",
             old_commit,
             new_commit,
             "--",

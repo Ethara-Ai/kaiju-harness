@@ -223,7 +223,7 @@ EXCLUDED_DIRS: set[str] = {
 }
 
 
-def _find_files_to_edit(base_dir: str, src_dir: str, test_dir: str) -> list[str]:
+def _find_files_to_edit(base_dir: str, src_dir: str, test_dir: str) -> tuple[list[str], list[str]]:
     """Identify files to remove content by heuristics.
     We assume source code is under [lib]/[lib] or [lib]/src.
     We exclude test code. This function would not work
@@ -239,8 +239,9 @@ def _find_files_to_edit(base_dir: str, src_dir: str, test_dir: str) -> list[str]
 
     Returns:
     -------
-        list[str]: A list of files to be edited.
-
+        tuple[list[str], list[str]]: (editable_source_files, test_files).
+        editable_source_files have tests subtracted; test_files is the sorted list
+        of test files discovered under ``test_dir`` (one per comma-separated entry).
     """
     files = [
         os.path.normpath(f)
@@ -271,7 +272,7 @@ def _find_files_to_edit(base_dir: str, src_dir: str, test_dir: str) -> list[str]
     files = [f for f in files if "__main__" not in f]
     # don't edit conftest.py files
     files = [f for f in files if "conftest.py" not in f]
-    return files
+    return files, sorted(test_files)
 
 
 def ignore_cycles(graph: dict) -> list[str]:
@@ -320,10 +321,10 @@ def get_target_edit_files(
     branch: str,
     reference_commit: str,
     use_topo_sort_dependencies: bool = True,
-) -> tuple[list[str], dict]:
+) -> tuple[list[str], dict, list[str]]:
     """Find the files with functions with the pass statement."""
     target_dir = str(local_repo.working_dir)
-    files = _find_files_to_edit(target_dir, src_dir, test_dir)
+    files, test_files_abs = _find_files_to_edit(target_dir, src_dir, test_dir)
     filtered_files = []
     for file_path in files:
         with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as file:
@@ -382,12 +383,18 @@ def get_target_edit_files(
         value_without_prefix = [v.replace(target_dir, "").lstrip("/") for v in value]
         import_dependencies_without_prefix[key_without_prefix] = value_without_prefix
     if use_topo_sort_dependencies:
-        return topological_sort_files, import_dependencies_without_prefix
+        test_files_rel = [
+            f.replace(target_dir, "").lstrip("/") for f in test_files_abs
+        ]
+        return topological_sort_files, import_dependencies_without_prefix, test_files_rel
     else:
         filtered_files = [
             file.replace(target_dir, "").lstrip("/") for file in filtered_files
         ]
-        return filtered_files, import_dependencies_without_prefix
+        test_files_rel = [
+            f.replace(target_dir, "").lstrip("/") for f in test_files_abs
+        ]
+        return filtered_files, import_dependencies_without_prefix, test_files_rel
 
 
 def get_target_edit_files_from_patch(

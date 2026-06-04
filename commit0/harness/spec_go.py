@@ -88,6 +88,7 @@ class Commit0GoSpec(Spec):
             f"testdata/ '**/testdata/' "
             f"'**/test/' '**/tests/' "
             f"Makefile '**/Makefile' go.mod go.sum "
+            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )
 

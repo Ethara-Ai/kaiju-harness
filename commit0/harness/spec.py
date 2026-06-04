@@ -169,6 +169,8 @@ class Commit0Spec(Spec):
             f"git checkout {self.instance['base_commit']} -- "
             f"tests/ test/ conftest.py "
             f"pytest.ini setup.cfg tox.ini pyproject.toml .coveragerc "
+            f"sitecustomize.py usercustomize.py noxfile.py Makefile "
+            f".env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )
         eval_script_list = [

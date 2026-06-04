@@ -126,7 +126,7 @@ def run_agent_for_repo(
         local_repo.git.reset("--hard", example["base_commit"])
 
     # get target files to edit and test files to run
-    target_edit_files, import_dependencies = get_target_edit_files(
+    target_edit_files, import_dependencies, test_files_readonly = get_target_edit_files(
         local_repo,
         example["src_dir"],
         example["test"]["test_dir"],
@@ -239,6 +239,7 @@ def run_agent_for_repo(
                         current_module=test_file_name,
                         max_test_output_length=agent_config.max_test_output_length,
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        test_files_readonly=test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(test_log_dir)
@@ -246,7 +247,7 @@ def run_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
+                        local_repo.git.diff("--no-renames", pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )
@@ -308,6 +309,7 @@ def run_agent_for_repo(
                         thinking_capture=thinking_capture,
                         current_stage="lint",
                         current_module=lint_file_name,
+                        test_files_readonly=test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(lint_log_dir)
@@ -315,7 +317,7 @@ def run_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
+                        local_repo.git.diff("--no-renames", pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )
@@ -384,6 +386,7 @@ def run_agent_for_repo(
                         thinking_capture=thinking_capture,
                         current_stage="draft",
                         current_module=file_name,
+                        test_files_readonly=test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(file_log_dir)
@@ -391,7 +394,7 @@ def run_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
+                        local_repo.git.diff("--no-renames", pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )

@@ -6,6 +6,7 @@ import logging
 from aider.coders import Coder
 from aider.models import Model
 from aider.io import InputOutput
+from agent.guarded_io import GuardedInputOutput
 import re
 import os
 from typing import Any, Optional
@@ -543,6 +544,7 @@ class AiderAgents(Agents):
         current_module: str = "",
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
+        test_files_readonly: Optional[list[str]] = None,
     ) -> AgentReturn:
         """Start aider agent"""
         if test_cmd:
@@ -575,15 +577,18 @@ class AiderAgents(Agents):
             handle_logging("httpx", log_file)
             handle_logging("backoff", log_file)
 
-            io = InputOutput(
+            io = GuardedInputOutput(
                 yes=True,
                 input_history_file=input_history_file,
                 chat_history_file=chat_history_file,
+                allowed_add_paths=set(fnames),
+                protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")
             coder = Coder.create(
                 main_model=self.model,
                 fnames=fnames,
+                read_only_fnames=test_files_readonly or [],
                 auto_lint=auto_lint,
                 auto_test=auto_test,
                 lint_cmds={"python": lint_cmd},
@@ -591,7 +596,12 @@ class AiderAgents(Agents):
                 io=io,
                 cache_prompts=self.cache_prompts,
             )
-            coder.max_reflections = self.max_iteration
+            # Clamp max_reflections when read_only_fnames is active to prevent
+            # infinite reflection loops on stubborn models refusing protected-path edits.
+            if test_files_readonly:
+                coder.max_reflections = min(self.max_iteration, 5)
+            else:
+                coder.max_reflections = self.max_iteration
             coder.stream = True
             coder.gpt_prompts.main_system += (
                 "\n\nNEVER edit test files. NEVER create new test files. Test files are"

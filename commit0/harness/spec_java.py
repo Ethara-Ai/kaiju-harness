@@ -213,6 +213,7 @@ class Commit0JavaSpec(Spec):
             f"pom.xml '**/pom.xml' build.gradle '**/build.gradle' "
             f"build.gradle.kts '**/build.gradle.kts' "
             f"settings.gradle '**/settings.gradle' settings.gradle.kts '**/settings.gradle.kts' "
+            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )
         return [

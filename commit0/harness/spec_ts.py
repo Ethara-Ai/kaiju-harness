@@ -165,6 +165,7 @@ class Commit0TsSpec(Spec):
             f"vitest.config.js vitest.config.ts vitest.config.mjs "
             f"vitest.workspace.js vitest.workspace.ts "
             f"babel.config.js babel.config.json .mocharc.js .mocharc.json "
+            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )
         return [

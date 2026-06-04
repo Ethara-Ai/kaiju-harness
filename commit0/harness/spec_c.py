@@ -124,6 +124,7 @@ class Commit0CSpec(Spec):
             f"'test_*.c' '**/test_*.c' '*_test.c' '**/*_test.c' "
             f"'test_*.h' '**/test_*.h' "
             f"CMakeLists.txt '**/CMakeLists.txt' Makefile '**/Makefile' meson.build '**/meson.build' "
+            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )
 

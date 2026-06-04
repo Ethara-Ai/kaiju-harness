@@ -103,6 +103,7 @@ class CppSpec(Spec):
             f"'test_*.h' '**/test_*.h' "
             f"googletest/ gtest/ "
             f"CMakeLists.txt '**/CMakeLists.txt' Makefile '**/Makefile' meson.build '**/meson.build' "
+            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )
 

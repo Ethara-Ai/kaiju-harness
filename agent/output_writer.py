@@ -77,7 +77,7 @@ def extract_git_patch(repo_path: str, base_commit: str) -> str:
 
     repo = git.Repo(repo_path)
     try:
-        return repo.git.diff(base_commit, "--", ".", *_PROTECTED_TEST_PATHSPECS)
+        return repo.git.diff("--no-renames", base_commit, "--", ".", *_PROTECTED_TEST_PATHSPECS)
     except Exception as e:
         logger.warning("Failed to extract git patch from %s at commit %s: %s", repo_path, base_commit, e)
         return ""
