@@ -26,7 +26,7 @@ from commit0.harness.constants import SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
-from commit0.harness.utils import load_dataset_from_config
+from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
 from commit0.cli import read_commit0_config_file
 from pathlib import Path
 from agent.run_agent import DirContext, run_eval_after_each_commit
@@ -246,7 +246,7 @@ def run_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )
@@ -315,7 +315,7 @@ def run_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )
@@ -391,7 +391,7 @@ def run_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )

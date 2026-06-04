@@ -158,10 +158,20 @@ class Commit0TsSpec(Spec):
             else self.instance.base_commit
         )
 
+        revert_test_paths = (
+            f"git checkout {shlex.quote(base_commit)} -- "
+            f"test/ tests/ __tests__/ "
+            f"jest.config.js jest.config.ts jest.config.mjs jest.config.cjs "
+            f"vitest.config.js vitest.config.ts vitest.config.mjs "
+            f"vitest.workspace.js vitest.workspace.ts "
+            f"babel.config.js babel.config.json .mocharc.js .mocharc.json "
+            f"2>/dev/null || true"
+        )
         return [
             f"cd {shlex.quote(self.repo_directory)}",
             f"git reset --hard {shlex.quote(base_commit)}",
             f"git apply --allow-empty -v {shlex.quote(diff_path)}",
+            revert_test_paths,
             "git status",
             f"{test_cmd} {json_flags}{force_flags} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",

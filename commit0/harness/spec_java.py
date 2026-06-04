@@ -204,16 +204,26 @@ class Commit0JavaSpec(Spec):
             raise ValueError(
                 f"'base_commit' is required in instance data for repo '{repo}'"
             )
+        revert_test_paths = (
+            f"git checkout {base_commit} -- "
+            f"src/test/ '**/src/test/' src/androidTest/ '**/src/androidTest/' "
+            f"src/integrationTest/ '**/src/integrationTest/' "
+            f"'*Test.java' '**/*Test.java' '*Tests.java' '**/*Tests.java' "
+            f"'*IT.java' '**/*IT.java' '*Spec.groovy' '**/*Spec.groovy' "
+            f"pom.xml '**/pom.xml' build.gradle '**/build.gradle' "
+            f"build.gradle.kts '**/build.gradle.kts' "
+            f"settings.gradle '**/settings.gradle' settings.gradle.kts '**/settings.gradle.kts' "
+            f"2>/dev/null || true"
+        )
         return [
             f"cd {self.repo_directory}",
             *self._wrapper_preamble(),
-            # Provide toolchains.xml so Maven toolchains-plugin resolves all JDK versions.
             *self._toolchains_xml_commands(),
-            # Re-add origin and fetch the base tag (setup script removes origin after image build).
             f"git remote add origin https://github.com/{repo} 2>/dev/null || true",
             f"git fetch --depth 1 origin {base_commit} && git tag -f {base_commit} FETCH_HEAD 2>/dev/null || true",
             f"git reset --hard {base_commit}",
             "if [ -s /patch.diff ]; then git apply -v /patch.diff; fi",
+            revert_test_paths,
             # Compile first — Java fails fast on compile errors
             f"{compile_cmd} 2>&1 | tee compile_output.txt",
             "COMPILE_EXIT=${PIPESTATUS[0]}",

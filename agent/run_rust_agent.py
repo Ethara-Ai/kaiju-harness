@@ -34,7 +34,7 @@ from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_rust import RUST_SPLIT
 from commit0.harness.split_utils import resolve_split
-from commit0.harness.utils import load_dataset_from_config
+from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +348,7 @@ def run_rust_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )
@@ -413,7 +413,7 @@ def run_rust_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )
@@ -477,7 +477,7 @@ def run_rust_agent_for_repo(
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
                     module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                         if pre_sha != post_sha
                         else ""
                     )

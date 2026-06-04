@@ -94,11 +94,23 @@ class CppSpec(Spec):
 
         build_system = self._get_build_system()
         build_cmd = BUILD_CMD_MAP.get(build_system, "make -j$(nproc)")
+        base_commit = self.instance["base_commit"]
+        revert_test_paths = (
+            f"git checkout {base_commit} -- "
+            f"tests/ '**/tests/' test/ '**/test/' "
+            f"'test_*.cpp' '**/test_*.cpp' '*_test.cpp' '**/*_test.cpp' "
+            f"'test_*.cc' '**/test_*.cc' '*_test.cc' '**/*_test.cc' "
+            f"'test_*.h' '**/test_*.h' "
+            f"googletest/ gtest/ "
+            f"CMakeLists.txt '**/CMakeLists.txt' Makefile '**/Makefile' meson.build '**/meson.build' "
+            f"2>/dev/null || true"
+        )
 
         return [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
             f"git apply -v {diff_path} || git apply {diff_path} || true",
+            revert_test_paths,
             "git status",
             f"{build_cmd}",
             f"{test_cmd} {{test_ids}} > test_output.txt 2>&1",

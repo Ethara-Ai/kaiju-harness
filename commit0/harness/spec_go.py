@@ -81,11 +81,19 @@ class Commit0GoSpec(Spec):
     def make_eval_script_list(self) -> list[str]:
         diff_path = "/patch.diff" if self.absolute else "../patch.diff"
         test_cmd = self.instance["test"].get("test_cmd", "go test -json -count=1 ./...")
+        base_commit = self.instance["base_commit"]
+        revert_test_paths = (
+            f"git checkout {base_commit} -- "
+            f"'*_test.go' '**/*_test.go' "
+            f"testdata/ '**/testdata/' "
+            f"'**/test/' '**/tests/' "
+            f"Makefile '**/Makefile' go.mod go.sum "
+            f"2>/dev/null || true"
+        )
 
         eval_script_list = [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
-            # Apply patch: skip if empty, abort eval if non-empty patch fails
             f"if [ -s {diff_path} ]; then",
             f"  git apply -v {diff_path}",
             "  if [ $? -ne 0 ]; then",
@@ -95,6 +103,7 @@ class Commit0GoSpec(Spec):
             f"    exit 0",
             "  fi",
             "fi",
+            revert_test_paths,
             "find . -name '*.go' -not -name '*_test.go' -not -path '*/vendor/*' | xargs goimports -w",
             "git status",
             f"{test_cmd} > test_output.json 2> test_stderr.txt",

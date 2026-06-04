@@ -165,10 +165,17 @@ class Commit0Spec(Spec):
     def make_eval_script_list(self) -> list[str]:
         """Run the tests."""
         diff_path = "/patch.diff" if self.absolute else "../patch.diff"
+        revert_test_paths = (
+            f"git checkout {self.instance['base_commit']} -- "
+            f"tests/ test/ conftest.py "
+            f"pytest.ini setup.cfg tox.ini pyproject.toml .coveragerc "
+            f"2>/dev/null || true"
+        )
         eval_script_list = [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
             f"git apply --allow-empty -v {diff_path}",
+            revert_test_paths,
             "git status",
             f"{shlex.quote(self.instance['test']['test_cmd'])} --json-report --json-report-file=report.json --continue-on-collection-errors{{coverage}} {{test_ids}} > test_output.txt 2>&1",
             "echo $? > pytest_exit_code.txt",
@@ -230,11 +237,18 @@ class SWEBenchSpec(Spec):
                 elif install.startswith("python setup.py"):
                     pass
                 results.append(install)
+        revert_test_paths = (
+            f"git checkout {self.instance['base_commit']} -- "
+            f"tests/ test/ conftest.py "
+            f"pytest.ini setup.cfg tox.ini pyproject.toml .coveragerc "
+            f"2>/dev/null || true"
+        )
         eval_script_list = (
             [
                 f"cd {self.repo_directory}",
                 f"git reset --hard {self.instance['base_commit']}",
                 "git apply --allow-empty -v /patch.diff",
+                revert_test_paths,
             ]
             + results
             + [

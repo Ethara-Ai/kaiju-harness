@@ -68,23 +68,16 @@ def write_output_jsonl(
 def extract_git_patch(repo_path: str, base_commit: str) -> str:
     """Extract the git diff between current state and base_commit.
 
-    Parameters
-    ----------
-    repo_path : str
-        Path to the git repository.
-    base_commit : str
-        The base commit hash to diff against.
-
-    Returns
-    -------
-    str
-        The git diff as a string, or empty string on failure.
+    Test-file paths and test-runner config are stripped via
+    ``commit0.harness.utils._PROTECTED_TEST_PATHSPECS`` so trajectory metadata
+    matches the eval-bound patch (no R8 reward-hacking leakage).
     """
     import git
+    from commit0.harness.utils import _PROTECTED_TEST_PATHSPECS
 
     repo = git.Repo(repo_path)
     try:
-        return repo.git.diff(base_commit, "--", ".")
+        return repo.git.diff(base_commit, "--", ".", *_PROTECTED_TEST_PATHSPECS)
     except Exception as e:
         logger.warning("Failed to extract git patch from %s at commit %s: %s", repo_path, base_commit, e)
         return ""

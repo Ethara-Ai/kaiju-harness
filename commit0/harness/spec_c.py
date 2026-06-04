@@ -117,6 +117,15 @@ class Commit0CSpec(Spec):
             "ctest --test-dir build --output-on-failure "
             "--output-junit /testbed/test_report.xml"
         )
+        base_commit = self.instance["base_commit"]
+        revert_test_paths = (
+            f"git checkout {base_commit} -- "
+            f"tests/ '**/tests/' test/ '**/test/' "
+            f"'test_*.c' '**/test_*.c' '*_test.c' '**/*_test.c' "
+            f"'test_*.h' '**/test_*.h' "
+            f"CMakeLists.txt '**/CMakeLists.txt' Makefile '**/Makefile' meson.build '**/meson.build' "
+            f"2>/dev/null || true"
+        )
 
         return [
             f"cd {self.repo_directory}",
@@ -126,6 +135,7 @@ class Commit0CSpec(Spec):
             "echo PATCH_APPLY_FAILED > compile_errors.txt; "
             "echo 1 > test_exit_code.txt; exit 0; }",
             "fi",
+            revert_test_paths,
             "git status",
             "cmake -S . -B build -G Ninja -DBUILD_TESTING=ON "
             f"-DCMAKE_BUILD_TYPE=Debug {quoted_cmake_flags} "

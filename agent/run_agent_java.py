@@ -29,6 +29,7 @@ from commit0.harness.constants_java import (
     JAVA_BASE_BRANCH,
     detect_build_system,
 )
+from commit0.harness.utils import _PROTECTED_TEST_PATHSPECS
 
 logger = logging.getLogger(__name__)
 
@@ -363,7 +364,7 @@ def run_java_agent(
                     if thinking_capture is not None:
                         post_sha = local_repo.head.commit.hexsha
                         module_patch = (
-                            local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                            local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                             if pre_sha != post_sha
                             else ""
                         )
@@ -439,7 +440,7 @@ def run_java_agent(
                     if thinking_capture is not None:
                         post_sha = local_repo.head.commit.hexsha
                         module_patch = (
-                            local_repo.git.diff(pre_sha, post_sha, "--", ".")
+                            local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
                             if pre_sha != post_sha
                             else ""
                         )

@@ -62,11 +62,17 @@ class RustSpec(Spec):
             test_info = self.instance["test"]
             if isinstance(test_info, dict) and "test_cmd" in test_info:
                 test_cmd = test_info["test_cmd"]
+        base_commit = self.instance["base_commit"]
+        revert_test_paths = (
+            f"git checkout {base_commit} -- "
+            f"tests/ '**/tests/' benches/ '**/benches/' "
+            f"Cargo.toml '**/Cargo.toml' Cargo.lock '**/Cargo.lock' "
+            f"2>/dev/null || true"
+        )
 
         return [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
-            # Apply patch: skip if empty, abort eval gracefully if apply fails
             f"if [ -s {diff_path} ]; then",
             f"  git apply -v {diff_path}",
             "  if [ $? -ne 0 ]; then",
@@ -75,6 +81,7 @@ class RustSpec(Spec):
             "    exit 0",
             "  fi",
             "fi",
+            revert_test_paths,
             "git status",
             f"{test_cmd} {{test_ids}} > test_output.txt 2>&1",
             "echo $? > cargo_test_exit_code.txt",
