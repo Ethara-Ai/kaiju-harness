@@ -416,7 +416,6 @@ def _apply_thinking_capture_patches(
 
     # Patch 5: Propagate thinking patches to clones (used by cmd_lint)
     _original_clone = coder.clone
-
     def patched_show_usage_report() -> None:
         usage = coder._last_completion_usage
         if usage is not None:
@@ -597,7 +596,11 @@ class AiderAgents(Agents):
                 yes=True,
                 input_history_file=input_history_file,
                 chat_history_file=chat_history_file,
-                allowed_add_paths=set(fnames),
+                # allowed_add_paths intentionally None: agent must be free to add
+                # any non-test source file (esp. in draft stage where fnames=[f]
+                # is a single file per iteration). Only test files are restricted
+                # via protected_paths — matching user intent: 'make test files read-only'.
+                allowed_add_paths=None,
                 protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")
