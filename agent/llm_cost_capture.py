@@ -166,6 +166,7 @@ def _classify_source(_kwargs: Any) -> str:
 
 
 _PRICING_CACHE: dict[str, dict[str, float]] = {}
+_MISSING_PRICING_WARNED: set[str] = set()
 
 
 def _load_pricing(model: str) -> dict[str, float]:
@@ -180,7 +181,7 @@ def _load_pricing(model: str) -> dict[str, float]:
     import json
     p = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
     metadata_paths = [
-        Path("/Users/macbookpro/code/kaiju/merge/.aider.model.metadata.json"),
+        Path(__file__).resolve().parents[1] / ".aider.model.metadata.json",
     ]
     for mp in metadata_paths:
         if not mp.exists():
@@ -212,6 +213,14 @@ def _load_pricing(model: str) -> dict[str, float]:
             p["cache_write"] = float(entry.get("cache_creation_input_token_cost") or 0)
         except Exception:
             pass
+    if p["input"] == 0.0 and model not in _MISSING_PRICING_WARNED:
+        _MISSING_PRICING_WARNED.add(model)
+        _logger.warning(
+            "No pricing found for model %s — cost will report as $0. "
+            "Add an entry to .aider.model.metadata.json or check "
+            "register_bedrock_arn_pricing.",
+            model,
+        )
     _PRICING_CACHE[model] = p
     return p
 
