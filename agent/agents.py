@@ -13,6 +13,39 @@ from typing import Any, Optional
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
 from agent.agent_utils import summarize_test_output
 
+
+def _patch_litellm_output_config_passthrough() -> None:
+    """Preserve ``output_config`` through litellm's Bedrock Converse transform.
+
+    Litellm 1.42 drops ``output_config`` in ``_transform_inference_params``
+    with the comment "Bedrock Converse doesn't support it". For opus 4.7 that
+    is empirically false — ``additionalModelRequestFields.output_config.effort``
+    controls adaptive-thinking depth. This patch re-injects the value into
+    ``additionalModelRequestFields`` after the original transform runs.
+    """
+    try:
+        from litellm.llms.bedrock.chat import converse_transformation as _ct
+    except ImportError:
+        return
+    cls = _ct.AmazonConverseConfig
+    if getattr(cls, "_output_config_patched", False):
+        return
+    _orig = cls._transform_request_helper
+
+    def _wrapped(self, model, system_content_blocks, optional_params, messages=None, headers=None):
+        oc = optional_params.get("output_config")
+        result = _orig(self, model, system_content_blocks, optional_params, messages, headers)
+        if oc is not None:
+            amrf = result.setdefault("additionalModelRequestFields", {})
+            amrf["output_config"] = oc
+        return result
+
+    cls._transform_request_helper = _wrapped
+    cls._output_config_patched = True
+
+
+_patch_litellm_output_config_passthrough()
+
 _logger = logging.getLogger(__name__)
 
 # Map ``BEDROCK_<ALIAS>_ARN`` env var names to the underlying base-model ID
@@ -465,6 +498,33 @@ def _apply_thinking_capture_patches(
     coder.add_assistant_reply_to_cur_messages = patched_add_assistant_reply
     coder.show_usage_report = patched_show_usage_report
     coder.clone = patched_clone
+
+    # Patch 6: ContextVar propagation into aider's chat-history summarizer thread.
+    # aider.coders.base_coder.summarize_start spawns a bare ``threading.Thread``
+    # which does NOT inherit Python ContextVar state. Our cost subsystem's
+    # ``_current_log`` binding (set by capture_module_calls) is invisible to the
+    # worker, so every summarizer call was silently dropped. Wrap the thread
+    # target with ``contextvars.copy_context().run(...)`` so the active log
+    # propagates into the worker.
+    import contextvars as _contextvars
+    import threading as _threading
+
+    def patched_summarize_start() -> None:
+        if not coder.summarizer.too_big(coder.done_messages):
+            return
+        coder.summarize_end()
+        if getattr(coder, "verbose", False):
+            coder.io.tool_output("Starting to summarize chat history.")
+        ctx = _contextvars.copy_context()
+        coder.summarizer_thread = _threading.Thread(
+            target=lambda: ctx.run(coder.summarize_worker)
+        )
+        coder.summarizer_thread.start()
+
+    coder.summarize_start = patched_summarize_start
+
+    from agent.llm_cost_capture import register_active_coder
+    register_active_coder(coder)
 
     # Patch 7: Ensure cost is calculated even when FinishReasonLength fires.
     # Upstream aider bug: send() calls calculate_and_show_tokens_and_cost()

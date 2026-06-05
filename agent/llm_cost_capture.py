@@ -18,6 +18,7 @@ import logging
 import re
 import threading
 import traceback
+import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -117,6 +118,35 @@ _current_log: ContextVar[Optional[LlmCallLog]] = ContextVar(
 )
 _registered_lock = threading.Lock()
 _registered = False
+
+# Coder registry — populated by `agent.agents._apply_thinking_capture_patches`
+# so `capture_module_calls.__exit__` can join any aider summarizer threads
+# that are still running. Aider spawns these in a bare `threading.Thread` and
+# joins them lazily on the *next* turn; without an explicit join here, records
+# from in-flight summarizer calls land in the log AFTER our scope exits.
+_active_coders: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_active_coders_lock = threading.Lock()
+
+
+def register_active_coder(coder: Any) -> None:
+    with _active_coders_lock:
+        _active_coders.add(coder)
+
+
+def _drain_summarizer_threads() -> None:
+    with _active_coders_lock:
+        coders = list(_active_coders)
+    for c in coders:
+        try:
+            t = getattr(c, "summarizer_thread", None)
+            if t is not None and t.is_alive():
+                end = getattr(c, "summarize_end", None)
+                if callable(end):
+                    end()
+                else:
+                    t.join(timeout=60)
+        except Exception as e:
+            _logger.warning("summarizer drain failed: %s", e)
 _seen_call_ids: set[str] = set()
 _seen_lock = threading.Lock()
 
@@ -738,6 +768,7 @@ def capture_module_calls(
     try:
         yield log
     finally:
+        _drain_summarizer_threads()
         _current_log.reset(token)
         if thinking_capture is not None:
             tc_calls = getattr(thinking_capture, "module_llm_calls", None)
