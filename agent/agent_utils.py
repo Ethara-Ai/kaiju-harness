@@ -1210,10 +1210,16 @@ def get_lint_cmd(repo_name: str, use_lint_info: bool, commit0_config_file: str) 
              the list of changed files. If False, returns an empty string.
 
     """
-    lint_cmd = "python -m commit0 lint "
+    if commit0_config_file and not os.path.isabs(commit0_config_file):
+        raise ValueError(
+            f"get_lint_cmd requires an absolute commit0_config_file (got {commit0_config_file!r}). "
+            "The lint subprocess runs inside repos/<repo>/ via DirContext; "
+            "relative paths will not resolve correctly."
+        )
+    lint_cmd = f"{sys.executable} -m commit0 lint "
     if use_lint_info:
         lint_cmd += (
-            repo_name + " --commit0-config-file " + relativize(commit0_config_file) + " --files "
+            repo_name + " --commit0-config-file " + commit0_config_file + " --files "
         )
     else:
         lint_cmd = ""

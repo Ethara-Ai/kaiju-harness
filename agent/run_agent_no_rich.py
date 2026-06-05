@@ -209,7 +209,7 @@ def run_agent_for_repo(
                     )
                     continue
 
-                test_cmd = f"python -m commit0 test {relativize(repo_path)} {test_file} --branch {branch} --backend {backend} --commit0-config-file {relativize(commit0_config_file)} --timeout 100"
+                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )

@@ -202,7 +202,7 @@ def run_agent_for_repo(
             # when unit test feedback is available, iterate over test files
             for test_file in test_files:
                 update_queue.put(("set_current_file", (repo_name, test_file)))
-                test_cmd = f"python -m commit0 test {relativize(repo_path)} {test_file} --branch {branch} --backend {backend} --commit0-config-file {relativize(commit0_config_file)} --timeout 100"
+                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
                 test_file_name = test_file.replace(".py", "").replace("/", "__")
                 test_log_dir = experiment_log_dir / test_file_name
                 lint_cmd = get_lint_cmd(
