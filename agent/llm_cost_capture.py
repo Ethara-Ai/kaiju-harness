@@ -25,6 +25,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from commit0.harness.utils import relativize
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 if TYPE_CHECKING:
@@ -74,8 +76,21 @@ class LlmCallRecord:
 @dataclass
 class LlmCallLog:
     calls: list[LlmCallRecord] = field(default_factory=list)
+    # Optional short label used to redact provider-specific model identifiers
+    # (e.g. full Bedrock ARN) in shipped artifacts. When set, every record added
+    # via `add()` has its `.model` rewritten to this value before storage so that
+    # output.json and other downstream serializations never leak the ARN.
+    model_short: str = ""
+    # Counter incremented by _CaptureLogger.log_post_api_call for every litellm
+    # completion. Compared against len(calls) by audit_against_callback_counter()
+    # to detect silent capture loss (callback fired but record never landed).
+    # Replaces the deprecated httpx-INFO-log scanner which broke when httpx logs
+    # were suppressed to prevent Bedrock ARN leakage.
+    callback_event_count: int = 0
 
     def add(self, record: LlmCallRecord) -> None:
+        if self.model_short:
+            record.model = self.model_short
         self.calls.append(record)
 
     def by_source(self) -> dict[str, dict[str, Any]]:
@@ -666,7 +681,15 @@ class _CaptureLogger:
         pass
 
     def log_post_api_call(self, kwargs, response_obj, start_time, end_time):
-        pass
+        # Increment the callback-event counter on the active LlmCallLog so the
+        # divergence tripwire can detect captures lost to silent litellm bugs.
+        # Runs for EVERY litellm completion regardless of httpx log level.
+        log = _current_log.get()
+        if log is not None:
+            try:
+                log.callback_event_count += 1
+            except Exception:
+                pass  # never block a callback on a counter bookkeeping error
 
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
         _record_call(kwargs, response_obj, start_time, end_time, "success")
@@ -730,6 +753,14 @@ def register_litellm_callbacks() -> None:
             )
 
 
+# NOTE: _HTTPX_POST_PATTERN previously fed audit_against_httpx_log. It is
+# retained here ONLY for backward compatibility with any external tooling that
+# imported it. The active divergence detector is now
+# audit_against_callback_counter(), which uses LlmCallLog.callback_event_count
+# populated by _CaptureLogger.log_post_api_call. This change was forced by the
+# ARN-redaction effort: httpx is suppressed to WARNING in agents.py to prevent
+# URL-encoded Bedrock ARN leakage into aider.log, which made the httpx-regex
+# audit emit a false capture_mismatch for every module.
 _HTTPX_POST_PATTERN = re.compile(
     r"httpx\s*-\s*INFO\s*-\s*HTTP Request:\s*POST\s+https?://"
     r"(bedrock-runtime\.|api\.openai\.com|api\.anthropic\.com)",
@@ -740,22 +771,40 @@ _HTTPX_POST_PATTERN = re.compile(
 def audit_against_httpx_log(
     log_path: Path, captured_calls: int
 ) -> Optional[dict[str, Any]]:
+    """DEPRECATED. Kept for external import compatibility. Now always returns None.
+
+    Replaced by audit_against_callback_counter() which uses litellm's
+    log_post_api_call hook instead of scanning httpx INFO logs (which are now
+    suppressed in production to prevent Bedrock ARN leakage)."""
+    return None
+
+
+def audit_against_callback_counter(
+    log: "LlmCallLog",
+    log_dir: Optional[Path] = None,
+) -> Optional[dict[str, Any]]:
+    """Detect divergence between litellm-callback-fired events and captured records.
+
+    Source of truth: `_CaptureLogger.log_post_api_call` increments
+    `log.callback_event_count` for EVERY litellm completion call. Captured
+    records are appended to `log.calls` by the success/failure event handlers.
+    A delta between the two indicates a silent capture loss (callback fired but
+    record never landed) or vice versa.
+
+    Independent of httpx INFO logging, which is suppressed in production to
+    keep URL-encoded Bedrock ARN out of aider.log."""
     try:
-        if not log_path.exists():
-            return None
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        http_count = sum(
-            1 for line in text.splitlines() if _HTTPX_POST_PATTERN.search(line)
-        )
-        if http_count != captured_calls:
+        event_count = log.callback_event_count
+        captured_calls = len(log.calls)
+        if event_count != captured_calls:
             return {
-                "httpx_post_count": http_count,
+                "callback_event_count": event_count,
                 "captured_calls": captured_calls,
-                "delta": http_count - captured_calls,
-                "log_path": str(log_path),
+                "delta": event_count - captured_calls,
+                "log_dir": relativize(log_dir) if log_dir is not None else None,
             }
     except Exception:
-        _logger.debug("audit_against_httpx_log failed", exc_info=True)
+        _logger.debug("audit_against_callback_counter failed", exc_info=True)
     return None
 
 
@@ -764,16 +813,40 @@ def capture_module_calls(
     thinking_capture: Optional["ThinkingCapture"],
     module: str,
     log_dir: Optional[Path] = None,
+    model_short: str = "",
 ) -> Iterator[LlmCallLog]:
     """Wrap an `agent.run(...)` invocation to capture every LLM call it makes.
 
     On exit, attaches the captured log to thinking_capture.module_llm_calls and
-    runs the httpx-log tripwire against `<log_dir>/aider.log`. Any mismatch is
-    recorded on thinking_capture.capture_mismatches.
+    runs the litellm-callback-counter tripwire. Any mismatch is recorded on
+    thinking_capture.capture_mismatches.
+
+    If `model_short` is set, every recorded LLM call has its `model` field
+    rewritten to that short label before storage — prevents shipped artifacts
+    (output.json) from leaking the full provider model identifier (e.g. Bedrock ARN).
     """
+    # Loud-fail warning when model_short is empty but the upstream model looks
+    # like a Bedrock ARN: signals operator misconfiguration that would silently
+    # leak the ARN into shipped output.json metrics.llm_calls[].model.
+    if not model_short:
+        try:
+            import litellm  # lazy import to avoid hard dep at module top
+
+            current = getattr(litellm, "_active_model_for_redaction_check", "")
+            if isinstance(current, str) and current.startswith("bedrock/"):
+                _logger.warning(
+                    "capture_module_calls: model_short is empty while model='%s' "
+                    "looks like a Bedrock ARN. Shipped output.json will contain "
+                    "the full ARN in metrics.llm_calls[].model. Set --model-short "
+                    "or AgentConfig.model_short to enable redaction.",
+                    current,
+                )
+        except Exception:
+            pass  # never block capture setup on a diagnostic warning
+
     register_litellm_callbacks()
     _wrap_litellm_completion()
-    log = LlmCallLog()
+    log = LlmCallLog(model_short=model_short)
     token = _current_log.set(log)
     try:
         yield log
@@ -786,15 +859,15 @@ def capture_module_calls(
                 tc_calls = {}
                 thinking_capture.module_llm_calls = tc_calls
             tc_calls[module] = log
-            if log_dir is not None:
-                aider_log = Path(log_dir) / "aider.log"
-                mismatch = audit_against_httpx_log(aider_log, len(log.calls))
-                if mismatch:
-                    mm = getattr(thinking_capture, "capture_mismatches", None)
-                    if mm is None:
-                        mm = {}
-                        thinking_capture.capture_mismatches = mm
-                    mm[module] = mismatch
+            # Divergence audit: callback-counter vs captured-records.
+            # log_dir included for traceability only.
+            mismatch = audit_against_callback_counter(log, log_dir)
+            if mismatch:
+                mm = getattr(thinking_capture, "capture_mismatches", None)
+                if mm is None:
+                    mm = {}
+                    thinking_capture.capture_mismatches = mm
+                mm[module] = mismatch
 
 
 register_litellm_callbacks()

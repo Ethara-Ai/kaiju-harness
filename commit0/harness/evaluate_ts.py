@@ -21,6 +21,7 @@ from commit0.harness.utils import (
     get_hash_string,
     get_active_branch,
     load_dataset_from_config,
+    relativize,
 )
 from commit0.harness.split_utils import resolve_split
 
@@ -95,7 +96,7 @@ def main(
     logger.info(
         "Loaded %d entries from dataset=%s, split=%s, repo_split=%s",
         len(dataset_list),
-        dataset_name,
+        relativize(dataset_name),
         dataset_split,
         repo_split,
     )

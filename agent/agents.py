@@ -48,6 +48,7 @@ _patch_litellm_output_config_passthrough()
 
 _logger = logging.getLogger(__name__)
 
+
 # Map ``BEDROCK_<ALIAS>_ARN`` env var names to the underlying base-model ID
 # that litellm uses as a pricing key. Application inference profiles are
 # per-account AWS resources, so the profile ID portion of each ARN lives in
@@ -243,10 +244,10 @@ def register_bedrock_arn_pricing(model_name: str) -> None:
     _logger.debug("Registered bedrock pricing: %s -> %s", model_name, base_model)
 
 
-def handle_logging(logging_name: str, log_file: Path) -> None:
+def handle_logging(logging_name: str, log_file: Path, level: int = logging.INFO) -> None:
     """Handle logging for agent"""
     logger = logging.getLogger(logging_name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(level)
     logger.propagate = False
     logger.handlers.clear()  # Prevent handler accumulation
     logger_handler = logging.FileHandler(log_file)
@@ -648,7 +649,6 @@ class AiderAgents(Agents):
             raise
 
         try:
-            # Configure httpx and backoff logging
             handle_logging("httpx", log_file)
             handle_logging("backoff", log_file)
 

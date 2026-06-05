@@ -372,6 +372,7 @@ def get_go_message(
                             max_tokens=agent_config.spec_summary_max_tokens,
                             max_char_length=agent_config.max_spec_info_length,
                             cache_path=spec_pdf_path.parent / ".spec_summary_cache.json",
+                            model_short=getattr(agent_config, "model_short", ""),
                         )
                     except Exception as e:
                         logger.warning(

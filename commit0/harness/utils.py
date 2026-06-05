@@ -14,6 +14,44 @@ from fastcore.net import HTTP404NotFoundError, HTTP403ForbiddenError  # type: ig
 from ghapi.core import GhApi
 
 
+_CWD = Path.cwd().resolve()
+_HOME = Path.home().resolve()
+
+
+def relativize(p) -> str:
+    """Best-effort make a path repo-relative for logging/trajectories.
+
+    - If path is under cwd, returns cwd-relative form (e.g. 'logs/agent/...').
+    - Else if under home, returns ~/relative form.
+    - Else falls back to basename.
+    - Never raises.
+
+    Used to keep absolute /Users/... or /home/... paths out of shipped
+    log files, output.json, and trajectory.md.
+    """
+    # macOS/Windows are case-insensitive; Linux is case-sensitive.
+    # Force lowercase comparison on darwin so /Users/.../Development matches
+    # /Users/.../development (Path.cwd() may differ in case from CLI args).
+    import sys as _sys
+    def _norm(s: str) -> str:
+        if _sys.platform in ("darwin", "win32"):
+            return s.lower()
+        return s
+    try:
+        rp = Path(p).resolve()
+        rp_n = _norm(str(rp))
+        cwd_n = _norm(str(_CWD))
+        home_n = _norm(str(_HOME))
+        if rp_n == cwd_n:
+            return "."
+        if rp_n.startswith(cwd_n + os.sep):
+            return str(rp)[len(str(_CWD)) + 1:]
+        if rp_n.startswith(home_n + os.sep):
+            return "~/" + str(rp)[len(str(_HOME)) + 1:]
+        return os.path.basename(str(p))
+    except Exception:
+        return os.path.basename(str(p))
+
 _PROTECTED_TEST_PATHSPECS: tuple[str, ...] = (
     ":(exclude,icase)tests/**",
     ":(exclude,icase)test/**",
@@ -465,7 +503,7 @@ def load_dataset_from_config(dataset_name: str, split: str = "test") -> Any:
                 f"Expected a list or an object with a 'data' key."
             )
         logging.getLogger(__name__).info(
-            f"Loaded {len(entries)} entries from local dataset: {resolved}"
+            f"Loaded {len(entries)} entries from local dataset: {relativize(resolved)}"
         )
         return entries
 

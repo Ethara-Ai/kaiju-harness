@@ -9,7 +9,7 @@ from typing import Iterator, Union, List
 from commit0.harness.constants import (
     RepoInstance,
 )
-from commit0.harness.utils import load_dataset_from_config
+from commit0.harness.utils import load_dataset_from_config, relativize
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def main(
 
     from commit0.harness.lint_filter import filter_lint_output
 
-    logger.info("Using pre-commit binary: %s", pre_commit_bin)
+    logger.info("Using pre-commit binary: %s", relativize(pre_commit_bin))
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         lint_result = filter_lint_output(result.stdout, project_package, known_deps)

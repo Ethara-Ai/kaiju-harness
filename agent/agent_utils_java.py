@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Re-export shared utilities from agent_utils so Java callers don't
 # import directly from the Python-specific module.
 from agent.agent_utils import get_specification, SPEC_INFO_HEADER  # noqa: F401
+from commit0.harness.utils import relativize
 
 
 _BUILD_DIR_NAMES = frozenset({"target", "build", ".gradle"})
@@ -252,7 +253,7 @@ def summarize_specification_java(
             if cache_path.exists():
                 cached = json.loads(cache_path.read_text())
                 if cached.get("hash") == cache_key:
-                    logger.info("Spec summary cache hit (%s)", cache_path)
+                    logger.info("Spec summary cache hit (%s)", relativize(cache_path))
                     return cached["summary"], all_costs
         except Exception:
             logger.debug("Cache read failed, proceeding with summarization")

@@ -18,6 +18,7 @@ from graphlib import TopologicalSorter, CycleError
 import yaml
 
 from agent.class_types import AgentConfig
+from commit0.harness.utils import relativize
 from agent.thinking_capture import SummarizerCost
 
 logger = logging.getLogger(__name__)
@@ -510,6 +511,7 @@ def get_message(
                     max_tokens=agent_config.spec_summary_max_tokens,
                     max_char_length=agent_config.max_spec_info_length,
                     cache_path=spec_pdf_path.parent / ".spec_summary_cache.json",
+                    model_short=agent_config.model_short,
                 )
             else:
                 processed_spec = raw_spec
@@ -707,6 +709,7 @@ def summarize_specification(
     max_char_length: int = 10000,
     timeout: float = 120,
     cache_path: Optional[Path] = None,
+    model_short: str = "",
 ) -> tuple[str, list[SummarizerCost]]:
     """Summarize specification text using an LLM instead of hard truncation.
 
@@ -730,7 +733,7 @@ def summarize_specification(
             if cache_path.exists():
                 cached = json.loads(cache_path.read_text())
                 if cached.get("hash") == cache_key:
-                    logger.info("Spec summary cache hit (%s)", cache_path)
+                    logger.info("Spec summary cache hit (%s)", relativize(cache_path))
                     return cached["summary"], all_costs
         except Exception:
             logger.debug("Cache read failed, proceeding with summarization")
@@ -748,7 +751,7 @@ def summarize_specification(
                 json.dumps(
                     {
                         "hash": cache_key,
-                        "model": model,
+                        "model": model_short or model,
                         "max_char_length": max_char_length,
                         "summary": summary,
                     }
@@ -780,7 +783,7 @@ def summarize_specification(
                     original_len,
                     original_tokens,
                     len(summary),
-                    model,
+                    model_short or model,
                 )
                 _write_cache(summary)
                 return summary, all_costs
@@ -875,7 +878,7 @@ def summarize_specification(
                 "Spec summarized (chunked+consolidated): %d chars -> %d chars (model=%s)",
                 original_len,
                 len(final),
-                model,
+                model_short or model,
             )
             _write_cache(final)
             return final, all_costs
@@ -1207,10 +1210,10 @@ def get_lint_cmd(repo_name: str, use_lint_info: bool, commit0_config_file: str) 
              the list of changed files. If False, returns an empty string.
 
     """
-    lint_cmd = f"{sys.executable} -m commit0 lint "
+    lint_cmd = "python -m commit0 lint "
     if use_lint_info:
         lint_cmd += (
-            repo_name + " --commit0-config-file " + commit0_config_file + " --files "
+            repo_name + " --commit0-config-file " + relativize(commit0_config_file) + " --files "
         )
     else:
         lint_cmd = ""

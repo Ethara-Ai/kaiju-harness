@@ -26,7 +26,7 @@ from commit0.harness.constants import SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
-from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
+from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS, relativize
 from commit0.cli import read_commit0_config_file
 from pathlib import Path
 from agent.run_agent import DirContext, run_eval_after_each_commit
@@ -209,7 +209,7 @@ def run_agent_for_repo(
                     )
                     continue
 
-                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+                test_cmd = f"python -m commit0 test {relativize(repo_path)} {test_file} --branch {branch} --backend {backend} --commit0-config-file {relativize(commit0_config_file)} --timeout 100"
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
@@ -223,10 +223,11 @@ def run_agent_for_repo(
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
                 with capture_module_calls(
-                    thinking_capture,
-                    module=test_file_name,
-                    log_dir=test_log_dir,
-                ):
+                                    thinking_capture,
+                                    module=test_file_name,
+                                    log_dir=test_log_dir,
+                                    model_short=agent_config.model_short,
+                                ):
                     _ = agent.run(
                         "",
                         test_cmd,
@@ -295,10 +296,11 @@ def run_agent_for_repo(
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
                 with capture_module_calls(
-                    thinking_capture,
-                    module=lint_file_name,
-                    log_dir=lint_log_dir,
-                ):
+                                    thinking_capture,
+                                    module=lint_file_name,
+                                    log_dir=lint_log_dir,
+                                    model_short=agent_config.model_short,
+                                ):
                     _ = agent.run(
                         "",
                         "",
@@ -373,10 +375,11 @@ def run_agent_for_repo(
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
                 with capture_module_calls(
-                    thinking_capture,
-                    module=file_name,
-                    log_dir=file_log_dir,
-                ):
+                                    thinking_capture,
+                                    module=file_name,
+                                    log_dir=file_log_dir,
+                                    model_short=agent_config.model_short,
+                                ):
                     _ = agent.run(
                         iter_message,
                         "",
