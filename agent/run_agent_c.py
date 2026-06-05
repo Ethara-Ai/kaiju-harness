@@ -34,6 +34,7 @@ from agent.agent_utils_c import (
 from agent.class_types import AgentConfig
 from agent.display import TerminalDisplay
 from agent.thinking_capture import ThinkingCapture
+from agent.llm_cost_capture import capture_module_calls
 from agent.trajectory_writer import write_trajectory_md
 from agent.output_writer import extract_git_patch, build_metadata
 from agent.openhands_formatter import write_module_output_json
@@ -221,19 +222,24 @@ def run_agent_for_repo(
                     for c in spec_costs:
                         thinking_capture.summarizer_costs.add(c)
 
-                agent_return = agent.run(
-                    message,
-                    test_cmd,
-                    lint_cmd,
-                    target_edit_files,
-                    test_log_dir,
-                    test_first=True,
+                with capture_module_calls(
                     thinking_capture=thinking_capture,
-                    current_stage="test",
-                    current_module=test_id_safe,
-                    max_test_output_length=agent_config.max_test_output_length,
-                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                )
+                    module=test_id_safe,
+                    log_dir=test_log_dir,
+                ):
+                    agent_return = agent.run(
+                        message,
+                        test_cmd,
+                        lint_cmd,
+                        target_edit_files,
+                        test_log_dir,
+                        test_first=True,
+                        thinking_capture=thinking_capture,
+                        current_stage="test",
+                        current_module=test_id_safe,
+                        max_test_output_length=agent_config.max_test_output_length,
+                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                    )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -262,19 +268,24 @@ def run_agent_for_repo(
                     logger.info("Skipping %s (already done)", file_name)
                     continue
 
-                agent_return = agent.run(
-                    "",
-                    "",
-                    lint_cmd,
-                    [edit_file],
-                    lint_log_dir,
-                    lint_first=True,
+                with capture_module_calls(
                     thinking_capture=thinking_capture,
-                    current_stage="lint",
-                    current_module=file_name,
-                    max_test_output_length=agent_config.max_test_output_length,
-                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                )
+                    module=file_name,
+                    log_dir=lint_log_dir,
+                ):
+                    agent_return = agent.run(
+                        "",
+                        "",
+                        lint_cmd,
+                        [edit_file],
+                        lint_log_dir,
+                        lint_first=True,
+                        thinking_capture=thinking_capture,
+                        current_stage="lint",
+                        current_module=file_name,
+                        max_test_output_length=agent_config.max_test_output_length,
+                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                    )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -314,18 +325,23 @@ def run_agent_for_repo(
                     if agent_config.use_lint_info
                     else ""
                 )
-                agent_return = agent.run(
-                    message,
-                    "",
-                    lint_cmd,
-                    [f],
-                    file_log_dir,
+                with capture_module_calls(
                     thinking_capture=thinking_capture,
-                    current_stage="draft",
-                    current_module=file_name,
-                    max_test_output_length=agent_config.max_test_output_length,
-                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                )
+                    module=file_name,
+                    log_dir=file_log_dir,
+                ):
+                    agent_return = agent.run(
+                        message,
+                        "",
+                        lint_cmd,
+                        [f],
+                        file_log_dir,
+                        thinking_capture=thinking_capture,
+                        current_stage="draft",
+                        current_module=file_name,
+                        max_test_output_length=agent_config.max_test_output_length,
+                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                    )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(

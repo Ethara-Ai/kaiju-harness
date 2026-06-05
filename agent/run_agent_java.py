@@ -24,6 +24,7 @@ from agent.agent_utils_java import (
 from agent.agents_java import JavaAgents
 from agent.config_java import JavaAgentConfig
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
+from agent.llm_cost_capture import capture_module_calls
 from commit0.harness.constants_java import (
     JAVA_STUB_MARKER,
     JAVA_BASE_BRANCH,
@@ -345,19 +346,24 @@ def run_java_agent(
 
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
-                    agent_return = java_agent.run(
-                        message="",
-                        test_cmd=test_cmd,
-                        lint_cmd=compile_cmd,
-                        fnames=stubbed_files,
-                        log_dir=test_log_dir,
-                        test_first=True,
+                    with capture_module_calls(
                         thinking_capture=thinking_capture,
-                        current_stage="test",
-                        current_module=test_log_name,
-                        max_test_output_length=agent_config.max_test_output_length,
-                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                    )
+                        module=test_log_name,
+                        log_dir=test_log_dir,
+                    ):
+                        agent_return = java_agent.run(
+                            message="",
+                            test_cmd=test_cmd,
+                            lint_cmd=compile_cmd,
+                            fnames=stubbed_files,
+                            log_dir=test_log_dir,
+                            test_first=True,
+                            thinking_capture=thinking_capture,
+                            current_stage="test",
+                            current_module=test_log_name,
+                            max_test_output_length=agent_config.max_test_output_length,
+                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -422,18 +428,23 @@ def run_java_agent(
 
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
-                    agent_return = java_agent.run(
-                        message=message,
-                        test_cmd="",
-                        lint_cmd=compile_cmd,
-                        fnames=[stubbed_file],
-                        log_dir=file_log_dir,
+                    with capture_module_calls(
                         thinking_capture=thinking_capture,
-                        current_stage="draft",
-                        current_module=file_log_name,
-                        max_test_output_length=agent_config.max_test_output_length,
-                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                    )
+                        module=file_log_name,
+                        log_dir=file_log_dir,
+                    ):
+                        agent_return = java_agent.run(
+                            message=message,
+                            test_cmd="",
+                            lint_cmd=compile_cmd,
+                            fnames=[stubbed_file],
+                            log_dir=file_log_dir,
+                            thinking_capture=thinking_capture,
+                            current_stage="draft",
+                            current_module=file_log_name,
+                            max_test_output_length=agent_config.max_test_output_length,
+                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

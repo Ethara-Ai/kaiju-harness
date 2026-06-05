@@ -63,6 +63,8 @@
     max_tokens: 128000
     thinking:
       type: adaptive
+    output_config:
+      effort: high
   cache_control: true
   reasoning_tag: thinking
   remove_reasoning: thinking
