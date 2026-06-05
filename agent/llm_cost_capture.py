@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 import traceback
 import weakref
 from contextlib import contextmanager
@@ -520,12 +521,18 @@ def _record_stream_chunk_usage(model: str, usage: Any) -> None:
         _logger.debug("_record_stream_chunk_usage failed", exc_info=True)
 
 
-def _record_response_object(model: str, response: Any) -> None:
+def _record_response_object(model: str, response: Any, duration_s: float = 0.0) -> None:
     """Record a fully-realized litellm response (stream-rebuilt or non-stream).
 
     Uses the same extraction + dedup logic as _record_call, but skips callback
     indirection. The wrapper around litellm.completion routes both streaming
     (rebuilt via stream_chunk_builder) and non-streaming responses here.
+
+    ``duration_s`` is measured by the wrap via ``time.perf_counter()`` around
+    the underlying ``litellm.completion(...)`` call. The wrap wins the dedup
+    race against litellm's success callback (which has the same canonical key
+    but fires after), so this is the value that lands in output.json — without
+    threading duration through here, every wrap-recorded call would show 0.0.
     """
     log = _current_log.get()
     if log is None:
@@ -574,7 +581,7 @@ def _record_response_object(model: str, response: Any) -> None:
             prompt_tokens=prompt_t, completion_tokens=completion_t,
             cache_read_tokens=cache_r, cache_write_tokens=cache_w,
             thinking_tokens=thinking_t, cost_usd=cost,
-            duration_s=0.0,
+            duration_s=duration_s,
             timestamp=datetime.now(timezone.utc).isoformat(),
             status="success",
         ))
@@ -603,26 +610,29 @@ def _wrap_litellm_completion() -> None:
             import litellm
             original = litellm.completion
 
-            def _wrap_stream(stream_iter: Any, model: str) -> Any:
+            def _wrap_stream(stream_iter: Any, model: str, t0: float) -> Any:
                 chunks: list = []
                 for chunk in stream_iter:
                     chunks.append(chunk)
                     yield chunk
+                duration = max(0.0, time.perf_counter() - t0)
                 try:
                     rebuilt = litellm.stream_chunk_builder(chunks)
                     if rebuilt is not None:
-                        _record_response_object(model, rebuilt)
+                        _record_response_object(model, rebuilt, duration_s=duration)
                 except Exception:
                     _logger.debug("stream_chunk_builder rebuild failed", exc_info=True)
 
             def wrapped_completion(*args: Any, **kwargs: Any) -> Any:
+                t0 = time.perf_counter()
                 result = original(*args, **kwargs)
                 model = kwargs.get("model") or (args[0] if args else "unknown")
                 is_stream = bool(kwargs.get("stream"))
                 if is_stream:
-                    return _wrap_stream(result, model)
+                    return _wrap_stream(result, model, t0)
+                duration = max(0.0, time.perf_counter() - t0)
                 try:
-                    _record_response_object(model, result)
+                    _record_response_object(model, result, duration_s=duration)
                 except Exception:
                     _logger.debug("non-stream record failed", exc_info=True)
                 return result
