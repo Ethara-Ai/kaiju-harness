@@ -168,7 +168,6 @@ repos/
 config.yml
 hydra_outputs/
 .commit0*
-.agent*
 docs/analysis*.md
 
 # Run artifacts and local configs
@@ -176,7 +175,6 @@ run_*/
 repos_staging/
 processing_summary_*.json
 split_ethara.py
-AGENTS.md
 claudeKaiju.json
 gpt54.json
 
