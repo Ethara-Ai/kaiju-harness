@@ -1,0 +1,250 @@
+{
+  "audit": {
+    "target": "commit0 (kaiju working tree)",
+    "product_type": ["CLI", "library/package", "data/ML-benchmark-harness"],
+    "commit_sha": "9649faab59b4e1274dfb626d84f06e2f9340d51d",
+    "branch": "test",
+    "dirty_tree": true,
+    "dirty_entries": ["M .gitignore", "M REVIEW.md", "?? .opencode/", "?? .agents/", "?? findings.json (this run)"],
+    "timestamp_utc": "2026-06-07T08:29:11Z",
+    "environment": {
+      "os": "Darwin 25.5.0 arm64",
+      "python_system": "3.14.5",
+      "python_uv_managed": "3.13",
+      "network": true,
+      "runner": "uvx (ephemeral, read-only, no global install)"
+    },
+    "instruments_run": [
+      {"id": "ruff", "tool": "ruff 0.6.4", "status": "OK", "cmd": "CMD-026/027"},
+      {"id": "bandit", "tool": "bandit 1.7.9", "status": "OK", "cmd": "CMD-028/029/030"},
+      {"id": "vulture", "tool": "vulture 2.11", "status": "OK", "cmd": "CMD-040"},
+      {"id": "secrets-history", "tool": "git log -p + regex", "status": "OK", "cmd": "CMD-041"},
+      {"id": "pip-audit", "tool": "pip-audit 2.7.3", "status": "TOOL-BLOCKED", "reason": "ensurepip SIGABRT building resolver venv under uv cpython-3.13", "cmd": "CMD-032/033"},
+      {"id": "osv-scanner", "tool": "osv-scanner", "status": "TOOL-BLOCKED", "reason": "Go binary, not installable via uvx/PyPI", "cmd": "CMD-034"}
+    ],
+    "trust_model": "Operator runs CLI locally (trusted). UNTRUSTED surface = the 57 target repos' code executed/tested inside Docker + LLM-generated patches + remote git/AWS-Bedrock/GitHub API responses (incl. test-runner XML).",
+    "coverage_note": "Static + instrumented sweep of source roots commit0/ (70), agent/ (38), tools/ (47). Excluded from source counts: commit0/data/test_ids/*.bz2 (1067 fixtures), vendored stub samples. Coverage % NOT measured (no test execution; would require Docker + secrets)."
+  },
+  "findings": [
+    {
+      "id": "T-001",
+      "axis": "Testing",
+      "title": "Duplicate test-class names silently shadow earlier classes (lost coverage)",
+      "severity": "MEDIUM",
+      "disposition": "BLOCK",
+      "confidence": "High",
+      "evidence": [
+        "SRC:commit0/harness/tests/test_constants_rust.py:123,458 (class TestPathConstants redefined)",
+        "SRC:commit0/harness/tests/test_rust_test_parser.py:208,550 (class TestRustTestResultDataclass redefined)",
+        "CMD:ruff 0.6.4 F811 x2"
+      ],
+      "tool": "ruff 0.6.4",
+      "why": "In a single module Python binds the last class definition only. The earlier same-named test class is overwritten before pytest collects it, so those assertions NEVER execute. The suite reports green while silently skipping real tests — false confidence in a benchmark whose entire value is test correctness.",
+      "remediation": "Rename the duplicate classes (e.g. TestPathConstants -> TestPathConstantsExtended) or merge their methods. Add ruff F811 as a merge-blocking CI gate so this cannot recur.",
+      "bug_ticket": "BUG-T-001"
+    },
+    {
+      "id": "S-001",
+      "axis": "Security",
+      "title": "XML parsed without defusedxml on untrusted test-runner output (XXE/billion-laughs)",
+      "severity": "MEDIUM",
+      "disposition": "HOLD",
+      "confidence": "Medium",
+      "cvss": {"vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:L/I:N/A:L", "base_score": 3.9},
+      "evidence": [
+        "SRC:commit0/harness/c_test_parser.py:58 (ET.fromstring)",
+        "SRC:commit0/harness/java_test_parser.py:57",
+        "SRC:commit0/harness/constants_java.py:122",
+        "SRC:commit0/harness/lint_java.py:168",
+        "CMD:bandit 1.7.9 B314 x4"
+      ],
+      "tool": "bandit 1.7.9",
+      "why": "These parsers consume JUnit/test XML produced by executing the 57 untrusted target repos' test suites. A malicious target repo could emit a crafted XML with an external DTD (XXE) or entity-expansion bomb. Exploitability is bounded: stdlib ElementTree resolves no external entities by default on modern CPython, hence Medium/HOLD rather than High — but the harness's threat model explicitly treats target-repo output as attacker-controlled.",
+      "remediation": "Replace `xml.etree.ElementTree` with `defusedxml.ElementTree` in the 4 parse sites (single root-cause fix). Add defusedxml to dependencies.",
+      "bug_ticket": "BUG-S-001"
+    },
+    {
+      "id": "S-002",
+      "axis": "Security",
+      "title": "urllib.urlopen with unvalidated scheme (file:// / SSRF surface)",
+      "severity": "MEDIUM",
+      "disposition": "HOLD",
+      "confidence": "Medium",
+      "cvss": {"vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:N/S:U/C:L/I:N/A:N", "base_score": 2.4},
+      "evidence": [
+        "SRC:commit0/harness/lint_java.py:134",
+        "SRC:tools/discover.py:151",
+        "SRC:tools/discover_c.py:39",
+        "SRC:tools/discover_go.py:40",
+        "CMD:bandit 1.7.9 B310 x4"
+      ],
+      "tool": "bandit 1.7.9",
+      "why": "urlopen called on URLs not pinned to http(s); a file:// or other scheme could read local files if the URL is influenced by repo metadata. Privilege required is high (operator-controlled config in most paths), so Medium/HOLD.",
+      "remediation": "Validate scheme in {http, https} before urlopen, or use requests with an explicit allowlist. One helper closes all 4 sites.",
+      "bug_ticket": "BUG-S-002"
+    },
+    {
+      "id": "D-001",
+      "axis": "Dependencies",
+      "title": "Core deps pinned to moving git branches (non-reproducible builds)",
+      "severity": "MEDIUM",
+      "disposition": "HOLD",
+      "confidence": "High",
+      "evidence": [
+        "SRC:pyproject.toml:168 (aider-chat = {git=Ethara-Ai/aider.git, branch=main})",
+        "SRC:pyproject.toml:169 (litellm = {git=Ethara-Ai/litellm.git, branch=main})",
+        "CMD:uv/grep CMD-035/036"
+      ],
+      "tool": "manual+grep",
+      "why": "Two core runtime dependencies resolve from `branch = \"main\"` on third-party (Ethara-Ai) forks. Although uv.lock pins a commit today, any lock refresh re-resolves the branch HEAD, so two installs days apart can ship different code. Supply-chain risk: the fork owner can alter behaviour without a version bump. Reproducibility is foundational for a benchmark whose results must be comparable across time.",
+      "remediation": "Pin to an immutable rev (tag or commit SHA: aider-chat = {git=..., rev=<sha>}). Document the fork divergence rationale. Keep uv.lock authoritative in CI (uv sync --frozen).",
+      "bug_ticket": "BUG-D-001"
+    },
+    {
+      "id": "D-002",
+      "axis": "Dependencies",
+      "title": "Dependency CVE scan could not be performed (assessment limitation)",
+      "severity": "LOW",
+      "disposition": "HOLD",
+      "confidence": "High",
+      "evidence": [
+        "CMD:pip-audit 2.7.3 TOOL-BLOCKED (ensurepip SIGABRT)",
+        "CMD:osv-scanner TOOL-BLOCKED (not uvx-installable)"
+      ],
+      "tool": "TOOL-BLOCKED",
+      "why": "ASSESSMENT LIMITATION, not a product defect. No CVE scanner could run in this sandbox, so known-vulnerability status of the dependency tree is UNKNOWN. This lowers confidence on the Dependencies axis; it is not itself evidence of a vulnerability.",
+      "remediation": "Run pip-audit/osv-scanner in CI on a clean runner (the crash here is environment-specific to uv-managed cpython-3.13 ensurepip). Add as a merge-blocking job.",
+      "bug_ticket": "BUG-D-002"
+    },
+    {
+      "id": "H-001",
+      "axis": "Hygiene",
+      "title": "Compiled binary committed to git (tools/gostubber/gostubber, 3.99 MB Mach-O)",
+      "severity": "LOW",
+      "disposition": "HOLD",
+      "confidence": "High",
+      "evidence": [
+        "CMD:git verify-pack/rev-list CMD-016 (tools/gostubber/gostubber = 3.99MB, Mach-O arm64 executable)"
+      ],
+      "tool": "git",
+      "why": "A platform-specific compiled binary is tracked in source control. It bloats .git permanently, is non-portable (arm64 Mach-O only), and is a supply-chain/trust hazard (binary blobs are unreviewable in PRs). Go source (go.mod) is present, so the binary is a build artifact that should not be versioned.",
+      "remediation": "git rm --cached the binary, add to .gitignore, build from tools/gostubber source in CI/setup. Consider git-filter-repo to purge history if .git size matters.",
+      "bug_ticket": "BUG-H-001"
+    },
+    {
+      "id": "H-002",
+      "axis": "Hygiene",
+      "title": "23 MB animated GIF + .docx committed (repo bloat, .git = 161 MB)",
+      "severity": "LOW",
+      "disposition": "HOLD",
+      "confidence": "High",
+      "evidence": [
+        "CMD:git CMD-015/016 (docs/commit0.gif = 23.3MB; COMMIT0_*.docx = 260KB; .git = 161MB total)"
+      ],
+      "tool": "git",
+      "why": "A 23.3 MB GIF dominates clone time and .git size forever. Binary office docs (.docx) don't diff and bloat history. For a benchmark people clone repeatedly, this is real friction.",
+      "remediation": "Move large media to Git LFS or external hosting (link from README). Convert the GIF to a hosted MP4/webm. Remove .docx in favour of markdown. Enable pre-commit check-added-large-files with a strict cap (it is already configured but evidently the gif predates it).",
+      "bug_ticket": "BUG-H-002"
+    },
+    {
+      "id": "Q-001",
+      "axis": "Quality",
+      "title": "9,612 residual lint violations + broadly suppressed pyright type-checking",
+      "severity": "LOW",
+      "disposition": "HOLD",
+      "confidence": "High",
+      "evidence": [
+        "CMD:ruff 0.6.4 CMD-026 (9612 violations: 3417 ANN001, 3019 D102, 2052 ANN201, 201 F401, 68 F841, 60 E402)",
+        "SRC:pyproject.toml [tool.pyright] (reportUnknownMemberType/ParameterType/ArgumentType/VariableType/MissingTypeStubs/PrivateUsage = 'none')"
+      ],
+      "tool": "ruff 0.6.4",
+      "why": "The bulk are style/docstring/annotation gaps (low risk), but the volume means real signals (201 unused imports, 68 unused vars) are buried, and pyright is dialed down so type regressions pass silently. For a long-lived multi-language harness this erodes maintainability.",
+      "remediation": "Burn down F401/F841 (auto-fixable). Incrementally re-enable pyright strictness per-module. Make ruff check (current selection) merge-blocking so the count cannot grow.",
+      "bug_ticket": "BUG-Q-001"
+    },
+    {
+      "id": "Q-002",
+      "axis": "Quality",
+      "title": "Redundant re-imports and non-PEP8 import alias (NITs)",
+      "severity": "NIT",
+      "disposition": "SHIP",
+      "confidence": "High",
+      "evidence": [
+        "SRC:tools/prepare_repo_ts.py:19,388 (F811 re re-imported in function)",
+        "SRC:tools/tests/test_report_incomplete.py:5,64 (F811 bz2 re-imported)",
+        "SRC:commit0/cli_cpp.py:212 (N814 TestStatus as _TS)",
+        "SRC:commit0/cli_java.py:196 (N814 TestStatus as _TS)",
+        "SRC:tools/validate_java.py:111 (F821 on quoted forward-ref 'docker.DockerClient')"
+      ],
+      "tool": "ruff 0.6.4",
+      "why": "Cosmetic only. The F821 is a FALSE-POSITIVE-for-runtime: line 111 is a quoted type annotation ('docker.DockerClient') that Python never evaluates; docker is lazily imported at line 91. No NameError occurs.",
+      "remediation": "Remove the in-function re-imports; alias TestStatus with CamelCase; move the docker type-only import under `if TYPE_CHECKING:` to satisfy the linter.",
+      "bug_ticket": null
+    },
+    {
+      "id": "C-001",
+      "axis": "Config/CI",
+      "title": "No coverage floor enforced + ruff version skew between pre-commit and pyproject",
+      "severity": "LOW",
+      "disposition": "HOLD",
+      "confidence": "High",
+      "evidence": [
+        "ABSENCE:no --cov/coverage config in pyproject.toml (CMD-069 grep cov => empty)",
+        "SRC:.pre-commit-config.yaml ruff rev v0.6.1 vs pyproject requires ruff>=0.6.4 (CMD-022)"
+      ],
+      "tool": "manual",
+      "why": "116 test files exist (good), but CI enforces no coverage minimum, so coverage can silently regress. The pre-commit ruff (v0.6.1) lags the project's required ruff (>=0.6.4), so contributors and CI may lint with different rule behaviour.",
+      "remediation": "Add pytest-cov with a coverage floor in CI. Bump pre-commit ruff rev to match pyproject (>=0.6.4) to eliminate drift.",
+      "bug_ticket": "BUG-C-001"
+    },
+    {
+      "id": "S-003",
+      "axis": "Security",
+      "title": "Secret handling is clean (no hardcoded creds, no secrets in history)",
+      "severity": "INFO",
+      "disposition": "SHIP",
+      "confidence": "High",
+      "evidence": [
+        "CMD:git-history secret scan CMD-041 (no BEGIN PRIVATE/AKIA/sk-/ghp_/bearer matches across full history of .env/*.pem/*.key)",
+        "SRC:os.environ.get('GITHUB_TOKEN') et al. (CMD-039, no literals)",
+        "SRC:.env.example tracked; .env gitignored"
+      ],
+      "tool": "git + grep",
+      "why": "Genuine positive. Credentials come exclusively from env vars; only .env.example is tracked; no secret ever appears in git history. This is the correct pattern.",
+      "remediation": "None. Maintain via a CI secret-scanning gate (gitleaks/trufflehog) to keep it clean.",
+      "bug_ticket": null
+    },
+    {
+      "id": "S-004",
+      "axis": "Security",
+      "title": "Tar extraction is path-traversal guarded (bandit B202 is a false positive)",
+      "severity": "INFO",
+      "disposition": "SHIP",
+      "confidence": "High",
+      "evidence": [
+        "SRC:commit0/harness/docker_utils.py:100-129 (safe_extract + is_within_directory guard raising 'Attempted Path Traversal in Tar File' before extractall)",
+        "CMD:bandit 1.7.9 B202 HIGH (false positive)"
+      ],
+      "tool": "bandit 1.7.9",
+      "why": "Disclosed false positive. bandit flags tarfile.extractall as HIGH but the code wraps it in safe_extract() which validates every member stays within the target dir before extraction. The other 2 bandit-HIGH (MD5 in agents_java.py:268, scrape_pdf.py:303) are also FPs: MD5 used only for short filename hashing, not security.",
+      "remediation": "Optionally pass usedforsecurity=False to the MD5 calls to silence the scanner. No functional change needed.",
+      "bug_ticket": null
+    },
+    {
+      "id": "L-001",
+      "axis": "Licensing",
+      "title": "MIT license present and consistent",
+      "severity": "INFO",
+      "disposition": "SHIP",
+      "confidence": "High",
+      "evidence": [
+        "SRC:LICENSE:1 (MIT, Copyright (c) 2024 Wenting Zhao)",
+        "SRC:pyproject.toml (license MIT, classifiers present)"
+      ],
+      "tool": "manual",
+      "why": "Genuine positive. Clear permissive license at root and in metadata.",
+      "remediation": "None.",
+      "bug_ticket": null
+    }
+  ]
+}
