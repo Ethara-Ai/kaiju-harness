@@ -201,3 +201,6 @@ scripts/
 *_entries.json
 *.bz2
 package-lock.json
+gostubber
+COMMIT0_*.pdf.docx
+docs/commit0.gif
