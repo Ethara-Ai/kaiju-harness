@@ -4,7 +4,6 @@ Uses ExecutionContext for backend-agnostic container lifecycle (Docker/Modal/E2B
 Supports single-repo evaluation and multi-repo parallel orchestration.
 """
 import logging
-import os
 import subprocess
 import time
 import traceback
@@ -38,12 +37,14 @@ def evaluate_java_repo(
     """Evaluate a Java patch: apply it in a Docker container and parse test results.
 
     Args:
+    ----
         instance: Repo instance dict.
         patch_path: Path to the patch file to apply.
         test_ids: Specific test IDs to run. None = run all tests.
         timeout: Container execution timeout in seconds.
         num_cpus: CPU limit for the container.
         log_dir: Directory for logs and artifacts.
+
     """
     spec = make_java_spec(instance, test_ids=test_ids)
     repo_name = instance.get("repo", instance.get("instance_id", "unknown"))

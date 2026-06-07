@@ -5,13 +5,9 @@ Covers: ThreadPoolExecutor in evaluate.py/evaluate_rust.py,
         .done file markers in run_agent_no_rich.py.
 """
 
-import multiprocessing
-import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 

@@ -10,7 +10,6 @@ from tools._versioning import NoSignalsError, VersionConflictError
 from tools.java_version import (
     collect_signals,
     detect,
-    detect_from_signals,
     normalize_java_version,
 )
 

@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Dict, List
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from commit0.harness.constants import (
     DOCKERFILES_DIR,

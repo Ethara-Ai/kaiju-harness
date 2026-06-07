@@ -4,12 +4,8 @@ These tests verify that the main entry points can be imported and invoked
 without hitting external services (Docker, git remotes, HuggingFace).
 """
 
-import os
-import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
 
-import pytest
 import yaml
 
 

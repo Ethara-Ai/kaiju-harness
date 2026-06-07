@@ -5,7 +5,6 @@ import logging
 
 from aider.coders import Coder
 from aider.models import Model
-from aider.io import InputOutput
 from agent.guarded_io import GuardedInputOutput
 import re
 import os

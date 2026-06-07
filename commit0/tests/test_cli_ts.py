@@ -128,7 +128,7 @@ class TestSetupCommand:
     def test_setup_invokes_main(self, mock_main, tmp_path):
         dataset_path = tmp_path / "dataset.json"
         dataset_path.write_text("[]")
-        result = runner.invoke(
+        runner.invoke(
             commit0_ts_app,
             [
                 "setup",
@@ -152,7 +152,7 @@ class TestSetupCommand:
         cfg_path = tmp_path / ".commit0.ts.yaml"
         dataset_path = tmp_path / "dataset.json"
         dataset_path.write_text("[]")
-        result = runner.invoke(
+        runner.invoke(
             commit0_ts_app,
             [
                 "setup",

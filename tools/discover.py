@@ -1,5 +1,4 @@
-"""
-Discover candidate Python repos for a custom commit0 dataset.
+"""Discover candidate Python repos for a custom commit0 dataset.
 
 Searches GitHub for large, popular Python repos with good test suites.
 Filters out repos already in commit0's existing 54.
@@ -17,7 +16,6 @@ import argparse
 import json
 import logging
 import os
-import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError

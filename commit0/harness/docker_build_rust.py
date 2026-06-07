@@ -28,7 +28,7 @@ from commit0.harness.docker_build import (
     _get_image_created_timestamp,
 )
 from commit0.harness.dockerfiles.__init__rust import get_dockerfile_base_rust
-from commit0.harness.spec_rust import RustSpec, get_rust_specs_from_dataset
+from commit0.harness.spec_rust import get_rust_specs_from_dataset
 
 _logger = logging.getLogger(__name__)
 

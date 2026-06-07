@@ -159,7 +159,6 @@ def cleanup_container(
     if not container:
         return
 
-    container_id = container.id
 
     # Attempt to stop the container
     try:

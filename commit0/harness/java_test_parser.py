@@ -5,7 +5,7 @@ All three produce Surefire-compatible XML (when run via Maven/Gradle).
 """
 import defusedxml.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict
 from enum import Enum
 
 

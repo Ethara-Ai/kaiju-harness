@@ -243,6 +243,7 @@ def _find_files_to_edit(base_dir: str, src_dir: str, test_dir: str) -> tuple[lis
         tuple[list[str], list[str]]: (editable_source_files, test_files).
         editable_source_files have tests subtracted; test_files is the sorted list
         of test files discovered under ``test_dir`` (one per comma-separated entry).
+
     """
     files = [
         os.path.normpath(f)

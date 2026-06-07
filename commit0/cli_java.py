@@ -207,7 +207,7 @@ def evaluate(
     typer.echo(f"  Summary: {num_failed} failed, {num_passed} passed")
 
     # CSV output (parsed by run_pipeline_java.sh)
-    typer.echo(f"\nrepo,runtime,num_passed/num_tests")
+    typer.echo("\nrepo,runtime,num_passed/num_tests")
     typer.echo(f"{repo_name},{_elapsed:.1f},{num_passed}/{num_total}")
     typer.echo(f"total runtime: {_elapsed:.3f}")
     if num_total > 0:
@@ -507,7 +507,7 @@ def _load_instance(repo: Optional[str]) -> dict:
         return instance
 
     raise typer.BadParameter(
-        f"Multiple repos in dataset. Provide --repo to select one."
+        "Multiple repos in dataset. Provide --repo to select one."
     )
 
 

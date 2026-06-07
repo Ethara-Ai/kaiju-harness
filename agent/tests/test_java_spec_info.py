@@ -4,7 +4,6 @@ import bz2
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from agent.agent_utils_java import SPEC_INFO_HEADER
 from agent.config_java import JavaAgentConfig

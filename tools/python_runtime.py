@@ -88,6 +88,7 @@ class TestCollectionResult:
     failing_module
         For ``IMPORT_ERROR`` / ``VERSION_MISMATCH`` / ``MISSING_SYSTEM_DEPS``,
         the name of the module Python couldn't import. ``None`` otherwise.
+
     """
 
     test_ids: list[str]
@@ -275,6 +276,7 @@ class Runtime:
         parse_fn
             Callable ``(stdout: str) -> list[str]`` that extracts test IDs.
             Injected to avoid a circular import with ``generate_test_ids``.
+
         """
         try:
             stdout, stderr, exit_code = self._run_pytest_collect(
@@ -774,6 +776,7 @@ def resolve_runtime(
     ------
     NoRuntimeError
         If no tier produced a usable runtime.
+
     """
     if explicit_interpreter is not None:
         return LocalRuntime(interpreter=explicit_interpreter)

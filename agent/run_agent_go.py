@@ -15,7 +15,7 @@ import time
 import json
 import yaml
 from pathlib import Path
-from typing import Optional, cast
+from typing import Optional
 from types import TracebackType
 
 import git
@@ -36,10 +36,8 @@ from agent.llm_cost_capture import capture_module_calls
 from agent.trajectory_writer import write_trajectory_md
 from agent.output_writer import extract_git_patch, build_metadata
 from agent.openhands_formatter import write_module_output_json
-from commit0.harness.constants import RepoInstance
 from commit0.harness.constants_go import (
     GO_SPLIT,
-    RUN_GO_TEST_LOG_DIR,
 )
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_go_test_ids import main as get_go_test_ids

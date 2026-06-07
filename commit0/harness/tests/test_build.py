@@ -60,7 +60,7 @@ def _run_main(
         patch(f"{MODULE}.make_spec", return_value=spec_sentinel) as m_spec,
         patch(f"{MODULE}.docker") as m_docker,
         patch(f"{MODULE}.build_repo_images", return_value=build_return) as m_build,
-        patch(f"{MODULE}.run_health_checks", return_value=[]) as m_health,
+        patch(f"{MODULE}.run_health_checks", return_value=[]),
         patch(f"{MODULE}.sys") as m_sys,
     ):
         if split_dict is not None:

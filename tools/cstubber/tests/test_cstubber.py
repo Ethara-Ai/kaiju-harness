@@ -11,13 +11,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from tools.cstubber.cstubber import (
-    DEFAULT_FALLBACK_ARGS,
     DEFAULT_SKIP_DIR_RE,
     STUB_HEADER_CONTENT,
     STUB_INCLUDE_LINE,
@@ -30,7 +28,6 @@ from tools.cstubber.cstubber import (
     _line_col_to_offset,
     load_compile_commands,
     stub_directory,
-    stub_file,
     write_stub_header,
 )
 

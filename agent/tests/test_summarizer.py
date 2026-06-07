@@ -787,7 +787,8 @@ class TestTimeoutAndRetry:
 
 class TestCaching:
     def test_cache_hit_skips_llm(self, mock_litellm, tmp_path):
-        import hashlib, json
+        import hashlib
+        import json
 
         spec = "cached spec"
         cache_key = hashlib.sha256((spec + "m" + "50").encode()).hexdigest()

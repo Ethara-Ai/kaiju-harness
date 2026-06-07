@@ -100,6 +100,7 @@ class EntryReport:
         From ``.status.json``.
     stderr_snippet
         From ``.status.json``, truncated to 240 chars for report tables.
+
     """
 
     name: str
@@ -447,7 +448,7 @@ def write_markdown(reports: list[EntryReport], summary: dict, path: Path) -> Non
 
 def print_summary_stdout(reports: list[EntryReport], summary: dict) -> None:
     print(f"\n{'=' * 70}")
-    print(f"Kaiju test-ID completeness report")
+    print("Kaiju test-ID completeness report")
     print(f"{'=' * 70}")
     print(f"  Total:                       {summary['total']}")
     print(f"  Complete (OK + .bz2):        {summary['complete']}")
@@ -456,17 +457,17 @@ def print_summary_stdout(reports: list[EntryReport], summary: dict) -> None:
     print(f"  Missing both .bz2 + spec:    {summary['missing_both_bz2_and_spec']}")
     print(f"  Recoverable (retry-able):    {summary['incomplete_recoverable']}")
     print(f"  Unrecoverable (sys-deps):    {summary['incomplete_unrecoverable']}")
-    print(f"\n  Status breakdown:")
+    print("\n  Status breakdown:")
     for status, count in sorted(summary["status_breakdown"].items()):
         print(f"    {status:25} {count}")
     if summary["by_failing_module"]:
-        print(f"\n  Top failing modules:")
+        print("\n  Top failing modules:")
         for mod, count in sorted(summary["by_failing_module"].items(), key=lambda kv: -kv[1])[:10]:
             print(f"    {mod:25} {count}")
     print()
     incomplete = [r for r in reports if not r.is_complete]
     if incomplete:
-        print(f"  Incomplete entries (first 30):")
+        print("  Incomplete entries (first 30):")
         for r in incomplete[:30]:
             module = f" [{r.failing_module}]" if r.failing_module else ""
             print(f"    {r.status:22} {r.name}{module}")

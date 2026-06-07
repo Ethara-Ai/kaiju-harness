@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -178,7 +178,7 @@ class TestConfigFile:
     def test_config_written_when_missing(self, mock_load):
         mock_load.return_value = _dataset()
         with (
-            patch(f"{MODULE}.Path.is_file", return_value=False) as mock_is_file,
+            patch(f"{MODULE}.Path.is_file", return_value=False),
             patch(f"{MODULE}.Path.write_text") as mock_write,
             patch(f"{MODULE}.os.path.isfile", return_value=True),
             patch(f"{MODULE}.subprocess.run") as mock_run,

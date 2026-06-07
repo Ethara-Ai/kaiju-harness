@@ -584,7 +584,6 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
             _seen_call_ids.add(dedup_key)
 
         try:
-            import traceback as _tb
             stack_kwargs = {"model": model}
             source = _classify_source(stack_kwargs)
         except Exception:
@@ -775,7 +774,8 @@ def audit_against_httpx_log(
 
     Replaced by audit_against_callback_counter() which uses litellm's
     log_post_api_call hook instead of scanning httpx INFO logs (which are now
-    suppressed in production to prevent Bedrock ARN leakage)."""
+    suppressed in production to prevent Bedrock ARN leakage).
+    """
     return None
 
 
@@ -792,7 +792,8 @@ def audit_against_callback_counter(
     record never landed) or vice versa.
 
     Independent of httpx INFO logging, which is suppressed in production to
-    keep URL-encoded Bedrock ARN out of aider.log."""
+    keep URL-encoded Bedrock ARN out of aider.log.
+    """
     try:
         event_count = log.callback_event_count
         captured_calls = len(log.calls)

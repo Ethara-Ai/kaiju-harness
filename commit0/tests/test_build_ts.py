@@ -42,7 +42,7 @@ def _run_main(
             f"{MODULE}.load_dataset_from_config", return_value=iter(dataset)
         ) as m_load,
         patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel) as m_spec,
-        patch("docker.from_env", return_value=mock_client) as m_docker,
+        patch("docker.from_env", return_value=mock_client),
         patch(f"{MODULE}.build_repo_images", return_value=build_return) as m_build,
         patch(f"{MODULE}.run_ts_health_checks", return_value=health_return) as m_health,
         patch(f"{MODULE}.sys") as m_sys,

@@ -4,10 +4,7 @@ Covers: build_rust, setup_rust, evaluate_rust, lint_rust, run_rust_tests.
 """
 
 import json
-import os
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 import pytest
 

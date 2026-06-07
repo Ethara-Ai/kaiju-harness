@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 from commit0.harness.docker_build import build_image, _resolve_mitm_ca_cert
 from commit0.harness.docker_utils import get_docker_platform
-from commit0.harness.spec_java import Commit0JavaSpec, make_java_spec
+from commit0.harness.spec_java import make_java_spec
 from commit0.harness.constants import BASE_IMAGE_BUILD_DIR, REPO_IMAGE_BUILD_DIR
 from commit0.harness.constants_java import (
     JAVA_BASE_IMAGE_PREFIX, SUPPORTED_JAVA_VERSIONS, JAVA_SPLIT

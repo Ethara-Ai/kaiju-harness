@@ -561,7 +561,6 @@ class TestReportParsingAndPassRate:
             return False
 
         captured_out = []
-        original_print = print
 
         with patch(f"{MODULE}.run_ts_tests"):
             with patch("os.path.exists", side_effect=_exists_side_effect):

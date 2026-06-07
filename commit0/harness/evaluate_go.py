@@ -103,6 +103,7 @@ def main(
         Number of parallel evaluation threads.
     rebuild_image : bool
         Whether to rebuild Docker images before evaluation.
+
     """
     dataset: Iterator[GoRepoInstance] = load_dataset_from_config(
         dataset_name, split=dataset_split

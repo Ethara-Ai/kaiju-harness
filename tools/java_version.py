@@ -30,7 +30,6 @@ from tools._versioning import (
     NoSignalsError,
     Signal,
     Tier,
-    VersionConflictError,
     resolve_two_tier,
 )
 

@@ -1,5 +1,4 @@
-"""
-Generate Java test ID files (.bz2) for commit0 Java repos.
+"""Generate Java test ID files (.bz2) for commit0 Java repos.
 
 Discovers Java test IDs via source scanning (using get_java_test_ids from
 commit0.harness.get_java_test_ids) and optionally from build tool output
@@ -45,7 +44,6 @@ from commit0.harness.spec_java import Commit0JavaSpec
 from commit0.harness.docker_utils import get_docker_platform
 from commit0.harness.get_java_test_ids import (
     get_java_test_ids,
-    get_test_ids_from_sources,
 )
 
 _MVN_SKIP_FLAGS = Commit0JavaSpec._MVN_SKIP_FLAGS
@@ -61,12 +59,15 @@ def collect_test_ids_local(
     """Delegate to get_java_test_ids() from commit0.harness.get_java_test_ids.
 
     Args:
+    ----
         repo_dir: Path to the Java repository root.
         strategy: "auto" (try build tool then fallback to source), "source",
                   "maven", or "gradle".
 
     Returns:
+    -------
         List of test IDs in ``fully.qualified.ClassName#methodName`` format.
+
     """
     repo_path = str(repo_dir)
     try:

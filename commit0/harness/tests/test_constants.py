@@ -18,7 +18,6 @@ from commit0.harness.constants import (
     RUN_AGENT_LOG_DIR,
     RUN_PYTEST_LOG_DIR,
     SPLIT,
-    SPLIT_LITE,
     SUPPORTED_PYTHON_VERSIONS,
     TESTS_ERROR,
     TESTS_FAILED,

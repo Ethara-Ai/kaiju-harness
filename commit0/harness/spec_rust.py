@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional, Union, cast
+from typing import Union, cast
 
 from commit0.harness.constants import (
     ABSOLUTE_REPO_DIR,

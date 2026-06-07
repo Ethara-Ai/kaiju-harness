@@ -101,7 +101,7 @@ class Commit0GoSpec(Spec):
             '    echo \'{"Action":"fail","Package":"PATCH_APPLY_FAILED","Output":"git apply failed"}\'  > test_output.json',
             '    echo "git apply failed" > test_stderr.txt',
             "    echo 1 > go_test_exit_code.txt",
-            f"    exit 0",
+            "    exit 0",
             "  fi",
             "fi",
             revert_test_paths,

@@ -1,5 +1,4 @@
-"""
-Prepare Rust repos for a commit0 dataset.
+"""Prepare Rust repos for a commit0 dataset.
 
 For each repo:
 1. Fork to Zahgon GitHub org
@@ -334,8 +333,7 @@ def prepare_rust_repo(
     skip_spec: bool = False,
     specs_dir: Path = SPECS_DIR,
 ) -> dict | None:
-    """
-    Run the full preparation pipeline for a single Rust repo/crate.
+    """Run the full preparation pipeline for a single Rust repo/crate.
 
     Returns the dataset entry dict on success, None on failure.
     """

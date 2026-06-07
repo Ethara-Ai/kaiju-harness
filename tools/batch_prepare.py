@@ -1,5 +1,4 @@
-"""
-Batch prepare repos for the Commit0 benchmark pipeline.
+"""Batch prepare repos for the Commit0 benchmark pipeline.
 
 Reads a CSV of libraries, orchestrates the full preparation pipeline for each:
   1. Fork to GitHub org
@@ -367,7 +366,7 @@ def print_summary(
     allow_broken_stubs: bool = False,
 ) -> None:
     print(f"\n{'=' * 100}")
-    print(f"BATCH PREPARATION SUMMARY")
+    print("BATCH PREPARATION SUMMARY")
     print(f"{'=' * 100}")
     print(f"Total repos:    {len(entries) + len(failures)}")
     print(f"Succeeded:      {len(entries)}")

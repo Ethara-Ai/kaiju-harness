@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Union
 
 import commit0.harness.setup_ts
-from commit0.harness.constants_ts import TS_SPLIT
 
 logger = logging.getLogger(__name__)
 

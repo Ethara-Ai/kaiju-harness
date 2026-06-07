@@ -40,7 +40,6 @@ from agent.output_writer import extract_git_patch, build_metadata
 from agent.openhands_formatter import write_module_output_json
 from commit0.harness.constants_c import (
     C_SPLIT,
-    RUN_C_TEST_LOG_DIR,
 )
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_c_test_ids import main as get_c_test_ids

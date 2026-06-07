@@ -5,12 +5,10 @@ while reusing all language-agnostic infrastructure (progress tracking, git ops,
 trajectory capture, output formatting).
 """
 
-import copy
 import json
 import logging
 import multiprocessing
 import os
-import sys
 import time
 from pathlib import Path
 from typing import cast
@@ -19,7 +17,7 @@ import yaml
 from git import Repo
 from tqdm import tqdm
 
-from agent.agent_utils import create_branch, get_lint_cmd, load_agent_config
+from agent.agent_utils import create_branch, load_agent_config
 from agent.agent_utils_rust import (
     extract_rust_function_stubs,
     find_rust_files_to_edit,
@@ -226,7 +224,7 @@ def run_rust_agent_for_repo(
     commit0_config_file: str = "",
 ) -> None:
     """Run aider for a single Rust repository."""
-    commit0_config = read_commit0_config_file(commit0_config_file)
+    read_commit0_config_file(commit0_config_file)
 
     _, repo_name = example["repo"].split("/")
 
@@ -268,9 +266,8 @@ def run_rust_agent_for_repo(
 
     target_edit_files = get_target_edit_files_rust(repo_path)
     all_source_files = find_rust_files_to_edit(repo_path)
-    import_dependencies: dict = {}
 
-    test_ids = get_rust_test_ids(repo_path)
+    get_rust_test_ids(repo_path)
 
     experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
     eval_results = {}
@@ -285,14 +282,14 @@ def run_rust_agent_for_repo(
 
     message = ""
 
-    stage_start_time = time.monotonic()
+    time.monotonic()
 
     from agent.openhands_formatter import write_module_output_json
 
     instance_id = ""
     metadata: dict = {}
     if thinking_capture is not None:
-        from agent.output_writer import extract_git_patch, build_metadata
+        from agent.output_writer import build_metadata
 
         commit0_config_for_meta = read_commit0_config_file(commit0_config_file)
         instance_id = (
@@ -320,7 +317,7 @@ def run_rust_agent_for_repo(
                     logger.info("Skipping already-completed test module: %s", src_file_name)
                     continue
 
-                test_cmd = f"cargo test --all-features"
+                test_cmd = "cargo test --all-features"
                 lint_cmd = get_rust_lint_cmd(repo_path)
                 message, spec_costs = get_rust_message(
                     agent_config, repo_path, target_files=[src_file]

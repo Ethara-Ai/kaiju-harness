@@ -55,13 +55,12 @@ def parse_gtest_output(output: str) -> Dict:
     prefixed with `N: ` (the test number assigned by CTest).
     """
     tests: List[Dict] = []
-    current_test = None
 
     for raw_line in output.splitlines():
         line = _CTEST_VERBOSE_PREFIX.sub("", raw_line)
         run_match = re.match(r"\[ RUN      \] (.+)", line)
         if run_match:
-            current_test = run_match.group(1).strip()
+            run_match.group(1).strip()
             continue
 
         ok_match = re.match(r"\[       OK \] (.+?)(?:\s+\((\d+)\s*ms\))?$", line)

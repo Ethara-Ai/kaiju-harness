@@ -1,5 +1,4 @@
-"""
-Prepare repos for a commit0 dataset.
+"""Prepare repos for a commit0 dataset.
 
 For each validated candidate:
 1. Fork to Ethara-Ai GitHub org
@@ -36,8 +35,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
-import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -229,8 +226,7 @@ def create_stubbed_branch(
     branch_name: str | None = None,
     removal_mode: str = "combined",
 ) -> tuple[str, str]:
-    """
-    Create the commit0 branch with stubbed code.
+    """Create the commit0 branch with stubbed code.
 
     Returns (base_commit_sha, reference_commit_sha).
 
@@ -312,7 +308,6 @@ def create_stubbed_branch(
     )
 
     stubbed_count = 0
-    removed_count = 0
     errors = 0
 
     if src_dir in (".", ""):
@@ -347,7 +342,7 @@ def create_stubbed_branch(
         base_commit = reference_commit
     else:
         # Verify that stubbing actually modified code (should have both + and - lines)
-        diff_output = git(repo_dir, "diff", "--cached", "--stat")
+        git(repo_dir, "diff", "--cached", "--stat")
         diff_patch = git(repo_dir, "diff", "--cached")
         additions = sum(
             1
@@ -459,10 +454,12 @@ def extract_all_dependencies(repo_dir: Path) -> tuple[list[str], list[str]]:
 
     Reads pyproject.toml, setup.cfg, setup.py, and requirements*.txt.
 
-    Returns:
+    Returns
+    -------
         (runtime_deps, test_deps) — each is a sorted list of full dependency
         strings (preserving version pins, extras, and markers).  Sorting uses
         the normalized package name as key.
+
     """
     runtime: dict[str, str] = {}
     test: dict[str, str] = {
@@ -628,8 +625,7 @@ def _write_kaiju_breadcrumb(
 
 
 def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
-    """
-    Generate the 'setup' dict for a RepoInstance.
+    """Generate the 'setup' dict for a RepoInstance.
 
     Inspects pyproject.toml/setup.py/setup.cfg for install instructions.
     """
@@ -645,7 +641,7 @@ def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
         "system_deps_hint": [],
     }
 
-    repo_name = full_name.split("/")[-1]
+    full_name.split("/")[-1]
 
     # Detect Python version via canonical detector (see tools/python_version.py)
     from commit0.harness.constants import (

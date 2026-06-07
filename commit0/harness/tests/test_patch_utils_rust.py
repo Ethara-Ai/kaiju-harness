@@ -1,7 +1,7 @@
 """Exhaustive unit tests for commit0.harness.patch_utils_rust."""
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 MODULE = "commit0.harness.patch_utils_rust"
 

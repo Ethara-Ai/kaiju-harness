@@ -17,6 +17,7 @@ class JavaRepoInstance(RepoInstance):
     We extend it with Java-specific fields using Pydantic field declarations.
     Inherits: instance_id, repo, base_commit, reference_commit, setup, test, src_dir
     """
+
     language: str = "java"
     java_version: str = "17"
     build_system: str = "maven"          # "maven" | "gradle"

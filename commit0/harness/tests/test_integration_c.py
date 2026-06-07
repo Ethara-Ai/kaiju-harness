@@ -13,7 +13,6 @@ from commit0.harness.c_test_parser import (
     summarize_ctest_results,
 )
 from commit0.harness.constants import TestStatus
-from commit0.harness.constants_c import C_SPLIT
 from commit0.harness.spec_c import make_c_spec
 
 

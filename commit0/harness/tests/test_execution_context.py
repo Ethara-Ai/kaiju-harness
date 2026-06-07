@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call, mock_open
+from unittest.mock import MagicMock, patch, mock_open
 
 import pytest
 from strenum import StrEnum

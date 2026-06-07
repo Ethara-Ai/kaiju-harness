@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import bz2
 import json
 from pathlib import Path
 
-import pytest
 
 from tools.report_incomplete import (
     EntryReport,

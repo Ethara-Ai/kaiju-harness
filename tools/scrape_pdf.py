@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     import requests as requests_lib
     from bs4 import BeautifulSoup
     from PyPDF2 import PdfMerger, PdfReader
-    from playwright.sync_api import Browser, Page
 
 try:
     import fitz  # type: ignore[no-redef]
@@ -887,8 +886,10 @@ def scrape_readme_spec(
       3. Try scrape_spec() (Playwright BFS crawl) on the top 3 candidates.
       4. Fall back to plain-text PDF rendering of the README itself.
 
-    Returns:
+    Returns
+    -------
         (spec_path, crawled_url) -- crawled_url is empty string for the text fallback.
+
     """
     repo_dir = Path(repo_dir)
     if not repo_name:

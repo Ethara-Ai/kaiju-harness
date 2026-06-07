@@ -14,7 +14,6 @@ from commit0.harness.constants import (
     Files,
 )
 from commit0.harness.constants_c import (
-    CRepoInstance,
     RUN_C_TEST_LOG_DIR,
 )
 from commit0.harness.spec_c import make_c_spec

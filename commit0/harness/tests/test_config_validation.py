@@ -16,10 +16,7 @@ Each test class maps to one C-issue:
 from __future__ import annotations
 
 import dataclasses
-import os
-import textwrap
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml

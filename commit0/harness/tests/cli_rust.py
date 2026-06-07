@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -201,7 +200,7 @@ class TestSetupCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["setup", "all", "--base-dir", "/tmp/test_repos"]
         )
         # setup may fail due to missing dataset, but check_commit0_path is called
@@ -223,7 +222,7 @@ class TestBuildCommand:
 
         runner = CliRunner()
         with patch(f"{MODULE}.commit0.harness.build.main"):
-            result = runner.invoke(commit0_app, ["build"])
+            runner.invoke(commit0_app, ["build"])
         mock_check.assert_called_once()
         mock_read.assert_called_once()
 
@@ -236,7 +235,7 @@ class TestGetTestsCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["get-tests", "somerepo"])
+        runner.invoke(commit0_app, ["get-tests", "somerepo"])
         mock_check.assert_called_once()
         mock_get.assert_called_once_with("somerepo", verbose=1)
 
@@ -256,7 +255,7 @@ class TestSaveCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["save", "myowner", "mybranch"])
+        runner.invoke(commit0_app, ["save", "myowner", "mybranch"])
         mock_check.assert_called_once()
 
 
@@ -294,7 +293,7 @@ class TestTestCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["test", "somerepo", "test_mod.py", "--branch", "main"]
         )
         mock_run.assert_called_once()
@@ -319,7 +318,7 @@ class TestLanguageRouting:
 
         runner = CliRunner()
         with patch(f"{MODULE}.check_valid"):
-            result = runner.invoke(commit0_app, ["build"])
+            runner.invoke(commit0_app, ["build"])
         mock_build.assert_called_once()
 
     @patch(f"{MODULE}.commit0.harness.build.main")
@@ -339,7 +338,7 @@ class TestLanguageRouting:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["build"])
+        runner.invoke(commit0_app, ["build"])
         mock_build.assert_called_once()
 
 
@@ -367,7 +366,7 @@ class TestEvaluateCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["evaluate", "--branch", "main"])
+        runner.invoke(commit0_app, ["evaluate", "--branch", "main"])
         mock_eval.assert_called_once()
         # coverage should be False by default
         args = mock_eval.call_args
@@ -382,7 +381,7 @@ class TestEvaluateCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["evaluate", "--branch", "main"])
+        runner.invoke(commit0_app, ["evaluate", "--branch", "main"])
         mock_eval.assert_called_once()
 
     @patch(f"{MODULE}.commit0.harness.evaluate.main")
@@ -394,7 +393,7 @@ class TestEvaluateCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["evaluate", "--reference"])
+        runner.invoke(commit0_app, ["evaluate", "--reference"])
         args = mock_eval.call_args
         assert args[0][4] == "reference"  # branch param
 
@@ -407,7 +406,7 @@ class TestEvaluateCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["evaluate", "--branch", "main", "--coverage"]
         )
         args = mock_eval.call_args
@@ -438,7 +437,7 @@ class TestLintCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["lint", "myrepo"])
+        runner.invoke(commit0_app, ["lint", "myrepo"])
         mock_lint.assert_called_once()
 
     @patch(f"{MODULE}.commit0.harness.lint_rust.main")
@@ -450,7 +449,7 @@ class TestLintCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["lint", "myrepo"])
+        runner.invoke(commit0_app, ["lint", "myrepo"])
         mock_lint.assert_called_once()
 
     @patch(f"{MODULE}.read_commit0_config_file")
@@ -480,7 +479,7 @@ class TestLintCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["lint", "myrepo", "--files", "main.py"])
+        runner.invoke(commit0_app, ["lint", "myrepo", "--files", "main.py"])
         mock_lint.assert_called_once()
         passed_files = mock_lint.call_args[0][3]
         assert len(passed_files) == 1
@@ -504,7 +503,7 @@ class TestLintRustCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["lint-rust", "myrepo"])
+        runner.invoke(commit0_app, ["lint-rust", "myrepo"])
         mock_lint.assert_called_once()
 
     @patch(f"{MODULE}.read_commit0_config_file")
@@ -545,7 +544,7 @@ class TestLintRustCommand:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["lint-rust", "myrepo", "--files", "lib.rs"]
         )
         mock_lint.assert_called_once()
@@ -577,8 +576,8 @@ class TestSaveCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        with patch(f"{MODULE}.check_valid") as mock_valid:
-            result = runner.invoke(commit0_app, ["save", "owner", "branch"])
+        with patch(f"{MODULE}.check_valid"):
+            runner.invoke(commit0_app, ["save", "owner", "branch"])
         mock_save.assert_called_once()
 
     @patch(f"{MODULE}.commit0.harness.save.main")
@@ -590,7 +589,7 @@ class TestSaveCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["save", "owner", "branch", "--github-token", "ghp_xxx"]
         )
         mock_save.assert_called_once()
@@ -624,7 +623,7 @@ class TestTestCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["test", "somerepo", "test_a.py", "--reference"]
         )
         mock_run.assert_called_once()
@@ -640,7 +639,7 @@ class TestTestCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app,
             ["test", "somerepo", "test_a.py", "--branch", "main", "--coverage"],
         )
@@ -659,7 +658,7 @@ class TestTestCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["test", "somerepo", "test_a.py", "--branch", "main"]
         )
         mock_run.assert_called_once()
@@ -676,7 +675,7 @@ class TestTestCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["test", "somerepo", "test_a.py"])
+        runner.invoke(commit0_app, ["test", "somerepo", "test_a.py"])
         mock_run.assert_called_once()
         assert mock_run.call_args[0][4] == "somerepo"
 
@@ -693,7 +692,7 @@ class TestTestCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["test", "somerepo", "test_a.py"])
+        runner.invoke(commit0_app, ["test", "somerepo", "test_a.py"])
         mock_active.assert_called_once()
         assert mock_run.call_args[0][4] == "feat-123"
 
@@ -707,7 +706,7 @@ class TestTestCommandExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["test", "somerepo/", "test_a.py", "--branch", "main"]
         )
         mock_run.assert_called_once()
@@ -751,7 +750,7 @@ class TestBuildCommandExpanded:
 
         runner = CliRunner()
         with patch(f"{MODULE}.check_valid"):
-            result = runner.invoke(commit0_app, ["build"])
+            runner.invoke(commit0_app, ["build"])
         mock_build.assert_called_once()
 
 
@@ -781,7 +780,7 @@ class TestLanguageRoutingExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["evaluate", "--branch", "main"])
+        runner.invoke(commit0_app, ["evaluate", "--branch", "main"])
         mock_eval.assert_called_once()
 
     @patch(f"{MODULE}.commit0.harness.save.main")
@@ -793,7 +792,7 @@ class TestLanguageRoutingExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(commit0_app, ["save", "owner", "branch"])
+        runner.invoke(commit0_app, ["save", "owner", "branch"])
         mock_save.assert_called_once()
 
     @patch(f"{MODULE}.commit0.harness.run_pytest_ids.main")
@@ -806,7 +805,7 @@ class TestLanguageRoutingExpanded:
         from commit0.cli import commit0_app
 
         runner = CliRunner()
-        result = runner.invoke(
+        runner.invoke(
             commit0_app, ["test", "somerepo", "test_a.py", "--branch", "main"]
         )
         mock_run.assert_called_once()

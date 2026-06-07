@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,8 +12,6 @@ from commit0.harness.constants_java import (
     JAVA_REMOTE_BRANCH,
     JAVA_SKIP_FILENAMES,
     JAVA_SOURCE_EXT,
-    JAVA_SPLIT,
-    JAVA_SPLIT_LITE,
     JAVA_SRC_CONVENTION,
     JAVA_STUB_MARKER,
     JAVA_TEST_CONVENTION,

@@ -78,6 +78,7 @@ class Signal:
         Explicit ``X[.Y[.Z]]`` strings (Tier B/C). Empty for Tier A.
     raw
         Verbatim text from the source. Kept for debugging / report mode.
+
     """
 
     source: str
@@ -309,6 +310,7 @@ def resolve_two_tier(
     ------
     VersionConflictError
         When Tier A intersection is empty across ``supported``.
+
     """
     supported_set = sorted(supported, key=version_sort_key)
     all_signals_map: dict[str, str] = {s.source: s.raw for s in signals}

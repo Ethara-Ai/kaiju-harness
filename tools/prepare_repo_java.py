@@ -1,5 +1,4 @@
-"""
-Prepare Java repos for a commit0 dataset.
+"""Prepare Java repos for a commit0 dataset.
 
 For each repo entry in java_dataset.json:
 1. Fork to GitHub org (default: Zahgon)
@@ -34,12 +33,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

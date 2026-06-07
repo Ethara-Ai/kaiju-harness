@@ -1,5 +1,4 @@
-"""
-Validate candidate repos for a commit0 dataset.
+"""Validate candidate repos for a commit0 dataset.
 
 Clones repos, analyzes structure, detects src_dir/test_dir,
 optionally runs pytest in Docker to measure runtime + coverage.
@@ -24,11 +23,9 @@ import argparse
 import ast
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -95,8 +92,7 @@ def clone_repo(
 
 
 def find_src_dir(repo_dir: Path, repo_name: str) -> str | None:
-    """
-    Find the main source directory.
+    """Find the main source directory.
 
     Heuristic order:
     1. src/<package_name>/ (src layout)
@@ -436,8 +432,7 @@ def run_tests_in_docker(
     python_version: str = "3.12",
     timeout: int = 1800,
 ) -> dict:
-    """
-    Run pytest inside a Docker container.
+    """Run pytest inside a Docker container.
 
     Uses a generic Python image with the repo mounted.
     Measures: test discovery, test runtime, coverage.

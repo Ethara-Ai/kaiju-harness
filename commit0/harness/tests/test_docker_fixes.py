@@ -15,14 +15,10 @@ Each test class maps to one D-issue:
 from __future__ import annotations
 
 import json
-import logging
 import os
-import subprocess
-import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -82,7 +78,6 @@ class TestD2UniqueContainerNames:
     def test_container_name_with_run_id_is_unique(self) -> None:
         """get_container_name(run_id=...) produces different names for different run_ids."""
         # Mock a minimal Spec-like object with get_container_name
-        from commit0.harness.spec import Spec
 
         class FakeSpec:
             repo = "Ethara-Ai/test-repo"
@@ -228,7 +223,8 @@ class TestD4CleanupErrorIsolation:
 
     def test_cleanup_failure_logged_but_original_exception_preserved(self) -> None:
         """If cleanup_container raises AND there's already an in-flight exception,
-        the in-flight exception must propagate (not the cleanup error)."""
+        the in-flight exception must propagate (not the cleanup error).
+        """
         mock_logger = MagicMock()
         original_error = ValueError("original test error")
         cleanup_error = RuntimeError("cleanup failed")
@@ -248,7 +244,8 @@ class TestD4CleanupErrorIsolation:
 
     def test_cleanup_failure_re_raised_when_no_original_exception(self) -> None:
         """If cleanup_container raises AND there's NO in-flight exception,
-        the cleanup error must propagate."""
+        the cleanup error must propagate.
+        """
         mock_logger = MagicMock()
         cleanup_error = RuntimeError("cleanup failed")
 
@@ -297,7 +294,8 @@ class TestD5AssertRemoved:
 
     def test_create_container_error_path_no_assert(self) -> None:
         """In create_container, if container.run raises after creation,
-        cleanup uses `if container is not None` (not assert)."""
+        cleanup uses `if container is not None` (not assert).
+        """
         # Read the source to verify no `assert container` pattern
         import inspect
         from commit0.harness import docker_utils
@@ -402,7 +400,8 @@ class TestD7StaleBaseDetection:
 
 class TestD8ReportJsonDisambiguation:
     """evaluate.py must distinguish between pytest crash (test_output.txt exists)
-    and infra failure (no test_output.txt) when report.json is missing."""
+    and infra failure (no test_output.txt) when report.json is missing.
+    """
 
     def test_pytest_crash_detected(self, tmp_path: Path) -> None:
         """When test_output.txt exists but report.json doesn't, reason is pytest crash."""

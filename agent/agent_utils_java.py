@@ -9,8 +9,6 @@ from commit0.harness.constants_java import (
     JAVA_SOURCE_EXT,
     JAVA_STUB_MARKER,
     JAVA_SKIP_FILENAMES,
-    JAVA_BUILD_DIRS,
-    JAVA_SRC_CONVENTION,
 )
 from agent.thinking_capture import SummarizerCost
 

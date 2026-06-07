@@ -3,9 +3,8 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from agent.config_java import JavaAgentConfig
 
@@ -14,7 +13,7 @@ def _make_java_agent(config: JavaAgentConfig | None = None) -> object:
     """Create a JavaAgents instance with all external deps mocked."""
     cfg = config or JavaAgentConfig()
     with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-for-unit-tests"}), \
-         patch("agent.agents_java.Model") as mock_model, \
+         patch("agent.agents_java.Model"), \
          patch("agent.agents_java.register_bedrock_arn_pricing"), \
          patch("agent.agents_java.AiderAgents") as mock_aider:
         mock_aider._load_model_settings = MagicMock()
@@ -122,7 +121,7 @@ class TestMakeWrapperScript:
         repo = tmp_path / "deep" / "repo"
         repo.mkdir(parents=True)
         agent = _make_java_agent()
-        result = agent._make_wrapper_script(str(repo), "gradle", "classes")
+        agent._make_wrapper_script(str(repo), "gradle", "classes")
         assert (repo / ".commit0_scripts").is_dir()
 
 

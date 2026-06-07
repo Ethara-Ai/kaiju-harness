@@ -5,9 +5,8 @@ Covers: docker_build.py, agents.py, agent_utils.py, prepare_repo.py,
 """
 
 import logging
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -48,8 +47,6 @@ AGENTS_MODULE = "agent.agents"
 class TestAgentsPricingRecovery:
     def test_boto3_failure_falls_back_to_static_map(self):
         """When boto3 resolution fails, static map is used."""
-        import sys
-
         mock_boto3 = MagicMock()
         mock_boto3.client.side_effect = Exception("No credentials")
 
@@ -82,7 +79,7 @@ class TestAgentUtilsErrorRecovery:
             from agent.agent_utils import summarize_specification
 
             try:
-                result = summarize_specification("some spec text", "model")
+                summarize_specification("some spec text", "model")
             except Exception:
                 # Some paths may re-raise — that is also acceptable recovery
                 pass
@@ -96,7 +93,7 @@ class TestAgentUtilsErrorRecovery:
             from agent.agent_utils import summarize_test_output
 
             try:
-                result = summarize_test_output("x" * 10000, "model")
+                summarize_test_output("x" * 10000, "model")
             except Exception:
                 pass
 
@@ -162,7 +159,7 @@ class TestPrepareRepoRecovery:
         for repo in repos:
             try:
                 raise RuntimeError(f"{repo} failed")
-            except Exception as e:
+            except Exception:
                 failed.append(repo)
                 continue
 

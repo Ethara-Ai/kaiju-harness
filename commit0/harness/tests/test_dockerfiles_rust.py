@@ -1,8 +1,7 @@
 """Exhaustive unit tests for commit0.harness.dockerfiles.__init__rust."""
 
 import pytest
-from unittest.mock import patch, MagicMock
-from pathlib import Path
+from unittest.mock import patch
 
 MODULE = "commit0.harness.dockerfiles.__init__rust"
 

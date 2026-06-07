@@ -8,7 +8,6 @@ from commit0.harness.constants import RepoInstance
 from commit0.harness.constants_ts import (
     Language,
     TsRepoInstance,
-    TS_SPLIT,
     TS_BASE_BRANCH,
     TS_DATASET_BRANCH,
     TS_SOURCE_EXTS,

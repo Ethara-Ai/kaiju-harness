@@ -10,7 +10,6 @@ import re
 import bz2
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import git
 import yaml
@@ -23,7 +22,6 @@ from commit0.harness.constants_go import (
     GO_STUB_MARKER,
     GO_SOURCE_EXT,
     GO_TEST_FILE_SUFFIX,
-    Language,
 )
 
 logger = logging.getLogger(__name__)

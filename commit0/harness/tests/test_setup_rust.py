@@ -1,8 +1,7 @@
 """Exhaustive unit tests for commit0.harness.setup_rust."""
 
 import os
-import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 MODULE = "commit0.harness.setup_rust"
 
@@ -357,7 +356,7 @@ class TestSetupRustGitignoreEdge:
         mock_clone.return_value = mock_repo
         with patch("os.path.abspath", return_value="/fake/taffy"):
             with patch("os.path.exists", return_value=False):
-                with patch("builtins.open", MagicMock()) as mock_file:
+                with patch("builtins.open", MagicMock()):
                     main("dataset", "test", "all", "/base")
 
     @patch(f"{MODULE}.clone_repo")

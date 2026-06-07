@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from commit0.harness.lint_filter import (
-    ClassifiedError,
     ErrorCategory,
     FilterResult,
     classify_pyright_line,

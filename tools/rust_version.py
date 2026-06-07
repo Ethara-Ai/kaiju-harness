@@ -73,6 +73,7 @@ class RustDetectionResult:
         Other signals that disagreed with the chosen value.
     all_signals
         Map of source → raw text, for debugging / report mode.
+
     """
 
     version: str | None

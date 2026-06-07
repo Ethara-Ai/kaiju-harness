@@ -29,10 +29,8 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-import re
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,7 +62,7 @@ def _find_goimports() -> str:
 
 
 sys.path.insert(0, str(TOOLS_DIR.parent))
-from tools.stub_go import _ensure_gostubber, stub_go_repo
+from tools.stub_go import _ensure_gostubber
 
 from tools._git_auth import (
     git,

@@ -23,7 +23,7 @@ from commit0.harness.constants import SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
-from commit0.harness.utils import load_dataset_from_config, relativize
+from commit0.harness.utils import load_dataset_from_config
 from commit0.cli import read_commit0_config_file
 from pathlib import Path
 from datetime import datetime

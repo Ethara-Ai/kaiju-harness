@@ -1,5 +1,4 @@
-"""
-AST-based Python code stubbing tool.
+"""AST-based Python code stubbing tool.
 
 Replaces function/method bodies with `pass` statements while preserving:
 - All imports and module-level code
@@ -27,7 +26,6 @@ import ast
 import logging
 import shutil
 import sys
-import textwrap
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

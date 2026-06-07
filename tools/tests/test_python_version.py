@@ -12,7 +12,6 @@ import pytest
 from packaging.specifiers import SpecifierSet
 
 from tools.python_version import (
-    DetectionResult,
     NoSignalsError,
     Signal,
     SignalSource,
@@ -459,8 +458,9 @@ class TestDetect:
         assert result.version == "3.9"
 
     def test_qaequilibrae_style_no_signals(self, tmp_path: Path) -> None:
-        """qaequilibrae has no PEP 621 metadata. With fallback, the entry should
-        not silently advertise 3.13 (the old buggy behavior)."""
+        """Qaequilibrae has no PEP 621 metadata. With fallback, the entry should
+        not silently advertise 3.13 (the old buggy behavior).
+        """
         result = detect(tmp_path, SUPPORTED, fallback="3.10")
         assert result.version == "3.10"
         assert "default" in result.source

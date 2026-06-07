@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from commit0.harness.get_java_test_ids import (
     _extract_test_ids_from_source,
@@ -178,7 +176,7 @@ class TestEdgeCases:
 
     def test_missing_key_handled(self) -> None:
         instance: dict = {}
-        with patch(f"{MODULE}.get_test_ids_maven", return_value=[]) as mock_m:
+        with patch(f"{MODULE}.get_test_ids_maven", return_value=[]):
             result = get_java_test_ids(instance)
             assert isinstance(result, list) is True
 

@@ -1122,7 +1122,7 @@ class TestDockerVitestFallbackQuoting:
         ]
         mock_docker.return_value = mock_client
 
-        result = collect_ts_test_ids_docker(
+        collect_ts_test_ids_docker(
             repo_name="r",
             framework="vitest",
             test_dir="src/tests dir",
@@ -1392,7 +1392,7 @@ class TestCollectDockerAutoImage:
         mock_client.containers.run.return_value = b"/testbed/a.test.ts\n"
         mock_docker.return_value = mock_client
 
-        result = collect_ts_test_ids_docker(
+        collect_ts_test_ids_docker(
             repo_name="My/Lib",
             framework="jest",
             image_name=None,

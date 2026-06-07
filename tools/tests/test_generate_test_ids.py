@@ -1,6 +1,5 @@
 """Tests for generate_test_ids module."""
 
-import pytest
 from tools.generate_test_ids import _parse_collect_output
 
 

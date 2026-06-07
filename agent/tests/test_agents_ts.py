@@ -67,7 +67,7 @@ class TestTsAiderAgentsRun:
 
         log_dir = Path("/tmp/test_logs_ts")
         with patch("builtins.open", mock_open()):
-            result = agent.run(
+            agent.run(
                 message="implement functions",
                 test_cmd="",
                 lint_cmd="",
@@ -258,7 +258,7 @@ class TestTsAiderAgentsRun:
         agent.model.info = {"max_input_tokens": 10}
 
         with patch("builtins.open", mock_open()):
-            result = agent.run(
+            agent.run(
                 message="x" * 1000,
                 test_cmd="",
                 lint_cmd="",
@@ -293,7 +293,6 @@ class TestTsAiderAgentsRun:
                 )
 
         # cmd_test was replaced with wrapper, so calling it should invoke summarizer
-        wrapped_cmd_test = coder.commands.cmd_test
         # The original cmd_test returns "x" * 200 which is > max_test_output_length=50
         # so summarizer should be called
         assert (
@@ -887,7 +886,7 @@ class TestRunThinkingCaptureSummarizerCostsAdd:
                     f"{MODULE}.summarize_test_output_ts",
                     return_value=("summarized", [mock_cost]),
                 ):
-                    result = agent.run(
+                    agent.run(
                         message="",
                         test_cmd="npx jest",
                         lint_cmd="",

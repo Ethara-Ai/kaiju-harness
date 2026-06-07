@@ -385,7 +385,6 @@ def _detect_test_dirs_from_config(repo_dir: Path) -> list[Path]:
     and .mocharc.* for test-file globs or roots. Returns absolute dirs that exist and
     contain at least one TS / JS source file. No throwing -- returns [] on any error.
     """
-
     candidate_strings: list[str] = []
 
     # ---- package.json: jest.* + vitest.* + mocha --------------------------------------
@@ -544,8 +543,8 @@ def detect_ts_test_dirs(repo_dir: Path) -> list[Path]:
 
     uses 3-tier detection (config-driven → recursive scan → empty).
 
-     Returns
-     -------
+    Returns
+    -------
          List of absolute Paths to test directories, ranked by confidence. Empty when
          no tests found anywhere (callers must handle this explicitly).
 

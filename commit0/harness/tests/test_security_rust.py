@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -130,7 +128,7 @@ class TestCredentialExposure:
     ):
         """Verify the _safe_url pattern masks credentials correctly."""
         token = "ghp_1234567890abcdef"
-        github_repo_url = f"https://github.com/owner/repo.git"
+        github_repo_url = "https://github.com/owner/repo.git"
         url_with_token = github_repo_url.replace(
             "https://", f"https://x-access-token:{token}@"
         )
@@ -186,9 +184,8 @@ class TestPathTraversal:
     def test_safe_extract_concept(self):
         """docker_utils.copy_from_container uses safe_extract for tar files.
 
-        Verify the concept: paths with .. should be rejected."""
-        import tarfile
-
+        Verify the concept: paths with .. should be rejected.
+        """
         # tarfile.data_filter (Python 3.12+) or manual check
         # The actual implementation uses safe_extract
         evil_path = "../../etc/passwd"

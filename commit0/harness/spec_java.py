@@ -20,6 +20,7 @@ class Commit0JavaSpec(Spec):
     Overrides only the language-specific behavior while inheriting
     all shared infrastructure from Spec ABC.
     """
+
     java_version: str = "17"
     build_system: str = "maven"
     test_framework: str = "junit5"

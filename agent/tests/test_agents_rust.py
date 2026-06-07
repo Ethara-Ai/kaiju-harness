@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -358,7 +356,6 @@ class TestHandleLogging:
 # ---------------------------------------------------------------------------
 class TestAgentReturn:
     def test_init(self, tmp_path):
-        from agent.agents import AgentReturn
 
         # AgentReturn is ABC so we can't instantiate directly,
         # but AiderReturn inherits from it
@@ -717,7 +714,6 @@ class TestApplyThinkingCapturePatches:
         cloned_coder = MagicMock()
         coder.clone.side_effect = None
 
-        original_clone = coder.clone
         _apply_thinking_capture_patches(coder, tc, "lint", "mod")
 
         mock_original_clone = MagicMock(return_value=cloned_coder)

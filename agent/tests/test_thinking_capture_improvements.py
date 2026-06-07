@@ -2,7 +2,6 @@ from agent.openhands_formatter import (
     _convert_file_read_turn,
     _convert_assistant_turn,
     turns_to_openhands_events,
-    make_message_event,
 )
 from agent.thinking_capture import Turn
 

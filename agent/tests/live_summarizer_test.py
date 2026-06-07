@@ -233,7 +233,7 @@ def test_caching():
 
         assert result1 == result2, "Cache returned different result!"
         assert elapsed2 < 0.1, f"Cache hit too slow: {elapsed2:.2f}s"
-        print(f"  Match:   ✅ identical output")
+        print("  Match:   ✅ identical output")
         print(f"  Speedup: {elapsed1 / max(elapsed2, 0.001):.0f}x")
 
     return result1

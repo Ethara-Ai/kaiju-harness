@@ -5,14 +5,13 @@ Does NOT modify the original lint.py.
 """
 
 import logging
-import os
 import sys
-from typing import Iterator, Union, List
+from typing import Iterator
 
 import docker
 import docker.errors
 
-from commit0.harness.constants_go import GoRepoInstance, GO_SPLIT
+from commit0.harness.constants_go import GoRepoInstance
 from commit0.harness.spec_go import make_go_spec
 from commit0.harness.utils import load_dataset_from_config
 
@@ -74,6 +73,7 @@ def main(
         Local directory containing cloned repos.
     timeout : int
         Timeout in seconds for linting.
+
     """
     dataset: Iterator[GoRepoInstance] = load_dataset_from_config(
         dataset_name, split=dataset_split

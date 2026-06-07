@@ -13,7 +13,6 @@ from commit0.harness.constants import (
     Files,
 )
 from commit0.harness.constants_go import (
-    GoRepoInstance,
     RUN_GO_TEST_LOG_DIR,
 )
 from commit0.harness.spec_go import make_go_spec

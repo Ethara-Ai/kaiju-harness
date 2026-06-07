@@ -69,10 +69,13 @@ def detect_system_dependencies(pip_packages: list[str]) -> list[str]:
     of required apt packages, minus those already in the base Docker image.
 
     Args:
+    ----
         pip_packages: List of pip package specs (version pins are stripped).
 
     Returns:
+    -------
         Sorted, deduplicated list of apt package names to install.
+
     """
     apt_deps: set[str] = set()
     for pip_spec in pip_packages:

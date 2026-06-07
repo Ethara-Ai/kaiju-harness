@@ -25,6 +25,7 @@ def write_trajectory_md(
         Repository name for the document title.
     turns : list[Turn]
         All accumulated turns from the pipeline run.
+
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

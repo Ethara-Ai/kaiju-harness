@@ -15,7 +15,6 @@ import bz2
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from agent.agent_utils_go import SPEC_INFO_HEADER, get_go_message
 from agent.class_types import AgentConfig

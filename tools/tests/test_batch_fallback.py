@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 MODULE = "tools.batch_prepare"
 PREPARE_REPO = "tools.prepare_repo"

@@ -51,9 +51,11 @@ def stub_java_sources(
     Parameters map 1:1 to JavaStubber's StubConfig JSON fields.
     CLI contract: java -jar stubber.jar <source-dir> [--config config.json]
 
-    Returns:
+    Returns
+    -------
         Dict with keys: sourceDir, totalFiles, totalStubs, files (list of per-file results).
         Each file result has: file, stubCount.
+
     """
     jar = ensure_stubber_built()
 

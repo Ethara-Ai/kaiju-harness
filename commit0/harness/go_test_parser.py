@@ -24,10 +24,12 @@ def parse_go_test_json_with_durations(
 ) -> Tuple[Dict[str, TestStatus], Dict[str, float], Dict[str, float]]:
     """Parse go test -json into (results, durations, pkg_durations).
 
-    Returns:
+    Returns
+    -------
         results: {test_id: TestStatus} keyed by package/TestName
         durations: {test_id: float} per-test elapsed seconds (integer-truncated by Go for sub-second tests)
         pkg_durations: {package: float} package-level elapsed seconds (precise, from ``go test -json``)
+
     """
     results: Dict[str, TestStatus] = {}
     durations: Dict[str, float] = {}

@@ -127,6 +127,7 @@ class Signal:
         ``FROM``). Empty for Tier A.
     raw
         Original text from the file. Preserved for debugging and error messages.
+
     """
 
     source: SignalSource
@@ -154,6 +155,7 @@ class DetectionResult:
     all_signals
         Map of ``source.value → raw text``, preserved for debugging and
         ``--detect-only --report`` output.
+
     """
 
     version: str | None
@@ -173,6 +175,7 @@ class VersionConflictError(ValueError):
     rejecting_sources
         Map of ``source.value → reason`` describing why each signal eliminated
         the remaining candidates.
+
     """
 
     def __init__(
@@ -227,6 +230,7 @@ def poetry_constraint_to_pep440(constraint: str) -> str:
     ValueError
         If the constraint is malformed enough that no PEP 440 equivalent can
         be produced.
+
     """
     raw = constraint.strip()
     if not raw or raw in {"*", "any"}:
@@ -664,6 +668,7 @@ def detect_from_signals(
     ------
     VersionConflictError
         If Tier A/B signals together leave no candidate in ``supported``.
+
     """
     supported_set = sorted(supported, key=_version_sort_key)
     all_signals_map: dict[str, str] = {s.source.value: s.raw for s in signals}
@@ -816,6 +821,7 @@ def detect(
         When ``strict=True`` and the repo has no detectable signals.
     VersionConflictError
         When signals contradict each other beyond reconciliation.
+
     """
     signals = collect_signals(repo_root)
     result = detect_from_signals(signals, supported)

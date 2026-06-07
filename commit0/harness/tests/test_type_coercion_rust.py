@@ -4,8 +4,6 @@ Covers: YAML type coercion, config validation, Pydantic model edges.
 """
 
 import yaml
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 

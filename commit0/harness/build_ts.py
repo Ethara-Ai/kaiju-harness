@@ -2,10 +2,8 @@
 
 import logging
 import sys
-from typing import Union
 
-from commit0.harness.constants import RepoInstance
-from commit0.harness.constants_ts import DEFAULT_NODE_VERSION, TS_SPLIT, TsRepoInstance
+from commit0.harness.constants_ts import DEFAULT_NODE_VERSION, TS_SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.docker_build import build_repo_images
 from commit0.harness.health_check_ts import run_ts_health_checks

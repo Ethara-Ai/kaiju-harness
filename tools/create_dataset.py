@@ -1,5 +1,4 @@
-"""
-Create a HuggingFace dataset from prepared repo entries.
+"""Create a HuggingFace dataset from prepared repo entries.
 
 Takes output of prepare_repo.py (dataset_entries.json) and:
 1. Validates entries match RepoInstance schema

@@ -242,9 +242,11 @@ def get_java_test_ids(
     """Discover test IDs for a Java repository.
 
     Args:
+    ----
         instance: Repo instance dict with repo_path, build_system.
         strategy: "auto" (try build tool, fallback to source), "source" (scan only),
                   "maven", or "gradle" (build-tool-specific).
+
     """
     repo_path = instance.get("repo_path", ".")
     build_system = instance.get("build_system", "maven")

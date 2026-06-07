@@ -34,6 +34,7 @@ def generate_rust_patch(
     -------
     str
         Filtered patch string.
+
     """
     repo = git.Repo(repo_dir)
     raw_patch = generate_patch_between_commits(repo, base_commit, target_commit)
@@ -57,6 +58,7 @@ def validate_rust_patch(patch_content: str) -> bool:
     -------
     bool
         ``True`` if the patch is clean, ``False`` otherwise.
+
     """
     for line in patch_content.splitlines():
         if line.startswith("diff --git") and "/target/" in line:

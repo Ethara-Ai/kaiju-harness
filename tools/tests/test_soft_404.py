@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 
 from tools.scrape_pdf import (
     SOFT_404_FIRST_LINE_EXACT,

@@ -42,6 +42,7 @@ def write_output_jsonl(
         Error message if run failed, None otherwise.
     attempt : int
         Attempt number (for multi-sample runs).
+
     """
     metrics_public = dict(metrics)
     audit_mismatch = metrics_public.pop("capture_mismatch", None)
@@ -125,6 +126,7 @@ def build_metadata(
     -------
     dict
         Metadata dictionary for output.jsonl.
+
     """
     return {
         "llm": {

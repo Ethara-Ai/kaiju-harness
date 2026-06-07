@@ -109,16 +109,12 @@ def _apply_thinking_capture_patches(
                 thinking_tokens = (
                     getattr(coder._last_completion_usage, "reasoning_tokens", 0) or 0
                 )
-            prompt_tokens = 0
-            completion_tokens = 0
             cache_hit_tokens = 0
-            cache_write_tokens = 0
-            cost = 0.0
             if coder._last_completion_usage:
-                prompt_tokens = (
+                (
                     getattr(coder._last_completion_usage, "prompt_tokens", 0) or 0
                 )
-                completion_tokens = (
+                (
                     getattr(coder._last_completion_usage, "completion_tokens", 0) or 0
                 )
                 cache_hit_tokens = getattr(
@@ -128,7 +124,6 @@ def _apply_thinking_capture_patches(
                     cache_hit_tokens = cache_hit_tokens.cached_tokens or 0
                 else:
                     cache_hit_tokens = 0
-                cache_write_tokens = 0
 
             coder._thinking_capture.add_assistant_turn(
                 content=coder.partial_response_content or "",

@@ -172,16 +172,19 @@ def main(
       2. cargo fmt --check — formatting verification
 
     Args:
+    ----
         repo_or_dir: Path to a Rust repository or directory containing Cargo.toml.
         files: Optional list of specific .rs files to report on.
             If None, all .rs files under repo_or_dir are discovered.
 
     Returns:
+    -------
         A dict with keys:
             clippy: {warnings, errors, messages, returncode, raw_stderr}
             fmt: {formatted, diff, returncode}
             files_checked: list of .rs file paths
             passed: bool — True if zero clippy issues and formatting is clean
+
     """
     repo_dir = os.path.abspath(repo_or_dir)
     if not os.path.isdir(repo_dir):

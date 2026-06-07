@@ -127,11 +127,13 @@ def collect_test_ids_local(
     """Run `cargo test -- --list` locally to discover Rust test names.
 
     Args:
+    ----
         repo_dir: Path to the cloned Rust repo.
         test_cmd: The cargo test command (e.g., "cargo test -p grex").
         timeout: Subprocess timeout in seconds.
 
     Returns:
+    -------
         List of test IDs (e.g., ["tests::test_foo", "module::test_bar"]).
 
     """
@@ -173,6 +175,7 @@ def collect_test_ids_docker(
     test collection runs against the real (un-stubbed) implementation.
 
     Args:
+    ----
         repo_name: Repository name for Docker image lookup.
         test_cmd: The cargo test command (e.g., "cargo test -p grex").
         image_name: Docker image tag. Auto-detected if None.
@@ -180,6 +183,7 @@ def collect_test_ids_docker(
         timeout: Container timeout in seconds.
 
     Returns:
+    -------
         List of test IDs. Empty list on failure.
 
     """
@@ -252,6 +256,7 @@ def generate_for_dataset(
     """Generate test IDs for all repos in a dataset entries JSON file.
 
     Args:
+    ----
         dataset_path: Path to the Rust dataset JSON.
         output_dir: Output directory for .bz2 files.
         use_docker: Run inside Docker containers.
@@ -260,6 +265,7 @@ def generate_for_dataset(
         max_repos: Limit number of repos processed.
 
     Returns:
+    -------
         Mapping of repo/crate names to test ID counts.
 
     """

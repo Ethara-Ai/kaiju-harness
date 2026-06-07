@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 from agent.agent_utils_java import (
     _in_build_dir,
@@ -11,7 +9,6 @@ from agent.agent_utils_java import (
     is_java_stubbed,
     count_java_stubs,
 )
-from commit0.harness.constants_java import JAVA_STUB_MARKER
 
 
 class TestInBuildDir:

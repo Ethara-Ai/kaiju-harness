@@ -251,7 +251,7 @@ def prepare_single_repo(
     # Validate
     issues = validate_cpp_entry(entry)
     if issues:
-        print(f"  [WARN] Entry validation issues:")
+        print("  [WARN] Entry validation issues:")
         for issue in issues:
             print(f"    - {issue}")
 

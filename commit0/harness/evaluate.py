@@ -95,11 +95,11 @@ def main(
     if "swe" in dataset_name.lower():
         all_instance_ids = [ex["instance_id"] for ex in dataset_list]
         if repo_split == "all":
-            repos = all_instance_ids
+            pass
         else:
-            repos = [iid for iid in all_instance_ids if repo_split in iid]
+            [iid for iid in all_instance_ids if repo_split in iid]
     else:
-        repos = (
+        (
             SPLIT[repo_split]
             if repo_split in SPLIT
             else [ex["repo"].split("/")[-1] for ex in dataset_list]

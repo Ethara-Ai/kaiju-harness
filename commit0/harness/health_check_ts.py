@@ -20,7 +20,8 @@ def _detect_image_pkg_manager(
     image_name: str,
 ) -> str:
     """Detect package manager from lockfiles in /testbed. Returns one of:
-    'pnpm' | 'yarn' | 'bun' | 'npm'. Result is cached per image."""
+    'pnpm' | 'yarn' | 'bun' | 'npm'. Result is cached per image.
+    """
     if image_name in _PKG_MANAGER_CACHE:
         return _PKG_MANAGER_CACHE[image_name]
     probe = (
@@ -52,7 +53,8 @@ def _detect_image_pkg_manager(
 
 def _build_require_cmd(package_name: str, pkg_manager: str) -> list[str]:
     """Build a require() probe command that respects the package manager's
-    module-resolution layout (pnpm symlinks, yarn pnp, etc.)."""
+    module-resolution layout (pnpm symlinks, yarn pnp, etc.).
+    """
     script = f'require({_json.dumps(package_name)})'
     if pkg_manager == "pnpm":
         return ["pnpm", "exec", "node", "-e", script]

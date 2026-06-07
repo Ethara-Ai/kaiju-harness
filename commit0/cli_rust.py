@@ -131,7 +131,6 @@ def setup(
     ),
 ) -> None:
     """Clone Rust repositories for a given split."""
-
     base_dir = str(Path(base_dir).resolve())
     if dataset_name.endswith(".json"):
         dataset_name = str(Path(dataset_name).resolve())

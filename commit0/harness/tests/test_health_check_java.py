@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from commit0.harness.health_check_java import (
     check_docker_java_images,

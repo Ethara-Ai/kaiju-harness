@@ -9,12 +9,10 @@ from packaging.version import Version
 
 from tools._versioning import (
     NoSignalsError,
-    Signal,
     Tier,
-    VersionConflictError,
     normalize_semver_range,
 )
-from tools.node_version import collect_signals, detect, detect_from_signals
+from tools.node_version import collect_signals, detect
 
 SUPPORTED = {"18", "20", "22"}
 

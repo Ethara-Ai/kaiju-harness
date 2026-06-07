@@ -10,7 +10,6 @@ These hit behaviour not covered by the existing line-coverage suites:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import pytest
 

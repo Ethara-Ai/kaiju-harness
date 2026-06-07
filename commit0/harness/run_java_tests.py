@@ -31,12 +31,14 @@ def run_java_tests(
     """Run Java tests inside a Docker container and return parsed results.
 
     Args:
+    ----
         instance: Repo instance dict.
         test_ids: Specific test IDs to run. None = run all tests.
         timeout: Container execution timeout in seconds.
         num_cpus: CPU limit for the container.
         log_dir: Directory for logs and artifacts.
         verbose: Verbosity level. >0 prints test output.
+
     """
     spec = make_java_spec(instance, test_ids=test_ids)
     repo_name = instance.get("repo", instance.get("instance_id", "unknown"))

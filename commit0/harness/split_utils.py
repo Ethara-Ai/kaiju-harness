@@ -138,6 +138,7 @@ def resolve_split(
     -------
     list[str]
         Repo basenames to include in this run.
+
     """
     entries = _materialize(dataset)
 

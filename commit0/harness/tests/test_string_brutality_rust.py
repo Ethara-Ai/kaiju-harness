@@ -6,9 +6,7 @@ Covers: repo names, test IDs, branch names, docker paths with unicode,
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

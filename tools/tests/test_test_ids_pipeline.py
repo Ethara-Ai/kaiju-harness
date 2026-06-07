@@ -18,9 +18,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 from tools.generate_test_ids import (
     _ReferenceCommitCheckout,
@@ -32,7 +30,6 @@ from tools.prepare_repo import _write_kaiju_breadcrumb
 from tools.python_runtime import (
     TestCollectionResult,
     TestCollectionStatus,
-    UvRuntime,
     classify_failure,
 )
 
@@ -351,7 +348,8 @@ class TestWriteStatusJson:
 
 class TestUvRuntimeSystemDepsShortCircuit:
     """We can't run real ``uv`` in tests reliably, so we mock the parts we
-    need and exercise only the short-circuit logic."""
+    need and exercise only the short-circuit logic.
+    """
 
     def test_synthesized_stderr_classified_as_missing_system_deps(self) -> None:
         # The short-circuit emits ModuleNotFoundError stderr that

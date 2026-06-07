@@ -198,6 +198,7 @@ def scan_repo_for_system_deps(
     -------
     Sorted list of top-level module names from :data:`SYSTEM_DEP_MODULES`
     found anywhere in the scanned files. Empty if none detected.
+
     """
     if test_dirs is None:
         test_dirs = ["tests", "test"]

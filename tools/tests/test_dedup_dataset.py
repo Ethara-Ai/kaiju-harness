@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -13,8 +12,6 @@ from tools._repo_naming import (
     split_org_repo,
 )
 from tools.dedup_dataset import (
-    DedupDecision,
-    DedupGroup,
     apply_plan,
     build_dedup_plan,
     find_duplicate_groups,

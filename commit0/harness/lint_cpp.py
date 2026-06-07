@@ -182,11 +182,13 @@ def main(
       2. clang-format --dry-run --Werror — formatting verification
 
     Args:
+    ----
         repo_or_dir: Path to a C++ repository or directory containing CMakeLists.txt.
         files: Optional list of specific C++ files to report on.
             If None, all C++ files under repo_or_dir are discovered.
 
     Returns:
+    -------
         A dict with keys:
             tidy: {warnings, errors, messages, returncode, raw_stderr}
             fmt: {formatted, diff, returncode}

@@ -21,7 +21,6 @@ from tools._versioning import (
     NoSignalsError,
     Signal,
     Tier,
-    VersionConflictError,
     normalize_semver_range,
     parse_constraint_str,
     resolve_two_tier,

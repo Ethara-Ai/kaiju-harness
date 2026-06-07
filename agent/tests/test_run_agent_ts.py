@@ -854,9 +854,9 @@ class TestRunAgentForRepoTs:
         mock_tc.get_metrics.return_value = {"total_thinking_tokens": 0}
         mock_tc.get_module_turns.return_value = []
 
-        mock_write_traj = MagicMock()
+        MagicMock()
 
-        mocks = self._run_with_patches(
+        self._run_with_patches(
             tmp_path,
             agent_config,
             example,
@@ -980,7 +980,7 @@ class TestRunAgentForRepoTs:
         mock_tc.get_module_turns.return_value = [MagicMock()]
         mock_tc.get_module_metrics.return_value = {}
 
-        mocks = self._run_with_patches(
+        self._run_with_patches(
             tmp_path,
             agent_config,
             example,

@@ -3,8 +3,11 @@ import subprocess
 import re
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    import docker
 
 from commit0.harness.constants_java import (
     JAVA_BASE_IMAGE_PREFIX,

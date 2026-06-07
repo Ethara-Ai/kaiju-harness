@@ -483,6 +483,7 @@ def push_to_fork(
         the token never ends up in ``.git/config``.
 
     Args:
+    ----
         repo_dir: Local repository directory.
         fork_name: ``"owner/repo"`` of the fork (e.g. ``"Zahgon/fmt"``).
         branch: Branch name to push.
@@ -498,6 +499,7 @@ def push_to_fork(
         verify: Default True. Skipping verify is supported for tests but
             must NOT be done in production pipelines - it's the
             mechanism that catches Category G "silent auth fallback".
+
     """
     setup_git_credentials(token)
     token = token or get_github_token()

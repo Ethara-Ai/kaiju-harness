@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 MODULE = "agent.agent_utils_rust"
 

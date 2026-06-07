@@ -26,7 +26,7 @@ from commit0.harness.constants import SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
-from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS, relativize
+from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
 from commit0.cli import read_commit0_config_file
 from pathlib import Path
 from agent.run_agent import DirContext, run_eval_after_each_commit
@@ -172,14 +172,14 @@ def run_agent_for_repo(
 
     message = ""
 
-    stage_start_time = time.monotonic()
+    time.monotonic()
 
     from agent.openhands_formatter import write_module_output_json
 
     instance_id = ""
     metadata: dict = {}
     if thinking_capture is not None:
-        from agent.output_writer import extract_git_patch, build_metadata
+        from agent.output_writer import build_metadata
 
         commit0_config_for_meta = read_commit0_config_file(commit0_config_file)
         instance_id = (

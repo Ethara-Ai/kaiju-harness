@@ -609,7 +609,7 @@ class TestPrepareTsRepoEdgeCases:
                                 f"{MODULE}.create_ts_stubbed_branch",
                                 return_value=("base", "ref", 1),
                             ):
-                                with patch(f"{MODULE}.git") as mock_git:
+                                with patch(f"{MODULE}.git"):
                                     with patch(f"{MODULE}.push_to_fork") as mock_push:
                                         result = prepare_ts_repo(
                                             "owner/repo",
