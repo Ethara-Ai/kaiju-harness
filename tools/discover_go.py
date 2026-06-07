@@ -37,7 +37,7 @@ def _gh_request(url: str, token: str | None = None) -> dict:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = Request(url, headers=headers)
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30) as resp:  # nosec B310 - URL is hardcoded https://api.github.com base (see GITHUB_API); no file:// or other-scheme reachable
         return json.loads(resp.read())
 
 

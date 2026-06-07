@@ -3,7 +3,7 @@ import hashlib
 import os
 import subprocess
 import logging
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -131,7 +131,7 @@ def _ensure_checkstyle(version: Optional[str] = None) -> Path:
 
     tmp_path = jar_path.with_suffix(".jar.tmp")
     try:
-        urllib.request.urlretrieve(url, tmp_path)
+        urllib.request.urlretrieve(url, tmp_path)  # nosec B310 - URL is version-keyed from CHECKSTYLE_VERSIONS (hardcoded https://github.com/checkstyle); artifact SHA256-verified at lines 140-150 before use
     except Exception:
         if tmp_path.exists():
             tmp_path.unlink()

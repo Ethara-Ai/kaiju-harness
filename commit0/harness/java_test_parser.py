@@ -3,7 +3,7 @@
 Handles JUnit 4, JUnit 5, and TestNG XML reports.
 All three produce Surefire-compatible XML (when run via Maven/Gradle).
 """
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Tuple
 from enum import Enum

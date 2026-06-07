@@ -455,7 +455,7 @@ class TestRustSplitEdge:
             assert isinstance(val, list)
 
 
-class TestPathConstants:
+class TestPathConstantsExtended:
     def test_run_log_dir_is_path(self):
         assert isinstance(RUN_RUST_TESTS_LOG_DIR, Path)
 

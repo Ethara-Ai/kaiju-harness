@@ -148,7 +148,7 @@ def github_api(
     for attempt in range(retries):
         try:
             req = Request(url, headers=headers)
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=30) as resp:  # nosec B310 - URL is hardcoded https://api.github.com base; no file:// or other-scheme reachable
                 remaining = resp.headers.get("X-RateLimit-Remaining", "?")
                 if remaining != "?" and int(remaining) < 5:
                     reset_time = int(resp.headers.get("X-RateLimit-Reset", "0"))

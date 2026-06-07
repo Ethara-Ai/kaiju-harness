@@ -385,7 +385,6 @@ def _detect_test_dirs_from_config(repo_dir: Path) -> list[Path]:
     and .mocharc.* for test-file globs or roots. Returns absolute dirs that exist and
     contain at least one TS / JS source file. No throwing -- returns [] on any error.
     """
-    import re
 
     candidate_strings: list[str] = []
 

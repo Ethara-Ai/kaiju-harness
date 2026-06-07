@@ -547,7 +547,7 @@ class TestParseNextestReportEdge:
         assert result["summary"]["total"] == 0
 
 
-class TestRustTestResultDataclass:
+class TestRustTestResultDataclassExtended:
     def test_fields(self):
         r = RustTestResult(
             name="t", status=TestStatus.PASSED, duration=1.0, stdout="out"
