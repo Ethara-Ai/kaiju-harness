@@ -825,24 +825,25 @@ def capture_module_calls(
     rewritten to that short label before storage — prevents shipped artifacts
     (output.json) from leaking the full provider model identifier (e.g. Bedrock ARN).
     """
-    # Loud-fail warning when model_short is empty but the upstream model looks
-    # like a Bedrock ARN: signals operator misconfiguration that would silently
-    # leak the ARN into shipped output.json metrics.llm_calls[].model.
     if not model_short:
+        bedrock_model_in_play: Optional[str] = None
         try:
-            import litellm  # lazy import to avoid hard dep at module top
+            import litellm
 
             current = getattr(litellm, "_active_model_for_redaction_check", "")
             if isinstance(current, str) and current.startswith("bedrock/"):
-                _logger.warning(
-                    "capture_module_calls: model_short is empty while model='%s' "
-                    "looks like a Bedrock ARN. Shipped output.json will contain "
-                    "the full ARN in metrics.llm_calls[].model. Set --model-short "
-                    "or AgentConfig.model_short to enable redaction.",
-                    current,
-                )
+                bedrock_model_in_play = current
         except Exception:
-            pass  # never block capture setup on a diagnostic warning
+            pass
+
+        if bedrock_model_in_play is not None:
+            raise RuntimeError(
+                f"capture_module_calls: model_short is empty while "
+                f"model='{bedrock_model_in_play}' looks like a Bedrock ARN. "
+                "Shipped output.json would leak the full ARN in "
+                "metrics.llm_calls[].model. Set --model-short or "
+                "AgentConfig.model_short to enable redaction."
+            )
 
     register_litellm_callbacks()
     _wrap_litellm_completion()

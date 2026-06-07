@@ -43,6 +43,9 @@ def write_output_jsonl(
     attempt : int
         Attempt number (for multi-sample runs).
     """
+    metrics_public = dict(metrics)
+    audit_mismatch = metrics_public.pop("capture_mismatch", None)
+
     record = {
         "instance_id": instance_id,
         "attempt": attempt,
@@ -52,7 +55,7 @@ def write_output_jsonl(
         "instruction": instruction,
         "metadata": metadata,
         "history": events,
-        "metrics": metrics,
+        "metrics": metrics_public,
         "error": error,
     }
 
@@ -63,6 +66,19 @@ def write_output_jsonl(
     except OSError as e:
         logger.error("Failed to write output JSONL to %s: %s", output_path, e)
         raise
+
+    if audit_mismatch is not None:
+        audit_path = output_path.parent / "audit.jsonl"
+        audit_record = {
+            "instance_id": instance_id,
+            "attempt": attempt,
+            "capture_mismatch": audit_mismatch,
+        }
+        try:
+            with open(audit_path, "a") as f:
+                f.write(json.dumps(audit_record, default=str) + "\n")
+        except OSError as e:
+            logger.warning("Failed to write audit JSONL to %s: %s", audit_path, e)
 
 
 def extract_git_patch(repo_path: str, base_commit: str) -> str:
