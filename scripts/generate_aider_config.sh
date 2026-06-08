@@ -170,7 +170,7 @@ out = []
 
 # Always included — no ARN required
 out.append("""\
-- name: bedrock/global.anthropic.claude-opus-4-6-v1
+- name: bedrock/converse/global.anthropic.claude-opus-4-6-v1
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false
