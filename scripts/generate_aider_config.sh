@@ -155,8 +155,9 @@ ARN_CONFIGS = {
 }
 
 for env_var, cfg in ARN_CONFIGS.items():
-    arn = os.environ.get(env_var, "").strip()
-    if arn:
+    arn_raw = os.environ.get(env_var, "").strip()
+    if arn_raw:
+        arn = arn_raw if arn_raw.startswith("bedrock/") else f"bedrock/converse/{arn_raw}"
         meta[arn] = cfg
 
 print(json.dumps(meta, indent=2))
@@ -237,8 +238,9 @@ ARN_SETTINGS = {
 }
 
 for env_var, cfg in ARN_SETTINGS.items():
-    arn = os.environ.get(env_var, "").strip()
-    if arn:
+    arn_raw = os.environ.get(env_var, "").strip()
+    if arn_raw:
+        arn = arn_raw if arn_raw.startswith("bedrock/") else f"bedrock/converse/{arn_raw}"
         entry = (
             f"- name: {arn}\n"
             f"  edit_format: diff\n"
