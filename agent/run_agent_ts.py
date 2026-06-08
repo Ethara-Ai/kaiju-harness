@@ -435,6 +435,7 @@ def run_agent_ts_impl(
     commit0_config_file: str,
     log_dir: str,
     max_parallel_repos: int,
+    display_repo_progress_num: int = 0,
 ) -> None:
     """Main function to run TsAiderAgents for TS repositories."""
     agent_config = load_agent_config(agent_config_file)
@@ -507,6 +508,9 @@ def run_agent_ts(
     max_parallel_repos: int = typer.Option(
         1, "--max-parallel-repos", help="Max parallel repos"
     ),
+    display_repo_progress_num: int = typer.Option(
+        0, "--display-repo-progress-num", help="Number of repos to show file-level progress for"
+    ),
 ) -> None:
     run_agent_ts_impl(
         branch=branch,
@@ -516,6 +520,7 @@ def run_agent_ts(
         commit0_config_file=commit0_config_file,
         log_dir=log_dir,
         max_parallel_repos=max_parallel_repos,
+        display_repo_progress_num=display_repo_progress_num,
     )
 
 

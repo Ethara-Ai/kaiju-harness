@@ -45,6 +45,7 @@ MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
+MAX_PARALLEL_REPOS=1
 
 print_usage() {
     cat <<'USAGE'
@@ -100,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
+        --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
         *)
             echo "Error: Unknown argument '$1'"
@@ -741,7 +743,7 @@ run_agent_ts() {
         --agent-config-file "$AGENT_CONFIG"
         --commit0-config-file "$COMMIT0_TS_CONFIG"
         --log-dir "$log_dir"
-        --max-parallel-repos 1
+        --max-parallel-repos "$MAX_PARALLEL_REPOS"
     )
 
     if [[ "$override" == "true" ]]; then
@@ -1378,6 +1380,16 @@ run_single_sample() {
     log "run_${sample_idx} results saved to: ${PIPELINE_LOG}"
 
     SAMPLE_RESULT_FILES+=("$PIPELINE_LOG")
+    if [[ -x "${BASE_DIR}/.venv/bin/python" ]]; then
+        "${BASE_DIR}/.venv/bin/python" "${BASE_DIR}/scripts/commit0_to_atif_v2.py" \
+            "$LOG_BASE" \
+            "${BASE_DIR}/Harbor_Data/Trajectory" \
+            --kaiju-mode \
+            --pipeline "$PIPELINE_LOG" \
+            --task-name "$DATASET_DIR_NAME" \
+            && log "ATIF conversion complete for run_${sample_idx}" \
+            || log "[WARN] ATIF conversion failed for run_${sample_idx}"
+    fi
 }
 
 print_pass_at_k_summary() {

@@ -224,7 +224,6 @@ def run_rust_agent_for_repo(
     commit0_config_file: str = "",
 ) -> None:
     """Run aider for a single Rust repository."""
-    read_commit0_config_file(commit0_config_file)
 
     _, repo_name = example["repo"].split("/")
 
@@ -267,7 +266,7 @@ def run_rust_agent_for_repo(
     target_edit_files = get_target_edit_files_rust(repo_path)
     all_source_files = find_rust_files_to_edit(repo_path)
 
-    get_rust_test_ids(repo_path)
+    _ = get_rust_test_ids(repo_path)
 
     experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
     eval_results = {}
@@ -282,7 +281,6 @@ def run_rust_agent_for_repo(
 
     message = ""
 
-    time.monotonic()
 
     from agent.openhands_formatter import write_module_output_json
 
@@ -301,12 +299,10 @@ def run_rust_agent_for_repo(
             model_name=agent_config.model_name,
             dataset_path=commit0_config_for_meta.get("dataset_name", ""),
             max_iterations=agent_config.max_iteration,
-            model_short=agent_config.model_short,
+            model_short=getattr(agent_config, "model_short", agent_config.model_name),
         )
 
     with DirContext(repo_path):
-        if agent_config is None:
-            raise ValueError("Invalid input")
 
         if agent_config.run_tests:
             for src_file in all_source_files:

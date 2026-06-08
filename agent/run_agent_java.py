@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import multiprocessing
 import time
 import yaml
 from dataclasses import asdict
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from git import Repo
+from tqdm import tqdm
 
 from agent.agent_utils import create_branch
 from agent.agent_utils_java import (
@@ -534,29 +536,63 @@ def _find_all_test_files(repo_path: str) -> List[str]:
     return sorted(test_files)
 
 
+def _run_java_agent_worker(
+    instance: dict,
+    agent_config: JavaAgentConfig,
+    branch: str,
+    override_previous_changes: bool,
+    log_dir: str,
+) -> Tuple[str, Optional[Dict]]:
+    repo_name = instance.get("repo", "unknown").split("/")[-1]
+    try:
+        result = run_java_agent(
+            instance=instance,
+            agent_config=agent_config,
+            branch=branch,
+            override_previous_changes=override_previous_changes,
+            log_dir=log_dir,
+            timeout=agent_config.timeout,
+        )
+        return repo_name, result
+    except Exception:
+        logger.error("Agent failed for %s", repo_name, exc_info=True)
+        return repo_name, {"status": "error"}
+
+
 def run_java_agent_for_repos(
     instances: List[dict],
     agent_config: JavaAgentConfig,
     branch: str = "java-agent",
     override_previous_changes: bool = False,
-    log_dir: str = "logs/agent",    max_parallel_repos: int = 1,
+    log_dir: str = "logs/agent",
+    max_parallel_repos: int = 1,
 ) -> Dict[str, Optional[Dict]]:
-    all_results = {}
+    all_results: Dict[str, Optional[Dict]] = {}
 
-    for instance in instances:
-        repo_name = instance.get("repo", "unknown").split("/")[-1]
-        try:
-            result = run_java_agent(
-                instance=instance,
-                agent_config=agent_config,
-                branch=branch,
-                override_previous_changes=override_previous_changes,
-                log_dir=log_dir,
-                timeout=agent_config.timeout,
-            )
-            all_results[repo_name] = result
-        except Exception:
-            logger.error("Agent failed for %s", repo_name, exc_info=True)
-            all_results[repo_name] = {"status": "error"}
+    with tqdm(
+        total=len(instances), smoothing=0, desc="Running Java agent for repos"
+    ) as pbar:
+        with multiprocessing.Pool(processes=max_parallel_repos) as pool:
+            async_results = []
+            for instance in instances:
+                ar = pool.apply_async(
+                    _run_java_agent_worker,
+                    args=(
+                        instance,
+                        agent_config,
+                        branch,
+                        override_previous_changes,
+                        log_dir,
+                    ),
+                    callback=lambda _: pbar.update(1),
+                )
+                async_results.append(ar)
+
+            for ar in async_results:
+                try:
+                    repo_name, result = ar.get()
+                    all_results[repo_name] = result
+                except Exception:
+                    logger.error("Worker failed to return result", exc_info=True)
 
     return all_results

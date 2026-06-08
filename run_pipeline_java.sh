@@ -47,6 +47,7 @@ INACTIVITY_TIMEOUT=1800
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
+MAX_PARALLEL_REPOS=1
 MAX_TEST_OUTPUT_LENGTH=15000
 
 print_usage() {
@@ -85,6 +86,7 @@ Options:
   --num-samples    <n>       Number of independent samples (pass@k, default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
   --max-test-output-length <n>  Max test output length (default: 15000)
+  --max-parallel-repos <n>     Max repos to run in parallel (default: 1, >1 enables batch mode)
   -h, --help                 Show this help
 
 Examples:
@@ -113,6 +115,7 @@ while [[ $# -gt 0 ]]; do
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
+        --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
         *)
             echo "Error: Unknown argument '$1'"
@@ -568,58 +571,75 @@ run_java_agent_loop() {
 
     local agent_log="${log_dir}/agent_run.log"
 
+    # Build flags shared across every agent invocation
+    local common_flags=(
+        --branch "$BRANCH_NAME"
+        --model "$MODEL_NAME"
+        --max-iteration "$MAX_ITERATION"
+        --log-dir "$log_dir"
+        --max-test-output-length "$MAX_TEST_OUTPUT_LENGTH"
+        --capture-thinking --trajectory-md --output-jsonl
+        --model-short "$MODEL_SHORT"
+        --record-test-for-each-commit
+    )
+
+    if [[ "$run_tests" == "true" ]]; then
+        common_flags+=(--run-tests)
+    else
+        common_flags+=(--no-run-tests)
+    fi
+
+    if [[ "$use_unit_tests_info" == "true" ]]; then
+        common_flags+=(--use-unit-tests-info)
+    else
+        common_flags+=(--no-use-unit-tests-info)
+    fi
+
+    if [[ "$use_spec_info" == "true" ]]; then
+        common_flags+=(--use-spec-info)
+    else
+        common_flags+=(--no-use-spec-info)
+    fi
+
+    if [[ "$compile_check" == "true" ]]; then
+        common_flags+=(--compile-check)
+    else
+        common_flags+=(--no-compile-check)
+    fi
+
+    if [[ "$CACHE_PROMPTS" == "true" ]]; then
+        common_flags+=(--cache-prompts)
+    else
+        common_flags+=(--no-cache-prompts)
+    fi
+
+    if [[ "$override" == "true" ]]; then
+        common_flags+=(--override-previous)
+    else
+        common_flags+=(--no-override-previous)
+    fi
+
+    if [[ "$MAX_PARALLEL_REPOS" -gt 1 ]]; then
+        local repos_tmpfile
+        repos_tmpfile=$(mktemp)
+        echo "$REPOS" > "$repos_tmpfile"
+        log "  Running Java agent in batch mode (parallel=${MAX_PARALLEL_REPOS}) via repos-file"
+        local cmd=("$COMMIT0_JAVA" agent
+            --repos-file "$repos_tmpfile"
+            --max-parallel-repos "$MAX_PARALLEL_REPOS"
+            "${common_flags[@]}"
+        )
+        log "  Command: ${cmd[*]}"
+        "${cmd[@]}" >>"$agent_log" 2>&1
+        local rc=$?
+        rm -f "$repos_tmpfile"
+        return $rc
+    fi
+
     while IFS= read -r repo; do
         [[ -z "$repo" ]] && continue
         log "  Running agent for repo: ${repo}"
-
-        local cmd=(
-            "$COMMIT0_JAVA" agent
-            --repo "$repo"
-            --branch "$BRANCH_NAME"
-            --model "$MODEL_NAME"
-            --max-iteration "$MAX_ITERATION"
-            --log-dir "$log_dir"
-            --max-test-output-length "$MAX_TEST_OUTPUT_LENGTH"
-        )
-
-        if [[ "$run_tests" == "true" ]]; then
-            cmd+=(--run-tests)
-        else
-            cmd+=(--no-run-tests)
-        fi
-
-        if [[ "$use_unit_tests_info" == "true" ]]; then
-            cmd+=(--use-unit-tests-info)
-        else
-            cmd+=(--no-use-unit-tests-info)
-        fi
-
-        if [[ "$use_spec_info" == "true" ]]; then
-            cmd+=(--use-spec-info)
-        else
-            cmd+=(--no-use-spec-info)
-        fi
-
-        if [[ "$compile_check" == "true" ]]; then
-            cmd+=(--compile-check)
-        else
-            cmd+=(--no-compile-check)
-        fi
-
-        if [[ "$CACHE_PROMPTS" == "true" ]]; then
-            cmd+=(--cache-prompts)
-        else
-            cmd+=(--no-cache-prompts)
-        fi
-
-        if [[ "$override" == "true" ]]; then
-            cmd+=(--override-previous)
-        else
-            cmd+=(--no-override-previous)
-        fi
-
-        cmd+=(--capture-thinking --trajectory-md --output-jsonl --model-short "$MODEL_SHORT" --record-test-for-each-commit)
-
+        local cmd=("$COMMIT0_JAVA" agent --repo "$repo" "${common_flags[@]}")
         log "  Command: ${cmd[*]}"
         "${cmd[@]}" >>"$agent_log" 2>&1
         local repo_rc=$?
@@ -1290,6 +1310,16 @@ run_single_sample() {
     log "run_${sample_idx} results saved to: ${PIPELINE_LOG}"
 
     SAMPLE_RESULT_FILES+=("$PIPELINE_LOG")
+    if [[ -x "${BASE_DIR}/.venv/bin/python" ]]; then
+        "${BASE_DIR}/.venv/bin/python" "${BASE_DIR}/scripts/commit0_to_atif_v2.py" \
+            "$LOG_BASE" \
+            "${BASE_DIR}/Harbor_Data/Trajectory" \
+            --kaiju-mode \
+            --pipeline "$PIPELINE_LOG" \
+            --task-name "$DATASET_DIR_NAME" \
+            && log "ATIF conversion complete for run_${sample_idx}" \
+            || log "[WARN] ATIF conversion failed for run_${sample_idx}"
+    fi
 }
 
 print_pass_at_k_summary() {

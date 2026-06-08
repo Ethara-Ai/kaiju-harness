@@ -195,7 +195,6 @@ dataset_workspace/
 .sisyphus/
 docs/pipeline-architecture.md
 docs/repo-selection-checklist.md
-scripts/
 .DS_Store
 *_dataset.json
 *_entries.json

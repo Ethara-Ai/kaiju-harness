@@ -302,11 +302,13 @@ def agent(
     output_jsonl: bool = typer.Option(False, help="Write output.jsonl (OpenHands format)"),
     model_short: str = typer.Option("", help="Short model name for output metadata"),
     record_test_for_each_commit: bool = typer.Option(False, help="Run eval after each module commit"),
+    repos_file: Optional[str] = typer.Option(None, help="File listing repo names, one per line (batch mode)"),
+    max_parallel_repos: int = typer.Option(1, help="Max repos to run in parallel (batch mode)"),
 ) -> None:
     """Run the Java AI agent to implement stubbed methods."""
     import logging
     from pathlib import Path as _Path
-    from agent.run_agent_java import run_java_agent
+    from agent.run_agent_java import run_java_agent, run_java_agent_for_repos
     from agent.config_java import JavaAgentConfig
 
     _Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -319,7 +321,6 @@ def agent(
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(file_handler)
 
-    instance = _load_instance(repo)
     config = JavaAgentConfig(
         model=model,
         max_iteration=max_iteration,
@@ -335,6 +336,21 @@ def agent(
         model_short=model_short,
         record_test_for_each_commit=record_test_for_each_commit,
     )
+    if repos_file is not None:
+        repos = [r.strip() for r in _Path(repos_file).read_text().splitlines() if r.strip()]
+        if not repos:
+            raise typer.BadParameter(f"repos_file '{repos_file}' contains no repo names")
+        instances = [_load_instance(r) for r in repos]
+        run_java_agent_for_repos(
+            instances=instances,
+            agent_config=config,
+            branch=branch,
+            override_previous_changes=override_previous,
+            log_dir=log_dir,
+            max_parallel_repos=max_parallel_repos,
+        )
+        return
+    instance = _load_instance(repo)
     run_java_agent(
         instance=instance,
         agent_config=config,

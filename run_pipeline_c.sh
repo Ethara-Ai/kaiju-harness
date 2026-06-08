@@ -48,6 +48,7 @@ MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
+MAX_PARALLEL_REPOS=1
 
 print_usage() {
     cat <<'USAGE'
@@ -91,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
+        --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help) print_usage ;;
         *) echo "Unknown argument: $1"; print_usage ;;
     esac
@@ -450,7 +452,8 @@ run_agent_stage() {
         --backend "$BACKEND" \
         --agent-config-file "$agent_config" \
         --commit0-config-file "$COMMIT0_CONFIG" \
-        --log-dir "$LOG_BASE/${stage_label}"
+        --log-dir "$LOG_BASE/${stage_label}" \
+        --max-parallel-repos "$MAX_PARALLEL_REPOS"
 }
 
 run_evaluate() {
@@ -584,6 +587,16 @@ run_single_sample() {
 
     cleanup
     log "Pipeline complete. Results: $PIPELINE_LOG"
+    if [[ -x "${BASE_DIR}/.venv/bin/python" ]]; then
+        "${BASE_DIR}/.venv/bin/python" "${BASE_DIR}/scripts/commit0_to_atif_v2.py" \
+            "$LOG_BASE" \
+            "${BASE_DIR}/Harbor_Data/Trajectory" \
+            --kaiju-mode \
+            --pipeline "$PIPELINE_LOG" \
+            --task-name "$DATASET_DIR_NAME" \
+            && log "ATIF conversion complete" \
+            || log "[WARN] ATIF conversion failed"
+    fi
 }
 
 main() {

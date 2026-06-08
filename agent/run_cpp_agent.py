@@ -4,6 +4,7 @@ import json
 import logging
 import multiprocessing
 import os
+import time
 from pathlib import Path
 
 import yaml
@@ -20,10 +21,11 @@ from agent.agents_cpp import CppAiderAgents
 from agent.class_types import AgentConfig
 from agent.run_agent import DirContext, run_eval_after_each_commit
 from agent.thinking_capture import SummarizerCost, ThinkingCapture
+from agent.llm_cost_capture import capture_module_calls
 from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_cpp import CPP_SPLIT
-from commit0.harness.utils import load_dataset_from_config
+from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -186,6 +188,19 @@ def run_cpp_agent_for_repo(
         else None
     )
 
+    from agent.output_writer import build_metadata
+    from agent.openhands_formatter import write_module_output_json
+
+    instance_id = f"commit-0/{repo_name}"
+    metadata: dict = {}
+    if thinking_capture is not None:
+        metadata = build_metadata(
+            model_name=agent_config.model_name,
+            dataset_path="",
+            max_iterations=agent_config.max_iteration,
+            model_short=getattr(agent_config, "model_short", agent_config.model_name),
+        )
+
     eval_results: dict = {}
 
     # Process one file at a time to avoid exceeding model context limits
@@ -200,22 +215,31 @@ def run_cpp_agent_for_repo(
             for c in summarizer_costs:
                 thinking_capture.summarizer_costs.add(c)
 
+        pre_sha = local_repo.head.commit.hexsha
+        module_start = time.time()
+        stage = "test" if agent_config.run_tests else ("lint" if agent_config.use_lint_info else "draft")
+
         if agent_config.run_tests:
             try:
-                with DirContext(repo_path):
-                    _ = agent.run(
-                        message,
-                        test_cmd,
-                        lint_cmd,
-                        [tf],
-                        file_log_dir,
-                        test_first=True,
-                        thinking_capture=thinking_capture,
-                        current_stage="test",
-                        current_module=stem,
-                        max_test_output_length=agent_config.max_test_output_length,
-                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                    )
+                with capture_module_calls(
+                    thinking_capture=thinking_capture,
+                    module=stem,
+                    log_dir=file_log_dir,
+                ):
+                    with DirContext(repo_path):
+                        _ = agent.run(
+                            message,
+                            test_cmd,
+                            lint_cmd,
+                            [tf],
+                            file_log_dir,
+                            test_first=True,
+                            thinking_capture=thinking_capture,
+                            current_stage="test",
+                            current_module=stem,
+                            max_test_output_length=agent_config.max_test_output_length,
+                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        )
                 if agent_config.record_test_for_each_commit and commit0_config_file:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -227,41 +251,74 @@ def run_cpp_agent_for_repo(
 
         elif agent_config.use_lint_info:
             try:
-                with DirContext(repo_path):
-                    _ = agent.run(
-                        message,
-                        "",
-                        lint_cmd,
-                        [tf],
-                        file_log_dir,
-                        lint_first=True,
-                        thinking_capture=thinking_capture,
-                        current_stage="lint",
-                        current_module=stem,
-                    )
+                with capture_module_calls(
+                    thinking_capture=thinking_capture,
+                    module=stem,
+                    log_dir=file_log_dir,
+                ):
+                    with DirContext(repo_path):
+                        _ = agent.run(
+                            message,
+                            "",
+                            lint_cmd,
+                            [tf],
+                            file_log_dir,
+                            lint_first=True,
+                            thinking_capture=thinking_capture,
+                            current_stage="lint",
+                            current_module=stem,
+                        )
             except Exception as e:
                 logger.error(f"Agent failed for {repo_name}/{tf} (lint mode): {e}")
                 (file_log_dir / "error.log").write_text(str(e))
 
         else:
             try:
-                with DirContext(repo_path):
-                    _ = agent.run(
-                        message,
-                        "",
-                        "",
-                        [tf],
-                        file_log_dir,
-                        thinking_capture=thinking_capture,
-                        current_stage="draft",
-                        current_module=stem,
-                    )
+                with capture_module_calls(
+                    thinking_capture=thinking_capture,
+                    module=stem,
+                    log_dir=file_log_dir,
+                ):
+                    with DirContext(repo_path):
+                        _ = agent.run(
+                            message,
+                            "",
+                            "",
+                            [tf],
+                            file_log_dir,
+                            thinking_capture=thinking_capture,
+                            current_stage="draft",
+                            current_module=stem,
+                        )
             except Exception as e:
                 logger.error(f"Agent failed for {repo_name}/{tf} (draft mode): {e}")
                 (file_log_dir / "error.log").write_text(str(e))
 
         # Per-module .done marker — mirrors Java structure
         _mark_module_done(file_log_dir)
+
+        module_elapsed = time.time() - module_start
+        if thinking_capture is not None:
+            post_sha = local_repo.head.commit.hexsha
+            module_patch = (
+                local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
+                if pre_sha != post_sha
+                else ""
+            )
+            module_turns = thinking_capture.get_module_turns(stem)
+            if module_turns:
+                write_module_output_json(
+                    output_dir=str(file_log_dir),
+                    module_turns=module_turns,
+                    module=stem,
+                    instance_id=f"{instance_id}__{stem}",
+                    git_patch=module_patch,
+                    instruction=message,
+                    metadata=metadata,
+                    metrics=thinking_capture.get_module_metrics(stem),
+                    stage=stage,
+                    stage_runtime_seconds=module_elapsed,
+                )
 
     # Write eval_results.json — mirrors Java structure
     try:
@@ -339,28 +396,31 @@ def run_cpp_agent(
                 commit0_config_file=commit0_config_file,
             )
     else:
-        args_list = [
-            (
-                repo_base_dir,
-                agent_config,
-                example,
-                branch,
-                override_previous_changes,
-                backend,
-                log_dir,
-                commit0_config_file,
-            )
-            for example in cpp_examples
-        ]
+        with tqdm(
+            total=len(cpp_examples), smoothing=0, desc="Running aider for C++ repos"
+        ) as pbar:
+            with multiprocessing.Pool(processes=max_parallel_repos) as pool:
+                async_results = []
+                for example in cpp_examples:
+                    ar = pool.apply_async(
+                        run_cpp_agent_for_repo,
+                        args=(
+                            repo_base_dir,
+                            agent_config,
+                            example,
+                            branch,
+                            override_previous_changes,
+                            backend,
+                            log_dir,
+                            commit0_config_file,
+                        ),
+                        callback=lambda _: pbar.update(1),
+                    )
+                    async_results.append(ar)
 
-        with multiprocessing.Pool(processes=max_parallel_repos) as pool:
-            list(
-                tqdm(
-                    pool.starmap(run_cpp_agent_for_repo, args_list),
-                    total=len(args_list),
-                    desc="Running aider for C++ repos",
-                )
-            )
+                for ar in async_results:
+                    ar.get()
+                logger.info("All %d C++ agent workers completed", len(async_results))
 
 
 def main() -> None:
