@@ -298,6 +298,7 @@ def run_java_agent(
         from agent.output_writer import build_metadata
 
         metadata = build_metadata(
+            model_name=agent_config.model,
             dataset_path="",
             max_iterations=agent_config.max_iteration,
             model_short=agent_config.model_short,
