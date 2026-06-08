@@ -22,7 +22,6 @@ from agent.agent_utils_rust import (
     extract_rust_function_stubs,
     find_rust_files_to_edit,
     get_target_edit_files_rust,
-    get_rust_test_ids,
 )
 from agent.agents_rust import RustAiderAgents
 from agent.class_types import AgentConfig
@@ -266,7 +265,6 @@ def run_rust_agent_for_repo(
     target_edit_files = get_target_edit_files_rust(repo_path)
     all_source_files = find_rust_files_to_edit(repo_path)
 
-    _ = get_rust_test_ids(repo_path)
 
     experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
     eval_results = {}
