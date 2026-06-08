@@ -27,6 +27,7 @@ from commit0.harness.docker_utils import (
     copy_from_container,
     copy_to_container,
     exec_run_with_timeout,
+    sandbox_hardening_kwargs,
 )
 
 # Lazy-loaded optional dependency sentinels (set on first use).
@@ -108,6 +109,10 @@ class Docker(ExecutionContext):
         logger.debug("Connecting to Docker daemon")
         self.client = docker.from_env()
         proxy_env = get_proxy_env() or None
+        # Only forward hardening kwargs when opt-in is enabled, so the default
+        # create_container call is byte-for-byte unchanged.
+        hardening = sandbox_hardening_kwargs()
+        extra_kwargs = {"sandbox_hardening": hardening} if hardening else {}
         self.container = create_container(
             client=self.client,
             image_name=spec.repo_image_key,
@@ -115,6 +120,7 @@ class Docker(ExecutionContext):
             nano_cpus=num_cpus,
             logger=logger,
             environment=proxy_env,
+            **extra_kwargs,
         )
         self.container.start()
         if files_to_copy:

@@ -1,0 +1,36 @@
+name: pytest
+
+# Merge-blocking unit-test gate (audit findings T-002 / T-003).
+# Runs the repository's own pytest suite on every PR — previously CI ran only
+# the upstream commit0 eval smoke test, so the ~3,500-test suite never ran.
+#
+# Pre-existing failures (rust/ts language suites) are quarantined in
+# ci/known_failing_tests.txt and excluded via --ignore so this gate enforces on
+# everything that passes today. Shrink that file to zero over time.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+      - name: Set up Python
+        run: uv venv --python 3.12
+      - name: Install the project
+        run: uv sync --extra agent
+      - name: Run pytest (quarantined suites excluded)
+        run: |
+          set -euo pipefail
+          IGN=()
+          while IFS= read -r f; do
+            case "$f" in ''|\#*) continue;; esac
+            IGN+=("--ignore=$f")
+          done < <(grep -vE '^[[:space:]]*#|^[[:space:]]*$' ci/known_failing_tests.txt)
+          echo "Excluding ${#IGN[@]} quarantined test files (see ci/known_failing_tests.txt)"
+          uv run pytest tests/ agent/tests/ commit0/ tools/ "${IGN[@]}" -q

@@ -249,6 +249,34 @@ def pull_image_from_docker_hub(
         raise Exception(f"Error pulling image: {e}") from e
 
 
+def sandbox_hardening_kwargs() -> dict:
+    """Opt-in Docker hardening for eval containers (S-001).
+
+    OFF by default — returns ``{}`` so container creation is unchanged. Enable
+    with ``COMMIT0_SANDBOX_HARDEN=1`` to drop all Linux capabilities, forbid
+    privilege escalation, and cap pids/memory. Network is left untouched unless
+    ``COMMIT0_SANDBOX_NETWORK`` is set (e.g. ``none``), because many eval/install
+    steps legitimately need network access.
+    """
+    if os.environ.get("COMMIT0_SANDBOX_HARDEN", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return {}
+    kwargs: dict = {
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "pids_limit": int(os.environ.get("COMMIT0_SANDBOX_PIDS_LIMIT", "2048")),
+        "mem_limit": os.environ.get("COMMIT0_SANDBOX_MEM_LIMIT", "4g"),
+    }
+    network = os.environ.get("COMMIT0_SANDBOX_NETWORK", "").strip()
+    if network:
+        kwargs["network_mode"] = network
+    return kwargs
+
+
 def create_container(
     client: docker.DockerClient,
     image_name: str,
@@ -258,6 +286,7 @@ def create_container(
     command: Optional[str] = "tail -f /dev/null",
     nano_cpus: Optional[int] = None,
     environment: Optional[dict[str, str]] = None,
+    sandbox_hardening: Optional[dict] = None,
 ) -> Container:
     """Start a Docker container using the specified image.
 
@@ -289,7 +318,7 @@ def create_container(
     container = None
     try:
         logger.info(f"Creating container for {image_name}...")
-        container = client.containers.run(
+        run_kwargs = dict(
             image=image_name,
             name=container_name,
             user=user,
@@ -298,6 +327,11 @@ def create_container(
             environment=environment,
             detach=True,
         )
+        # Opt-in hardening flags only (default: none -> identical to prior behavior).
+        if sandbox_hardening:
+            run_kwargs.update(sandbox_hardening)
+            logger.info("Sandbox hardening enabled: %s", sorted(sandbox_hardening))
+        container = client.containers.run(**run_kwargs)
         logger.info(f"Container for {image_name} created: {container.id}")
         return container
     except Exception as e:

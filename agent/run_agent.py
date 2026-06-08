@@ -16,7 +16,7 @@ import json
 import subprocess
 import sys
 from agent.agents import AiderAgents
-from typing import Optional, Type, cast
+from typing import Optional, Tuple, Type, cast
 from types import TracebackType
 from agent.class_types import AgentConfig
 from commit0.harness.constants import SPLIT
@@ -66,7 +66,7 @@ def run_eval_after_each_commit(
         return e.stdout if e.stdout else str(e)
 
 
-def run_agent_for_repo(
+def _run_agent_for_repo_impl(
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: RepoInstance,
@@ -77,7 +77,7 @@ def run_agent_for_repo(
     log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
     commit0_config_file: str = "",
 ) -> None:
-    """Run Aider for a given repository."""
+    """Run Aider for a given repository (raises on failure; see wrapper)."""
     # get repo info
     commit0_config = read_commit0_config_file(commit0_config_file)
 
@@ -328,6 +328,82 @@ def run_agent_for_repo(
     update_queue.put(("finish_repo", repo_name))
 
 
+def run_agent_for_repo(
+    repo_base_dir: str,
+    agent_config: AgentConfig,
+    example: RepoInstance,
+    branch: str,
+    update_queue: multiprocessing.Queue,
+    override_previous_changes: bool = False,
+    backend: str = "modal",
+    log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
+) -> Tuple[str, bool]:
+    """Run Aider for one repo with per-repo error isolation (R-001).
+
+    Any failure inside the worker is caught and logged so that one bad repo
+    cannot tear down the whole parallel batch. Always emits a ``finish_repo``
+    update for the display and returns ``(repo_name, ok)`` instead of raising.
+    """
+    _, repo_name = example["repo"].split("/")
+    try:
+        _run_agent_for_repo_impl(
+            repo_base_dir,
+            agent_config,
+            example,
+            branch,
+            update_queue,
+            override_previous_changes,
+            backend,
+            log_dir,
+            commit0_config_file,
+        )
+        return repo_name, True
+    except Exception:
+        logger.error(
+            "Agent worker for %s failed; isolating so the batch continues",
+            repo_name,
+            exc_info=True,
+        )
+        # Ensure the live display does not leave this repo stuck "in progress".
+        try:
+            update_queue.put(("finish_repo", repo_name))
+        except Exception:
+            logger.debug("Could not emit finish_repo for %s", repo_name)
+        return repo_name, False
+
+
+def _collect_worker_results(results: list) -> dict:
+    """Collect AsyncResults resiliently: one failure never aborts the rest.
+
+    Mirrors the isolation already used in run_agent_java.py. Returns a summary
+    with success/failure counts and the names of repos that reported failure.
+    """
+    succeeded = 0
+    failed = 0
+    failed_repos: list = []
+    for result in results:
+        try:
+            value = result.get()
+        except Exception:
+            failed += 1
+            logger.error(
+                "A worker raised before returning a status; isolating", exc_info=True
+            )
+            continue
+        if isinstance(value, tuple) and len(value) == 2:
+            repo_name, ok = value
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+                failed_repos.append(repo_name)
+        else:
+            # Backwards-compatible: a bare return counts as success.
+            succeeded += 1
+    return {"succeeded": succeeded, "failed": failed, "failed_repos": failed_repos}
+
+
 def run_agent(
     branch: str,
     override_previous_changes: bool,
@@ -476,6 +552,15 @@ def run_agent(
                 elapsed_time = int(time.time() - start_time)
                 display.update_time_display(elapsed_time)
 
-                for result in results:
-                    result.get()
-                logger.info("All %d agent workers completed", len(results))
+                summary = _collect_worker_results(results)
+                logger.info(
+                    "All %d agent workers completed: %d succeeded, %d failed",
+                    len(results),
+                    summary["succeeded"],
+                    summary["failed"],
+                )
+                if summary["failed_repos"]:
+                    logger.warning(
+                        "Repos that failed (isolated, batch continued): %s",
+                        ", ".join(summary["failed_repos"]),
+                    )

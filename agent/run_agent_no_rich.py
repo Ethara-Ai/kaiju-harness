@@ -18,7 +18,7 @@ import subprocess
 import sys
 import json
 from agent.agents import AiderAgents
-from typing import cast
+from typing import Tuple, cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
 from agent.llm_cost_capture import capture_module_calls
@@ -29,7 +29,11 @@ from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
 from commit0.cli import read_commit0_config_file
 from pathlib import Path
-from agent.run_agent import DirContext, run_eval_after_each_commit
+from agent.run_agent import (
+    DirContext,
+    _collect_worker_results,
+    run_eval_after_each_commit,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -51,7 +55,7 @@ def _get_stable_log_dir(log_dir: str, repo_name: str, branch: str) -> Path:
     return stable_dir
 
 
-def run_agent_for_repo(
+def _run_agent_for_repo_impl(
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: RepoInstance,
@@ -61,7 +65,7 @@ def run_agent_for_repo(
     log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
     commit0_config_file: str = "",
 ) -> None:
-    """Run Aider for a given repository."""
+    """Run Aider for a given repository (raises on failure; see wrapper)."""
     # get repo info
     commit0_config = read_commit0_config_file(commit0_config_file)
 
@@ -456,6 +460,43 @@ def run_agent_for_repo(
             logger.warning(f"Failed to write thinking capture output: {e}")
 
 
+def run_agent_for_repo(
+    repo_base_dir: str,
+    agent_config: AgentConfig,
+    example: RepoInstance,
+    branch: str,
+    override_previous_changes: bool = False,
+    backend: str = "modal",
+    log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
+) -> Tuple[str, bool]:
+    """Run Aider for one repo with per-repo error isolation (R-001).
+
+    Catches any worker failure so one bad repo cannot abort the whole batch;
+    returns ``(repo_name, ok)`` instead of raising.
+    """
+    _, repo_name = example["repo"].split("/")
+    try:
+        _run_agent_for_repo_impl(
+            repo_base_dir,
+            agent_config,
+            example,
+            branch,
+            override_previous_changes,
+            backend,
+            log_dir,
+            commit0_config_file,
+        )
+        return repo_name, True
+    except Exception:
+        logger.error(
+            "Agent worker for %s failed; isolating so the batch continues",
+            repo_name,
+            exc_info=True,
+        )
+        return repo_name, False
+
+
 def run_agent(
     branch: str,
     override_previous_changes: bool,
@@ -532,6 +573,15 @@ def run_agent(
                 )
                 results.append(result)
 
-            for result in results:
-                result.get()
-            logger.info("All %d agent workers completed", len(results))
+            summary = _collect_worker_results(results)
+            logger.info(
+                "All %d agent workers completed: %d succeeded, %d failed",
+                len(results),
+                summary["succeeded"],
+                summary["failed"],
+            )
+            if summary["failed_repos"]:
+                logger.warning(
+                    "Repos that failed (isolated, batch continued): %s",
+                    ", ".join(summary["failed_repos"]),
+                )

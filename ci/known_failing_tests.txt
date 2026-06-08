@@ -1,0 +1,30 @@
+# Quarantine list for the CI pytest gate (audit finding T-002 / T-003).
+#
+# These test files contain PRE-EXISTING failures that predate the CI test gate
+# (CI never ran the suite before, so they rotted unnoticed). They are excluded
+# from the merge-blocking gate via `--ignore` so the gate can enforce on the
+# ~3,500 currently-passing tests TODAY, instead of waiting for a big repair.
+#
+# Goal: shrink this list to empty. When a suite is fixed, delete its line here
+# and the gate will start enforcing it. Do NOT add new entries to silence newly
+# introduced failures — fix the test instead.
+#
+# One path per line; blank lines and #-comments are ignored.
+# Failures are concentrated in the rust/ts language suites.
+
+agent/tests/live_summarizer_test.py
+agent/tests/test_agent_utils_rust.py
+agent/tests/test_agents_rust.py
+agent/tests/test_run_agent_rust.py
+commit0/harness/tests/test_config_validation.py
+commit0/harness/tests/test_docker_build_rust.py
+commit0/harness/tests/test_setup_rust.py
+commit0/harness/tests/test_spec_c.py
+commit0/harness/tests/test_spec_ts.py
+commit0/harness/tests/test_spec_ts_hostile.py
+commit0/tests/test_build_ts.py
+tests/test_commit0_to_atif_kaiju.py
+tools/tests/test_create_dataset_ts.py
+tools/tests/test_generate_test_ids_ts.py
+tools/tests/test_prepare_repo_ts_additions.py
+tools/tests/test_prepare_repo_ts_full.py

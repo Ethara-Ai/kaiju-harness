@@ -42,3 +42,12 @@ repos:
   rev: v1.1.376
   hooks:
     - id: pyright
+
+# Shell lint for the run_pipeline_*.sh pipeline scripts (audit finding T-004).
+# Starts at --severity=error (0 findings today, so non-breaking); tighten to
+# warning/style over time as the existing 16 warnings / 14 notes are addressed.
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: v0.10.0.1
+  hooks:
+    - id: shellcheck
+      args: [--severity=error]
