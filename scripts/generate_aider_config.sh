@@ -176,7 +176,7 @@ out.append("""\
   examples_as_sys_msg: false
   use_temperature: false
   extra_params:
-    max_tokens: 128000
+    max_tokens: 32000
     thinking:
       type: enabled
       budget_tokens: 10000
