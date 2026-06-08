@@ -223,7 +223,6 @@ def run_rust_agent_for_repo(
     commit0_config_file: str = "",
 ) -> None:
     """Run aider for a single Rust repository."""
-
     _, repo_name = example["repo"].split("/")
 
     repo_path = os.path.abspath(os.path.join(repo_base_dir, repo_name))

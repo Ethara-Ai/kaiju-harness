@@ -279,7 +279,8 @@ def _extract_think_blocks(assistant_text: str) -> list[str]:
 
 def _assert_kaiju_tool(tc: ToolCall) -> None:
     """Enforce the no-invention rule: every emitted ToolCall must use a kaiju-
-    registered tool name, and file_editor must use a kaiju-registered command."""
+    registered tool name, and file_editor must use a kaiju-registered command.
+    """
     if tc.function_name not in KAIJU_TOOL_NAMES:
         raise ValueError(
             f"function_name {tc.function_name!r} not in kaiju tool set "
@@ -800,8 +801,10 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
                                     stage_pass_rate=spr, branch_suffix=branch_suffix,
                                     aider_version_cli=aider_version)
         except Exception as e:  # noqa: BLE001
-            st = V2Stats(source=str(unit)); st.errors = [f"{type(e).__name__}: {e}"]
-            all_stats.append(st); continue
+            st = V2Stats(source=str(unit))
+            st.errors = [f"{type(e).__name__}: {e}"]
+            all_stats.append(st)
+            continue
         if traj is not None:
             leaf = f"{stage}__{module}"
             if branch_suffix:
@@ -923,7 +926,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Explicit path to pipeline_*_results.json (overrides upward walk).")
     args = ap.parse_args(argv)
 
-    root = Path(args.task_dir); out_root = Path(args.out_root)
+    root = Path(args.task_dir)
+    out_root = Path(args.out_root)
     if not args.batch:
         rep = convert_task(root, out_root, args.task_name or root.name,
                            validate=not args.no_validate, limit=args.limit,

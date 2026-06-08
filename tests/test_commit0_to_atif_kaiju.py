@@ -53,14 +53,14 @@ def _install_harbor_stubs():
     harbor.utils = harbor_utils
     harbor_utils.trajectory_validator = harbor_tv
 
-    for name, mod in [
+    for name, stub_mod in [
         ("harbor", harbor),
         ("harbor.models", harbor_models),
         ("harbor.models.trajectories", harbor_traj),
         ("harbor.utils", harbor_utils),
         ("harbor.utils.trajectory_validator", harbor_tv),
     ]:
-        sys.modules.setdefault(name, mod)
+        sys.modules.setdefault(name, stub_mod)
 
 
 _install_harbor_stubs()
@@ -438,7 +438,8 @@ class TestFindPipelineFor(unittest.TestCase):
             base = Path(td)
             p_b = base / "pipeline_bbb_results.json"
             p_a = base / "pipeline_aaa_results.json"
-            p_b.write_text("{}"); p_a.write_text("{}")
+            p_b.write_text("{}")
+            p_a.write_text("{}")
             unit_dir = base / "unit"
             unit_dir.mkdir()
 
