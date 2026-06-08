@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# Generates .aider.model.metadata.json and .aider.model.settings.yml
+# in the repo root from ARN environment variables defined in .env.
+# Called automatically by pipeline scripts; safe to re-run.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if [[ -f "${ROOT}/.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "${ROOT}/.env"
+  set +a
+fi
+
+python3 - >"${ROOT}/.aider.model.metadata.json" <<'PYEOF'
+import json, os
+
+meta = {}
+
+# Always included — no ARN required
+meta["bedrock/converse/global.anthropic.claude-opus-4-6-v1"] = {
+    "max_input_tokens": 200000,
+    "max_output_tokens": 32000,
+    "max_tokens": 32000,
+    "mode": "chat",
+    "edit_format": "diff",
+    "input_cost_per_token": 5e-6,
+    "output_cost_per_token": 2.5e-5,
+    "cache_creation_input_token_cost": 6.25e-6,
+    "cache_read_input_token_cost": 5e-7,
+    "litellm_provider": "bedrock",
+    "supports_function_calling": True,
+    "supports_system_messages": True,
+    "supports_tool_choice": True,
+    "supports_vision": True,
+    "supports_prompt_caching": True,
+    "supports_assistant_prefill": True,
+}
+
+# Populated only when the matching env var is set
+ARN_CONFIGS = {
+    "BEDROCK_OPUS_ARN": {
+        "max_input_tokens": 200000,
+        "max_output_tokens": 32000,
+        "max_tokens": 32000,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
+        "cache_creation_input_token_cost": 6.25e-6,
+        "cache_read_input_token_cost": 5e-7,
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_prompt_caching": True,
+        "supports_assistant_prefill": True,
+    },
+    "BEDROCK_KIMI_ARN": {
+        "max_input_tokens": 262144,
+        "max_output_tokens": 16384,
+        "max_tokens": 16384,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 6e-7,
+        "output_cost_per_token": 3e-6,
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_assistant_prefill": False,
+    },
+    "BEDROCK_GLM5_ARN": {
+        "max_input_tokens": 202752,
+        "max_output_tokens": 32768,
+        "max_tokens": 32768,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 3.2e-6,
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": False,
+        "supports_assistant_prefill": False,
+    },
+    "BEDROCK_MINIMAX_ARN": {
+        "max_input_tokens": 196608,
+        "max_output_tokens": 8192,
+        "max_tokens": 8192,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 3e-7,
+        "output_cost_per_token": 1.2e-6,
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": False,
+        "supports_assistant_prefill": False,
+    },
+    "BEDROCK_NOVA2_LITE_ARN": {
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 65535,
+        "max_tokens": 65535,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 3e-7,
+        "output_cost_per_token": 2.5e-6,
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_assistant_prefill": True,
+    },
+    "BEDROCK_NOVA_PREMIER_ARN": {
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 25000,
+        "max_tokens": 25000,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 2.5e-6,
+        "output_cost_per_token": 1e-5,
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_assistant_prefill": True,
+    },
+    "BEDROCK_OPUS47_ARN": {
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
+        "cache_creation_input_token_cost": 6.25e-6,
+        "cache_read_input_token_cost": 5e-7,
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_prompt_caching": True,
+        "supports_assistant_prefill": True,
+    },
+}
+
+for env_var, cfg in ARN_CONFIGS.items():
+    arn = os.environ.get(env_var, "").strip()
+    if arn:
+        meta[arn] = cfg
+
+print(json.dumps(meta, indent=2))
+PYEOF
+
+python3 - >"${ROOT}/.aider.model.settings.yml" <<'PYEOF'
+import os
+
+out = []
+
+# Always included — no ARN required
+out.append("""\
+- name: bedrock/global.anthropic.claude-opus-4-6-v1
+  edit_format: diff
+  use_repo_map: true
+  examples_as_sys_msg: false
+  use_temperature: false
+  extra_params:
+    max_tokens: 128000
+    thinking:
+      type: enabled
+      budget_tokens: 10000
+  cache_control: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking
+  accepts_settings:
+    - thinking_tokens""")
+
+ARN_SETTINGS = {
+    "BEDROCK_OPUS_ARN": {
+        "use_repo_map": "true",
+        "extra": """\
+  extra_params:
+    max_tokens: 32000
+    thinking:
+      type: enabled
+      budget_tokens: 10000
+  cache_control: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking
+  accepts_settings:
+    - thinking_tokens""",
+    },
+    "BEDROCK_NOVA2_LITE_ARN": {
+        "use_repo_map": "true",
+        "extra": "  extra_params:\n    max_tokens: 65535",
+    },
+    "BEDROCK_NOVA_PREMIER_ARN": {
+        "use_repo_map": "true",
+        "extra": "  extra_params:\n    max_tokens: 25000",
+    },
+    "BEDROCK_GLM5_ARN": {
+        "use_repo_map": "true",
+        "extra": "  extra_params:\n    max_tokens: 32768",
+    },
+    "BEDROCK_KIMI_ARN": {
+        "use_repo_map": "true",
+        "extra": "  extra_params:\n    max_tokens: 16384",
+    },
+    "BEDROCK_MINIMAX_ARN": {
+        "use_repo_map": "true",
+        "extra": "  extra_params:\n    max_tokens: 8192",
+    },
+    "BEDROCK_OPUS47_ARN": {
+        "use_repo_map": "false",
+        "extra": """\
+  extra_params:
+    max_tokens: 128000
+    thinking:
+      type: adaptive
+      display: summarized
+    output_config:
+      effort: high
+  cache_control: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking""",
+    },
+}
+
+for env_var, cfg in ARN_SETTINGS.items():
+    arn = os.environ.get(env_var, "").strip()
+    if arn:
+        entry = (
+            f"- name: {arn}\n"
+            f"  edit_format: diff\n"
+            f"  use_repo_map: {cfg['use_repo_map']}\n"
+            f"  examples_as_sys_msg: false\n"
+            f"  use_temperature: false\n"
+            + cfg["extra"]
+        )
+        out.append(entry)
+
+print("\n\n".join(out))
+PYEOF
+
+echo "aider configs regenerated in ${ROOT}" >&2

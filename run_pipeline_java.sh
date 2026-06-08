@@ -26,6 +26,7 @@ if [[ -f "${BASE_DIR}/.env" ]]; then
     source "${BASE_DIR}/.env"
     set +a
 fi
+"${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE="${BASE_DIR}/repos/java"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 COMMIT0_JAVA="${BASE_DIR}/.venv/bin/commit0-java"

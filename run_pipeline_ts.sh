@@ -23,6 +23,7 @@ if [[ -f "${BASE_DIR}/.env" ]]; then
     source "${BASE_DIR}/.env"
     set +a
 fi
+"${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE_TS="${BASE_DIR}/repos_ts"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
