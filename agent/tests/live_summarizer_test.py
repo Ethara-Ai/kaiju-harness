@@ -12,6 +12,7 @@ import sys
 import time
 import tempfile
 from pathlib import Path
+import pytest
 
 # Ensure project root on path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -19,10 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from agent.agent_utils import summarize_specification, _chunk_text
 
 
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"),
+    reason="live test — requires AWS_BEARER_TOKEN_BEDROCK",
+)
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL = os.environ.get(
     "SPEC_SUMMARY_MODEL",
-    "bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/zk5ylvw87ngi",
+    os.environ.get("BEDROCK_TEST_ARN", ""),
 )
 BUDGET = 10_000  # default max_char_length
 

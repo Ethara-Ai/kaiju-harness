@@ -14,7 +14,7 @@
   accepts_settings:
     - thinking_tokens
 
-- name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/lv09a6pe7jzv
+- name: bedrock/converse/arn:aws:bedrock:us-east-1:YOUR_ACCT_ID:application-inference-profile/NOVA2_LITE_PROFILE_ID
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false
@@ -22,7 +22,7 @@
   extra_params:
     max_tokens: 65535
 
-- name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/td6kwwwp7q0e
+- name: bedrock/converse/arn:aws:bedrock:us-east-1:YOUR_ACCT_ID:application-inference-profile/NOVA_PREMIER_PROFILE_ID
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false
@@ -30,7 +30,7 @@
   extra_params:
     max_tokens: 25000
 
-- name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/1ziwaxsu12qb
+- name: bedrock/converse/arn:aws:bedrock:us-east-1:YOUR_ACCT_ID:application-inference-profile/GLM5_PROFILE_ID
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false
@@ -38,7 +38,7 @@
   extra_params:
     max_tokens: 32768
 
-- name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/5m69567zugvx
+- name: bedrock/converse/arn:aws:bedrock:us-east-1:YOUR_ACCT_ID:application-inference-profile/KIMI_PROFILE_ID
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false
@@ -46,7 +46,7 @@
   extra_params:
     max_tokens: 16384
 
-- name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/6oaav7wbxid4
+- name: bedrock/converse/arn:aws:bedrock:us-east-1:YOUR_ACCT_ID:application-inference-profile/MINIMAX_PROFILE_ID
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false
@@ -54,7 +54,7 @@
   extra_params:
     max_tokens: 8192
 
-- name: bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/up13zed8728o
+- name: bedrock/converse/arn:aws:bedrock:ap-south-1:YOUR_ACCT_ID:application-inference-profile/OPUS47_PROFILE_ID
   edit_format: diff
   use_repo_map: false
   examples_as_sys_msg: false

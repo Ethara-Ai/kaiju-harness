@@ -148,32 +148,32 @@ resolve_model() {
     local arg="$1"
     case "$arg" in
         opus)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/4w7tmk1iplxi"
+            MODEL_NAME="${BEDROCK_OPUS_ARN}"
             MODEL_SHORT="opus4.6"
             CACHE_PROMPTS="true"
             ;;
         kimi)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/5m69567zugvx"
+            MODEL_NAME="${BEDROCK_KIMI_ARN}"
             MODEL_SHORT="kimi-k2.5"
             CACHE_PROMPTS="false"
             ;;
         glm5|glm-5)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/1ziwaxsu12qb"
+            MODEL_NAME="${BEDROCK_GLM5_ARN}"
             MODEL_SHORT="glm-5"
             CACHE_PROMPTS="false"
             ;;
         minimax)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/6oaav7wbxid4"
+            MODEL_NAME="${BEDROCK_MINIMAX_ARN}"
             MODEL_SHORT="minimax-m2.5"
             CACHE_PROMPTS="false"
             ;;
         nova-premier)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/td6kwwwp7q0e"
+            MODEL_NAME="${BEDROCK_NOVA_PREMIER_ARN}"
             MODEL_SHORT="nova-premier"
             CACHE_PROMPTS="false"
             ;;
         nova-lite|nova-2-lite)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/lv09a6pe7jzv"
+            MODEL_NAME="${BEDROCK_NOVA2_LITE_ARN}"
             MODEL_SHORT="nova-2-lite"
             CACHE_PROMPTS="false"
             ;;

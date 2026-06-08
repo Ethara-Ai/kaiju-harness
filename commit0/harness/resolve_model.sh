@@ -92,7 +92,7 @@ resolve_model() {
                 _default_cache_prompts="true"
                 ;;
             opus47)
-                _default_model="bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/up13zed8728o"
+                _default_model="${BEDROCK_OPUS47_ARN}"
                 _default_cache_prompts="true"
                 ;;
         esac
