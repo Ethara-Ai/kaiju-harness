@@ -581,20 +581,14 @@ class AiderAgents(Agents):
             api_key = os.environ.get("OPENAI_API_KEY", None)
         elif "claude" in model_name or "anthropic" in model_name:
             api_key = os.environ.get("ANTHROPIC_API_KEY", None)
-        elif "gemini" in model_name or "google" in model_name:
-            api_key = os.environ.get("API_KEY", None)
-        else:
-            _logger.warning(
-                "Unknown model provider for '%s', skipping API key check", model_name
-            )
-            api_key = "assumed_present"
-
-        if not api_key:
-            _logger.error("No API key found for model %s", model_name)
-            raise ValueError(
-                "API Key Error: There is no API key associated with the model for this agent. "
-                "Edit model_name parameter in .agent.yaml, export API key for that model, and try again."
-            )
+        elif model_name.startswith("vertex_ai/"):
+            api_key = os.environ.get("VERTEX_AI_API_KEY", None)
+            adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", None)
+            if not api_key and not adc_path:
+                _logger.error("No API key or ADC credentials found for model %s", model_name)
+                raise ValueError(
+                    "API Key Error: set VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS for vertex_ai/ models."
+                )
 
     @staticmethod
     def _load_model_settings() -> None:

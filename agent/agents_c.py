@@ -268,8 +268,17 @@ class AiderCAgents(CAgents):
             api_key = os.environ.get("OPENAI_API_KEY")
         elif "claude" in model_name or "anthropic" in model_name:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
+        elif model_name.startswith("vertex_ai/"):
+            api_key = os.environ.get("VERTEX_AI_API_KEY", None)
+            adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", None)
+            if not api_key and not adc_path:
+                raise ValueError(
+                    "API Key Error: set VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS for vertex_ai/ models."
+                )
+            if not api_key:
+                api_key = "adc"
         elif "gemini" in model_name or "google" in model_name:
-            api_key = os.environ.get("API_KEY")
+            api_key = os.environ.get("GOOGLE_API_KEY")
         else:
             logger.warning(
                 "Unknown model provider for '%s', skipping API key check", model_name

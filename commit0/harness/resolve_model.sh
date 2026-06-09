@@ -75,6 +75,26 @@ resolve_model() {
             fi
             return 0
             ;;
+        gemini25pro|gemini-2.5-pro)
+            MODEL_NAME="vertex_ai/gemini-2.5-pro"
+            MODEL_SHORT="gemini-2.5-pro"
+            CACHE_PROMPTS="true"
+            if [[ -n "${VERTEX_AI_API_KEY:-}" ]]; then
+                export GEMINI_API_KEY="${VERTEX_AI_API_KEY}"
+                export GOOGLE_API_KEY="${VERTEX_AI_API_KEY}"
+            fi
+            return 0
+            ;;
+        gemini25flash|gemini-2.5-flash)
+            MODEL_NAME="vertex_ai/gemini-2.5-flash"
+            MODEL_SHORT="gemini-2.5-flash"
+            CACHE_PROMPTS="true"
+            if [[ -n "${VERTEX_AI_API_KEY:-}" ]]; then
+                export GEMINI_API_KEY="${VERTEX_AI_API_KEY}"
+                export GOOGLE_API_KEY="${VERTEX_AI_API_KEY}"
+            fi
+            return 0
+            ;;
         *)
             # Pass-through: caller supplied a full model string (openai/..., bedrock/..., bedrock/converse/arn:...)
             MODEL_NAME="$arg"
@@ -133,9 +153,14 @@ preflight_model_api() {
     log "  Probing model API: ${MODEL_NAME} ..."
 
     if [[ "$MODEL_NAME" == vertex_ai/* ]]; then
-        if [[ -z "${VERTEX_AI_API_KEY:-}" ]]; then
-            echo "ERROR: VERTEX_AI_API_KEY required for ${MODEL_NAME}" >&2
-            echo "       Add it to .env (see .env.example Vertex AI block)." >&2
+        if [[ -z "${VERTEX_AI_API_KEY:-}" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+            echo "ERROR: VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS required for ${MODEL_NAME}" >&2
+            echo "       Add one to .env (see .env.example)." >&2
+            exit 2
+        fi
+        if [[ -z "${VERTEXAI_LOCATION:-}" ]]; then
+            echo "ERROR: VERTEXAI_LOCATION not set for ${MODEL_NAME}" >&2
+            echo "       Regional Vertex endpoints return HTTP 404; set VERTEXAI_LOCATION=global in .env." >&2
             exit 2
         fi
     fi
@@ -176,7 +201,7 @@ messages = [{"role": "user", "content": "Reply with exactly: OK"}]
 completion_kwargs = {
     "model": m.name,
     "messages": messages,
-    "max_tokens": 8,
+    "max_tokens": 64,
     "timeout": 60,
 }
 if m.name.startswith("vertex_ai/"):
@@ -185,7 +210,7 @@ if m.name.startswith("vertex_ai/"):
         completion_kwargs["gemini_api_key"] = _vk
 try:
     resp = aider_litellm.completion(**completion_kwargs)
-    content = resp.choices[0].message.content.strip()
+    content = (resp.choices[0].message.content or "").strip() or "<empty>"
     cost = getattr(resp, "_hidden_params", {}).get("response_cost")
     cost_str = f" cost={cost:.8f}" if cost else " cost=unresolved"
     print(f"PROBE_OK: model responded: {content!r}{cost_str}")

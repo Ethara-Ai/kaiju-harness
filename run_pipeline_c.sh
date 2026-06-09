@@ -227,6 +227,20 @@ repo_split: ${REPO_SPLIT}
 base_dir: ${REPO_BASE}
 EOF
 
+    # Check API keys based on model provider
+    if [[ "$MODEL_NAME" == gemini/* ]]; then
+        if [[ -z "${GOOGLE_API_KEY:-}" ]]; then
+            echo "Error: GOOGLE_API_KEY not set (required for model: $MODEL_NAME)" >&2; exit 1
+        fi
+    elif [[ "$MODEL_NAME" == vertex_ai/* ]]; then
+        if [[ -z "${VERTEX_AI_API_KEY:-}" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+            echo "Error: VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS required for model: $MODEL_NAME" >&2; exit 1
+        fi
+        if [[ -z "${VERTEXAI_LOCATION:-}" ]]; then
+            echo "Error: VERTEXAI_LOCATION not set for model: $MODEL_NAME (regional endpoints return HTTP 404; set VERTEXAI_LOCATION=global)" >&2; exit 1
+        fi
+    fi
+
     log "Preflight: running 'commit0-c setup ${REPO_SPLIT}'"
     "$VENV_PYTHON" -m commit0.cli_c setup "$REPO_SPLIT" \
         --dataset-name "$DATASET_FILE" \
