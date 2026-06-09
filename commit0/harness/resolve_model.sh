@@ -65,6 +65,16 @@ resolve_model() {
             CACHE_PROMPTS="false"
             return 0
             ;;
+        gemini|gemini31|gemini-3.1-pro)
+            MODEL_NAME="vertex_ai/gemini-3.1-pro-preview"
+            MODEL_SHORT="gemini-3.1-pro"
+            CACHE_PROMPTS="true"
+            if [[ -n "${VERTEX_AI_API_KEY:-}" ]]; then
+                export GEMINI_API_KEY="${VERTEX_AI_API_KEY}"
+                export GOOGLE_API_KEY="${VERTEX_AI_API_KEY}"
+            fi
+            return 0
+            ;;
         *)
             # Pass-through: caller supplied a full model string (openai/..., bedrock/..., bedrock/converse/arn:...)
             MODEL_NAME="$arg"
@@ -122,6 +132,14 @@ resolve_model() {
 preflight_model_api() {
     log "  Probing model API: ${MODEL_NAME} ..."
 
+    if [[ "$MODEL_NAME" == vertex_ai/* ]]; then
+        if [[ -z "${VERTEX_AI_API_KEY:-}" ]]; then
+            echo "ERROR: VERTEX_AI_API_KEY required for ${MODEL_NAME}" >&2
+            echo "       Add it to .env (see .env.example Vertex AI block)." >&2
+            exit 2
+        fi
+    fi
+
     local probe_output probe_rc probe_result
     probe_output=$(mktemp)
 
@@ -155,13 +173,18 @@ except Exception as e:
     sys.exit(1)
 
 messages = [{"role": "user", "content": "Reply with exactly: OK"}]
+completion_kwargs = {
+    "model": m.name,
+    "messages": messages,
+    "max_tokens": 8,
+    "timeout": 60,
+}
+if m.name.startswith("vertex_ai/"):
+    _vk = os.environ.get("VERTEX_AI_API_KEY", "").strip()
+    if _vk:
+        completion_kwargs["gemini_api_key"] = _vk
 try:
-    resp = aider_litellm.completion(
-        model=m.name,
-        messages=messages,
-        max_tokens=8,
-        timeout=60,
-    )
+    resp = aider_litellm.completion(**completion_kwargs)
     content = resp.choices[0].message.content.strip()
     cost = getattr(resp, "_hidden_params", {}).get("response_cost")
     cost_str = f" cost={cost:.8f}" if cost else " cost=unresolved"

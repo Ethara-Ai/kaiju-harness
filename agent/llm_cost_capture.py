@@ -295,6 +295,8 @@ def _normalize_model(model: str) -> str:
     m = model
     while m.startswith("bedrock/"):
         m = m[len("bedrock/"):]
+    while m.startswith("vertex_ai/"):
+        m = m[len("vertex_ai/"):]
     return m
 
 
@@ -377,6 +379,7 @@ def _record_call(
         cache_r_pre = _extract_int(
             usage, "cache_read_input_tokens", "cacheReadInputTokens",
             "cache_read_input_token_count", "cacheReadInputTokenCount",
+            "cached_content_token_count", "cachedContentTokenCount",
         )
         cache_w_pre = _extract_int(
             usage, "cache_creation_input_tokens", "cacheWriteInputTokens",
@@ -423,6 +426,8 @@ def _record_call(
             "cacheReadInputTokens",
             "cache_read_input_token_count",
             "cacheReadInputTokenCount",
+            "cached_content_token_count",
+            "cachedContentTokenCount",
         )
         if cache_r == 0:
             details = getattr(usage, "prompt_tokens_details", None)
@@ -492,6 +497,8 @@ def _record_stream_chunk_usage(model: str, usage: Any) -> None:
             "cacheReadInputTokens",
             "cache_read_input_token_count",
             "cacheReadInputTokenCount",
+            "cached_content_token_count",
+            "cachedContentTokenCount",
         )
         if cache_r == 0:
             details = getattr(usage, "prompt_tokens_details", None)
@@ -562,6 +569,7 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
         cache_r = _extract_int(
             usage, "cache_read_input_tokens", "cacheReadInputTokens",
             "cache_read_input_token_count", "cacheReadInputTokenCount",
+            "cached_content_token_count", "cachedContentTokenCount",
         )
         if cache_r == 0:
             details = getattr(usage, "prompt_tokens_details", None)
@@ -827,21 +835,24 @@ def capture_module_calls(
     (output.json) from leaking the full provider model identifier (e.g. Bedrock ARN).
     """
     if not model_short:
-        bedrock_model_in_play: Optional[str] = None
+        provider_model_in_play: Optional[str] = None
         try:
             import litellm
 
             current = getattr(litellm, "_active_model_for_redaction_check", "")
-            if isinstance(current, str) and current.startswith("bedrock/"):
-                bedrock_model_in_play = current
+            if isinstance(current, str) and (
+                current.startswith("bedrock/") or current.startswith("vertex_ai/")
+            ):
+                provider_model_in_play = current
         except Exception:
             pass
 
-        if bedrock_model_in_play is not None:
+        if provider_model_in_play is not None:
             raise RuntimeError(
                 f"capture_module_calls: model_short is empty while "
-                f"model='{bedrock_model_in_play}' looks like a Bedrock ARN. "
-                "Shipped output.json would leak the full ARN in "
+                f"model='{provider_model_in_play}' looks like a provider-prefixed "
+                "identifier (Bedrock ARN or Vertex AI model). "
+                "Shipped output.json would leak the full provider identifier in "
                 "metrics.llm_calls[].model. Set --model-short or "
                 "AgentConfig.model_short to enable redaction."
             )

@@ -160,6 +160,25 @@ for env_var, cfg in ARN_CONFIGS.items():
         arn = arn_raw if arn_raw.startswith("bedrock/") else f"bedrock/converse/{arn_raw}"
         meta[arn] = cfg
 
+if os.environ.get("VERTEX_AI_API_KEY", "").strip():
+    meta["vertex_ai/gemini-3.1-pro-preview"] = {
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "max_tokens": 65536,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 2e-6,
+        "output_cost_per_token": 1.2e-5,
+        "cache_read_input_token_cost": 2e-7,
+        "litellm_provider": "vertex_ai",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_prompt_caching": True,
+        "supports_assistant_prefill": False,
+    }
+
 print(json.dumps(meta, indent=2))
 PYEOF
 
@@ -250,6 +269,18 @@ for env_var, cfg in ARN_SETTINGS.items():
             + cfg["extra"]
         )
         out.append(entry)
+
+if os.environ.get("VERTEX_AI_API_KEY", "").strip():
+    out.append("""\
+- name: vertex_ai/gemini-3.1-pro-preview
+  edit_format: diff
+  use_repo_map: false
+  examples_as_sys_msg: false
+  use_temperature: false
+  cache_control: true
+  extra_params:
+    max_tokens: 65536
+    reasoning_effort: high""")
 
 print("\n\n".join(out))
 PYEOF
