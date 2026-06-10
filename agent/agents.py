@@ -430,6 +430,16 @@ def _apply_thinking_capture_patches(
                         thinking_tokens = details.get("reasoning_tokens", 0) or 0
 
             from datetime import datetime, timezone
+            _model_name = getattr(getattr(coder, "main_model", None), "name", "") or ""
+            _provider = ""
+            if _model_name.startswith("vertex_ai/") or _model_name.startswith("vertex_ai_beta/"):
+                _provider = "vertex_ai"
+            elif _model_name.startswith("bedrock/"):
+                _provider = "bedrock"
+            elif _model_name.startswith("openai/"):
+                _provider = "openai"
+            elif _model_name.startswith("gemini/"):
+                _provider = "gemini"
             coder._thinking_capture.add_assistant_turn(
                 content=coder.partial_response_content,
                 thinking=coder._last_reasoning_content,
@@ -444,6 +454,7 @@ def _apply_thinking_capture_patches(
                 turn_number=coder._turn_counter,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 llm_response_id=coder._last_response_id,
+                provider=_provider,
             )
         _original_add_assistant_reply()
 
@@ -667,6 +678,7 @@ class AiderAgents(Agents):
                 test_cmd=test_cmd,
                 io=io,
                 cache_prompts=self.cache_prompts,
+                detect_urls=False,
             )
             # Clamp max_reflections when read_only_fnames is active to prevent
             # infinite reflection loops on stubborn models refusing protected-path edits.

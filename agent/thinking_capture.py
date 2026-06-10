@@ -65,6 +65,7 @@ class Turn:
     edit_error: str | None = None
     timestamp: str = ""
     llm_response_id: str | None = None
+    provider: str = ""
 
 
 @dataclass
@@ -116,6 +117,7 @@ class ThinkingCapture:
         turn_number: int,
         timestamp: str = "",
         llm_response_id: str | None = None,
+        provider: str = "",
     ) -> None:
         """Record an assistant response turn with optional thinking content."""
         if not timestamp:
@@ -137,6 +139,7 @@ class ThinkingCapture:
                 turn_number=turn_number,
                 timestamp=timestamp,
                 llm_response_id=llm_response_id,
+                provider=provider,
             )
         )
 
@@ -170,15 +173,21 @@ class ThinkingCapture:
         module_turns = [
             t for t in self.turns if t.role == "assistant" and t.module == module
         ]
+        is_vertex_module = bool(module_turns) and all(
+            getattr(t, "provider", "") == "vertex_ai" for t in module_turns
+        )
         metrics: dict = {
             "total_cost": sum(t.cost for t in module_turns),
             "total_prompt_tokens": sum(t.prompt_tokens for t in module_turns),
             "total_completion_tokens": sum(t.completion_tokens for t in module_turns),
             "total_thinking_tokens": sum(t.thinking_tokens for t in module_turns),
-            "cache_hit_tokens": sum(t.cache_hit_tokens for t in module_turns),
-            "cache_write_tokens": sum(t.cache_write_tokens for t in module_turns),
             "num_turns": len(module_turns),
         }
+        if is_vertex_module:
+            metrics["cached_content_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
+        else:
+            metrics["cache_hit_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
+            metrics["cache_write_tokens"] = sum(t.cache_write_tokens for t in module_turns)
 
         call_log = self.module_llm_calls.get(module)
         if call_log is not None and call_log.calls:
@@ -187,8 +196,13 @@ class ThinkingCapture:
             metrics["total_prompt_tokens"] = totals["prompt_tokens"]
             metrics["total_completion_tokens"] = totals["completion_tokens"]
             metrics["total_thinking_tokens"] = totals["thinking_tokens"]
-            metrics["cache_hit_tokens"] = totals["cache_read_tokens"]
-            metrics["cache_write_tokens"] = totals["cache_write_tokens"]
+            for k in ("cache_hit_tokens", "cache_write_tokens", "cached_content_tokens"):
+                metrics.pop(k, None)
+            if "cached_content_tokens" in totals:
+                metrics["cached_content_tokens"] = totals["cached_content_tokens"]
+            else:
+                metrics["cache_hit_tokens"] = totals["cache_read_tokens"]
+                metrics["cache_write_tokens"] = totals["cache_write_tokens"]
             metrics["by_source"] = call_log.by_source()
             metrics["llm_calls"] = [c.to_dict() for c in call_log.calls]
 
@@ -244,38 +258,42 @@ class ThinkingCapture:
             grand_thinking = 0
             grand_cache_read = 0
             grand_cache_write = 0
+            grand_cached_content = 0
             grand_calls = 0
+            all_vertex = True
+            any_calls = False
             for log in self.module_llm_calls.values():
                 for src, b in log.by_source().items():
-                    a = aggregated.setdefault(
-                        src,
-                        {
-                            "calls": 0,
-                            "prompt_tokens": 0,
-                            "completion_tokens": 0,
-                            "cache_read_tokens": 0,
-                            "cache_write_tokens": 0,
-                            "thinking_tokens": 0,
-                            "cost_usd": 0.0,
-                        },
-                    )
+                    a = aggregated.setdefault(src, {})
                     for k, v in b.items():
-                        a[k] = a[k] + v
+                        a[k] = a.get(k, 0) + v if isinstance(v, (int, float)) else v
                 totals = log.grand_totals()
                 grand_calls += totals["calls"]
                 grand_cost += totals["cost_usd"]
                 grand_prompt += totals["prompt_tokens"]
                 grand_completion += totals["completion_tokens"]
                 grand_thinking += totals["thinking_tokens"]
-                grand_cache_read += totals["cache_read_tokens"]
-                grand_cache_write += totals["cache_write_tokens"]
+                if "cached_content_tokens" in totals:
+                    grand_cached_content += totals["cached_content_tokens"]
+                else:
+                    grand_cache_read += totals["cache_read_tokens"]
+                    grand_cache_write += totals["cache_write_tokens"]
+                    if totals["calls"] > 0:
+                        all_vertex = False
+                if totals["calls"] > 0:
+                    any_calls = True
 
             result["total_cost"] = grand_cost
             result["total_prompt_tokens"] = grand_prompt
             result["total_completion_tokens"] = grand_completion
             result["total_thinking_tokens"] = grand_thinking
-            result["cache_hit_tokens"] = grand_cache_read
-            result["cache_write_tokens"] = grand_cache_write
+            if any_calls and all_vertex:
+                result["cached_content_tokens"] = grand_cached_content
+            else:
+                result["cache_hit_tokens"] = grand_cache_read
+                result["cache_write_tokens"] = grand_cache_write
+                if grand_cached_content > 0:
+                    result["cached_content_tokens"] = grand_cached_content
             result["total_llm_calls"] = grand_calls
             result["by_source"] = aggregated
 

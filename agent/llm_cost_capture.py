@@ -43,6 +43,20 @@ SRC_OUR_SUMMARIZER = "our_summarizer"
 SRC_UNKNOWN = "unknown"
 
 
+def _provider_from_model(model: str) -> str:
+    if not model:
+        return ""
+    if model.startswith("vertex_ai/") or model.startswith("vertex_ai_beta/"):
+        return "vertex_ai"
+    if model.startswith("bedrock/"):
+        return "bedrock"
+    if model.startswith("openai/"):
+        return "openai"
+    if model.startswith("gemini/"):
+        return "gemini"
+    return ""
+
+
 @dataclass
 class LlmCallRecord:
     source: str
@@ -56,21 +70,26 @@ class LlmCallRecord:
     duration_s: float = 0.0
     timestamp: str = ""
     status: str = "success"
+    provider: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        base: dict = {
             "source": self.source,
             "model": self.model,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
-            "cache_read_tokens": self.cache_read_tokens,
-            "cache_write_tokens": self.cache_write_tokens,
             "thinking_tokens": self.thinking_tokens,
             "cost_usd": self.cost_usd,
             "duration_s": self.duration_s,
             "timestamp": self.timestamp,
             "status": self.status,
         }
+        if self.provider == "vertex_ai":
+            base["cached_content_tokens"] = self.cache_read_tokens
+        else:
+            base["cache_read_tokens"] = self.cache_read_tokens
+            base["cache_write_tokens"] = self.cache_write_tokens
+        return base
 
 
 @dataclass
@@ -96,37 +115,49 @@ class LlmCallLog:
     def by_source(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         for c in self.calls:
-            b = out.setdefault(
-                c.source,
-                {
+            is_vertex = c.provider == "vertex_ai"
+            if c.source not in out:
+                base: dict[str, Any] = {
                     "calls": 0,
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
-                    "cache_read_tokens": 0,
-                    "cache_write_tokens": 0,
                     "thinking_tokens": 0,
                     "cost_usd": 0.0,
-                },
-            )
+                }
+                if is_vertex:
+                    base["cached_content_tokens"] = 0
+                else:
+                    base["cache_read_tokens"] = 0
+                    base["cache_write_tokens"] = 0
+                out[c.source] = base
+            b = out[c.source]
             b["calls"] += 1
             b["prompt_tokens"] += c.prompt_tokens
             b["completion_tokens"] += c.completion_tokens
-            b["cache_read_tokens"] += c.cache_read_tokens
-            b["cache_write_tokens"] += c.cache_write_tokens
             b["thinking_tokens"] += c.thinking_tokens
             b["cost_usd"] += c.cost_usd
+            if is_vertex:
+                b["cached_content_tokens"] = b.get("cached_content_tokens", 0) + c.cache_read_tokens
+            else:
+                b["cache_read_tokens"] = b.get("cache_read_tokens", 0) + c.cache_read_tokens
+                b["cache_write_tokens"] = b.get("cache_write_tokens", 0) + c.cache_write_tokens
         return out
 
     def grand_totals(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "calls": len(self.calls),
             "prompt_tokens": sum(c.prompt_tokens for c in self.calls),
             "completion_tokens": sum(c.completion_tokens for c in self.calls),
-            "cache_read_tokens": sum(c.cache_read_tokens for c in self.calls),
-            "cache_write_tokens": sum(c.cache_write_tokens for c in self.calls),
             "thinking_tokens": sum(c.thinking_tokens for c in self.calls),
             "cost_usd": sum(c.cost_usd for c in self.calls),
         }
+        providers = {c.provider for c in self.calls}
+        if providers and providers <= {"vertex_ai"}:
+            out["cached_content_tokens"] = sum(c.cache_read_tokens for c in self.calls)
+        else:
+            out["cache_read_tokens"] = sum(c.cache_read_tokens for c in self.calls)
+            out["cache_write_tokens"] = sum(c.cache_write_tokens for c in self.calls)
+        return out
 
 
 _current_log: ContextVar[Optional[LlmCallLog]] = ContextVar(
@@ -468,6 +499,7 @@ def _record_call(
                 duration_s=duration,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 status=status,
+                provider=_provider_from_model(model),
             )
         )
     except Exception:
@@ -537,6 +569,7 @@ def _record_stream_chunk_usage(model: str, usage: Any) -> None:
                 duration_s=0.0,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 status="success",
+                provider=_provider_from_model(model),
             )
         )
     except Exception:
@@ -606,6 +639,7 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
             duration_s=duration_s,
             timestamp=datetime.now(timezone.utc).isoformat(),
             status="success",
+            provider=_provider_from_model(model),
         ))
     except Exception:
         _logger.debug("_record_response_object failed", exc_info=True)

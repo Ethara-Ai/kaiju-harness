@@ -536,14 +536,17 @@ def _convert_assistant_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
     thinking_blocks = _make_thinking_blocks(turn.thinking)
     events: list[dict] = []
     rid = getattr(turn, "llm_response_id", None)
-    turn_usage = {
+    turn_usage: dict = {
         "prompt_tokens": int(getattr(turn, "prompt_tokens", 0) or 0),
         "completion_tokens": int(getattr(turn, "completion_tokens", 0) or 0),
-        "cache_read_tokens": int(getattr(turn, "cache_hit_tokens", 0) or 0),
-        "cache_write_tokens": int(getattr(turn, "cache_write_tokens", 0) or 0),
         "thinking_tokens": int(getattr(turn, "thinking_tokens", 0) or 0),
         "cost_usd": float(getattr(turn, "cost", 0.0) or 0.0),
     }
+    if getattr(turn, "provider", "") == "vertex_ai":
+        turn_usage["cached_content_tokens"] = int(getattr(turn, "cache_hit_tokens", 0) or 0)
+    else:
+        turn_usage["cache_read_tokens"] = int(getattr(turn, "cache_hit_tokens", 0) or 0)
+        turn_usage["cache_write_tokens"] = int(getattr(turn, "cache_write_tokens", 0) or 0)
     if not any(v for v in turn_usage.values()):
         turn_usage_payload: dict | None = None
     else:
@@ -761,6 +764,9 @@ def write_module_output_json(
     events = turns_to_openhands_events(module_turns, system_prompt=system_prompt)
     tool_counts = _count_tool_calls(events)
 
+    metrics_public = dict(metrics)
+    audit_mismatch = metrics_public.pop("capture_mismatch", None)
+
     record = {
         "module": module,
         "instance_id": instance_id,
@@ -770,7 +776,7 @@ def write_module_output_json(
         "metadata": metadata,
         "history": events,
         "metrics": {
-            **metrics,
+            **metrics_public,
             "stage_runtime_seconds": round(stage_runtime_seconds, 2),
             "tool_calls": tool_counts,
             "total_tool_calls": sum(tool_counts.values()),
@@ -785,3 +791,17 @@ def write_module_output_json(
     except OSError as e:
         logger.error("Failed to write module output to %s: %s", output_path, e)
         raise
+
+    if audit_mismatch is not None:
+        audit_path = out_dir / "audit.jsonl"
+        audit_record = {
+            "instance_id": instance_id,
+            "stage": stage,
+            "module": module,
+            "capture_mismatch": audit_mismatch,
+        }
+        try:
+            with open(audit_path, "a") as f:
+                f.write(json.dumps(audit_record, default=str) + "\n")
+        except OSError as e:
+            logger.warning("Failed to write audit JSONL to %s: %s", audit_path, e)
