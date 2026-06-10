@@ -728,7 +728,7 @@ def find_docker_image_for_repo(repo_name: str) -> str | None:
         client = docker.from_env()
     except Exception:  # noqa: BLE001 - any docker error → no image
         return None
-    short_name = repo_name.split("__")[-1].split("-")[0].lower()
+    short_name = repo_name.split("/")[-1].split("__")[-1].split("-")[0].lower()
     needle = f"commit0.repo.{short_name}."
     fallback = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
     try:
