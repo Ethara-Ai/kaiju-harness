@@ -45,6 +45,7 @@ from typing import Any
 from harbor.models.trajectories import (
     Agent,
     FinalMetrics,
+    Metrics,
     Step,
     ToolCall,
     Trajectory,
@@ -85,7 +86,7 @@ MODEL_SHORT_MAP: dict[str, str] = {
 # any file_editor command outside KAIJU_FILE_EDITOR_COMMANDS. Extending this
 # tool surface requires adding the tool/command to the kaiju harness FIRST,
 # never inventing in the converter.
-KAIJU_TOOL_NAMES = frozenset({"file_editor", "think", "finish"})
+KAIJU_TOOL_NAMES = frozenset({"file_editor", "finish"})
 KAIJU_FILE_EDITOR_COMMANDS = frozenset({"view", "create", "str_replace", "insert"})
 
 # Reasoning-model thinking markers as they appear in llm_history.txt. <think>
@@ -588,6 +589,7 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
     sid = 0
     call_seq = 0
     last_ast_idx = max((i for i, (r, _) in enumerate(turns) if r == "assistant"), default=-1)
+    _m = (out_data or {}).get("metrics") or {}
     for i, (role, body) in enumerate(turns):
         if role == "system":
             sid += 1
@@ -599,7 +601,7 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
         elif role == "assistant":
             # Strict no-invention rule: the only tool names emitted on agent steps
             # are those registered in kaiju/agent/openhands_formatter.py.
-            # - <think>...</think> blocks      -> 'think' tool call (kaiju tool name)
+            # - <think>...</think> blocks      -> step.reasoning_content (not a ToolCall)
             # - SEARCH/REPLACE blocks          -> 'file_editor' tool call
             #     - SEARCH empty                 => command='create'
             #     - SEARCH non-empty             => command='str_replace'
@@ -612,13 +614,6 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
             st.n_edits_empty += empty
             st.assistant_search_markers += raw_markers
             tool_calls = []
-            for tb in think_blocks:
-                call_seq += 1
-                tool_calls.append(ToolCall(
-                    tool_call_id=f"think_{call_seq}",
-                    function_name="think",
-                    arguments={"thought": tb},
-                ))
             for e in edits:
                 call_seq += 1
                 cid = f"edit_{call_seq}"
@@ -637,12 +632,25 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
             for _tc in tool_calls:
                 _assert_kaiju_tool(_tc)
             step_ts = last_response_ts if (real_ts and i == last_ast_idx) else None
+            _step_metrics: Metrics | None = None
+            if i == last_ast_idx and any(
+                _m.get(k) is not None
+                for k in ("total_prompt_tokens", "total_completion_tokens", "cache_hit_tokens", "total_cost")
+            ):
+                _step_metrics = Metrics(
+                    prompt_tokens=_m.get("total_prompt_tokens"),
+                    completion_tokens=_m.get("total_completion_tokens"),
+                    cached_tokens=_m.get("cache_hit_tokens"),
+                    cost_usd=_m.get("total_cost"),
+                )
             sid += 1
             steps.append(Step(
                 step_id=sid, source="agent", message=body,
                 model_name=model_canonical,
                 timestamp=step_ts,
+                reasoning_content="\n\n".join(think_blocks) if think_blocks else None,
                 tool_calls=tool_calls or None,
+                metrics=_step_metrics,
             ))
             st.n_agent += 1
 
@@ -665,7 +673,6 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
                "version_source": ("cli" if aider_version_cli else ("log" if _version_from_log else "constant")),
                **({"tool_definitions_source": "harness_system_prompt"} if _tool_defs is not None else {})}
     )
-    _m = (out_data or {}).get("metrics") or {}
     fm_extra: dict[str, Any] = {}
     if reward is not None:
         fm_extra["reward"] = reward
@@ -701,8 +708,9 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
         if _err is not None:
             _extra["run_error"] = _err
     traj = Trajectory(
-        schema_version=SCHEMA_VERSION, trajectory_id=instance_id, agent=agent,
-        steps=steps, final_metrics=final_metrics,
+        schema_version=SCHEMA_VERSION, trajectory_id=instance_id,
+        session_id=f"commit-0/{task}__{model_canonical}",
+        agent=agent, steps=steps, final_metrics=final_metrics,
         extra=_extra,
     )
     st.reward = reward
@@ -768,7 +776,7 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
     all_stats: list[V2Stats] = []
     validator = TrajectoryValidator() if validate else None
     used_dests: set[Path] = set()
-    model_rewards: dict[tuple[str, str], dict[str, float | None]] = {}
+    model_rewards: dict[tuple[str, str], tuple[dict[str, float | None], "Path | None"]] = {}
     for unit, model, stage, module in units:
         pipeline = pipeline_override if pipeline_override else find_pipeline_for(unit)
         spr = load_pipeline_rewards(pipeline) if pipeline else {}
@@ -805,7 +813,7 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
             leaf = f"{stage}__{module}"
             if branch_suffix:
                 leaf = f"{leaf}__{branch_suffix}"
-            dest = out_root / task_name / model / leaf
+            dest = out_root / task_name / model / "agent" / leaf
             if dest in used_dests:
                 st.errors.append(
                     f"dest_collision: {dest} — branch_suffix failed to disambiguate"
@@ -816,7 +824,7 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
             dest.mkdir(parents=True, exist_ok=True)
             payload = traj.to_json_dict()
             (dest / "trajectory.json").write_text(json.dumps(payload, indent=2))
-            model_rewards[(model, branch_suffix)] = spr
+            model_rewards[(model, branch_suffix)] = (spr, pipeline)
             if validator is not None:
                 ok = validator.validate(payload)
                 st.validated = ok
@@ -830,16 +838,20 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
     # specific 'reward'/'resolved' scalars become a per-stage map of pass_rates +
     # derived resolved flags. Branched runs (rare) get a suffixed filename so a single
     # model dir can hold multiple branches without overwrite.
-    for (model_name, branch_suffix), spr in model_rewards.items():
+    for (model_name, branch_suffix), (spr, pipeline_path) in model_rewards.items():
         if not spr:
             continue
-        rd = out_root / task_name / model_name / "logs" / "verifier"
+        rd = out_root / task_name / model_name / "verifier"
         rd.mkdir(parents=True, exist_ok=True)
-        resolved_map = {k: (1 if (v is not None and v > 0) else 0)
+        resolved_map = {k: (1 if (v is not None and v >= 1.0) else 0)
                         for k, v in spr.items() if v is not None}
         fname = f"reward__{branch_suffix}.json" if branch_suffix else "reward.json"
         (rd / fname).write_text(json.dumps(
             {"stage_pass_rate": spr, "resolved": resolved_map}, indent=2))
+        if pipeline_path is not None and pipeline_path.exists():
+            model_dir = out_root / task_name / model_name
+            model_dir.mkdir(parents=True, exist_ok=True)
+            (model_dir / "results.json").write_bytes(pipeline_path.read_bytes())
 
     conv = [s for s in all_stats if not s.skipped and not s.errors]
     total_edits = sum(s.n_edits for s in conv)
