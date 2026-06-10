@@ -71,6 +71,13 @@ MODEL_SHORT_MAP: dict[str, str] = {
     "kimi-k2.5": "kimi-k2.5",
     "glm-5": "glm-5",
     "nova-2-lite": "nova-2-lite",
+    # Vertex AI Gemini (recent additions)
+    "gemini-2.5-flash": "gemini-2.5-flash",
+    "vertex_ai/gemini-2.5-flash": "gemini-2.5-flash",
+    "gemini-2.5-pro": "gemini-2.5-pro",
+    "vertex_ai/gemini-2.5-pro": "gemini-2.5-pro",
+    "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+    "vertex_ai/gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
 }
 
 # Kaiju harness tool surface (from kaiju/agent/openhands_formatter.py).
@@ -696,17 +703,6 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
     traj = Trajectory(
         schema_version=SCHEMA_VERSION, trajectory_id=instance_id, agent=agent,
         steps=steps, final_metrics=final_metrics,
-        notes=(
-            "Converted v2 from the native aider log llm_history.txt "
-            "(cross-checked against .aider.chat.history.md). "
-            + (
-                "Real wall-clock timestamps"
-                + (f" (session start {start_ts})" if start_ts else "")
-                if real_ts else "Synthetic timestamps (real_ts unavailable from log)"
-            )
-            + "; tool_calls carry real SEARCH/REPLACE edit content. Reward is "
-            "repo/stage-level pass_rate (outcome-RL); suitable for action-level SFT."
-        ),
         extra=_extra,
     )
     st.reward = reward
