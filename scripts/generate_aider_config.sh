@@ -310,7 +310,7 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
   edit_format: diff
   use_repo_map: false
   examples_as_sys_msg: false
-  use_temperature: 0.0
+  use_temperature: 1.0
   cache_control: false
   extra_params:
     max_tokens: 65536
@@ -320,7 +320,7 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
   edit_format: diff
   use_repo_map: false
   examples_as_sys_msg: false
-  use_temperature: 0.0
+  use_temperature: 1.0
   cache_control: false
   extra_params:
     max_tokens: 65536
@@ -330,7 +330,7 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
   edit_format: diff
   use_repo_map: false
   examples_as_sys_msg: false
-  use_temperature: 0.0
+  use_temperature: 1.0
   cache_control: false
   extra_params:
     max_tokens: 65536
