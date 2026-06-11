@@ -129,6 +129,16 @@ def _apply_thinking_capture_patches(
                     if details and hasattr(details, "get"):
                         thinking_tokens = details.get("reasoning_tokens", 0) or 0
 
+            _model_name = getattr(getattr(coder, "main_model", None), "name", "") or ""
+            _provider = ""
+            if _model_name.startswith("vertex_ai/") or _model_name.startswith("vertex_ai_beta/"):
+                _provider = "vertex_ai_gemini" if "gemini" in _model_name.lower() else "vertex_ai"
+            elif _model_name.startswith("bedrock/"):
+                _provider = "bedrock"
+            elif _model_name.startswith("openai/"):
+                _provider = "openai"
+            elif _model_name.startswith("gemini/"):
+                _provider = "gemini"
             coder._thinking_capture.add_assistant_turn(
                 content=coder.partial_response_content,
                 thinking=coder._last_reasoning_content,
@@ -141,6 +151,7 @@ def _apply_thinking_capture_patches(
                 stage=coder._current_stage,
                 module=coder._current_module,
                 turn_number=coder._turn_counter,
+                provider=_provider,
             )
         _original_add_assistant_reply()
 
@@ -232,9 +243,7 @@ class JavaAgents(Agents):
             api_key = os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
         elif any(k in model_name for k in ("gpt", "openai", "o1", "o3", "o4", "ft:")):
             api_key = os.environ.get("OPENAI_API_KEY")
-        elif "claude" in model_name or "anthropic" in model_name:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-        elif model_name.startswith("vertex_ai/"):
+        elif model_name.startswith("vertex_ai/") or model_name.startswith("vertex_ai_beta/"):
             api_key = os.environ.get("VERTEX_AI_API_KEY", None)
             adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", None)
             if not api_key and not adc_path:
@@ -243,6 +252,8 @@ class JavaAgents(Agents):
                 )
             if not api_key:
                 api_key = "adc"
+        elif "claude" in model_name or "anthropic" in model_name:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
         elif "gemini" in model_name or "google" in model_name:
             api_key = os.environ.get("GOOGLE_API_KEY")
         else:

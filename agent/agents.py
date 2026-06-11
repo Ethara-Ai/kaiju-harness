@@ -433,7 +433,7 @@ def _apply_thinking_capture_patches(
             _model_name = getattr(getattr(coder, "main_model", None), "name", "") or ""
             _provider = ""
             if _model_name.startswith("vertex_ai/") or _model_name.startswith("vertex_ai_beta/"):
-                _provider = "vertex_ai"
+                _provider = "vertex_ai_gemini" if "gemini" in _model_name.lower() else "vertex_ai"
             elif _model_name.startswith("bedrock/"):
                 _provider = "bedrock"
             elif _model_name.startswith("openai/"):
@@ -590,9 +590,7 @@ class AiderAgents(Agents):
             )
         elif any(k in model_name for k in ("gpt", "openai", "o1", "o3", "o4", "ft:")):
             api_key = os.environ.get("OPENAI_API_KEY", None)
-        elif "claude" in model_name or "anthropic" in model_name:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", None)
-        elif model_name.startswith("vertex_ai/"):
+        elif model_name.startswith("vertex_ai/") or model_name.startswith("vertex_ai_beta/"):
             api_key = os.environ.get("VERTEX_AI_API_KEY", None)
             adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", None)
             if not api_key and not adc_path:
@@ -600,6 +598,8 @@ class AiderAgents(Agents):
                 raise ValueError(
                     "API Key Error: set VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS for vertex_ai/ models."
                 )
+        elif "claude" in model_name or "anthropic" in model_name:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", None)
 
     @staticmethod
     def _load_model_settings() -> None:

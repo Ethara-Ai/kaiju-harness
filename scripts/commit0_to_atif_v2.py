@@ -79,6 +79,10 @@ MODEL_SHORT_MAP: dict[str, str] = {
     "vertex_ai/gemini-2.5-pro": "gemini-2.5-pro",
     "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
     "vertex_ai/gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+    # Vertex AI Claude (opus 4.7 / 4.8)
+    "vertex_ai/claude-opus-4-7": "claude-opus-4.7",
+    "claude-opus-4.8": "claude-opus-4.8",
+    "vertex_ai/claude-opus-4-8": "claude-opus-4.8",
 }
 
 # Kaiju harness tool surface (from kaiju/agent/openhands_formatter.py).

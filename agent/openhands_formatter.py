@@ -542,7 +542,7 @@ def _convert_assistant_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
         "thinking_tokens": int(getattr(turn, "thinking_tokens", 0) or 0),
         "cost_usd": float(getattr(turn, "cost", 0.0) or 0.0),
     }
-    if getattr(turn, "provider", "") == "vertex_ai":
+    if getattr(turn, "provider", "") == "vertex_ai_gemini":
         turn_usage["cached_content_tokens"] = int(getattr(turn, "cache_hit_tokens", 0) or 0)
     else:
         turn_usage["cache_read_tokens"] = int(getattr(turn, "cache_hit_tokens", 0) or 0)

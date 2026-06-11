@@ -95,6 +95,18 @@ resolve_model() {
             fi
             return 0
             ;;
+        opus47v|opus47vertex|claude-opus-4-7-vertex)
+            MODEL_NAME="vertex_ai/claude-opus-4-7"
+            MODEL_SHORT="claude-opus-4.7"
+            CACHE_PROMPTS="true"
+            return 0
+            ;;
+        opus48v|opus48vertex|claude-opus-4-8-vertex)
+            MODEL_NAME="vertex_ai/claude-opus-4-8"
+            MODEL_SHORT="claude-opus-4.8"
+            CACHE_PROMPTS="true"
+            return 0
+            ;;
         *)
             # Pass-through: caller supplied a full model string (openai/..., bedrock/..., bedrock/converse/arn:...)
             MODEL_NAME="$arg"

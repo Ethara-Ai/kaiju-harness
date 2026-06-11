@@ -212,6 +212,42 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
         "supports_prompt_caching": True,
         "supports_assistant_prefill": False,
     }
+    meta["vertex_ai/claude-opus-4-7"] = {
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
+        "cache_read_input_token_cost": 5e-7,
+        "cache_creation_input_token_cost": 6.25e-6,
+        "litellm_provider": "vertex_ai",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_prompt_caching": True,
+        "supports_assistant_prefill": True,
+    }
+    meta["vertex_ai/claude-opus-4-8"] = {
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "edit_format": "diff",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
+        "cache_read_input_token_cost": 5e-7,
+        "cache_creation_input_token_cost": 6.25e-6,
+        "litellm_provider": "vertex_ai",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_prompt_caching": True,
+        "supports_assistant_prefill": True,
+    }
 
 print(json.dumps(meta, indent=2))
 PYEOF
@@ -335,6 +371,26 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
   extra_params:
     max_tokens: 65536
     reasoning_effort: high""")
+    out.append("""\
+- name: vertex_ai/claude-opus-4-7
+  edit_format: diff
+  use_repo_map: true
+  examples_as_sys_msg: false
+  use_temperature: false
+  cache_control: true
+  overeager: true
+  extra_params:
+    max_tokens: 128000""")
+    out.append("""\
+- name: vertex_ai/claude-opus-4-8
+  edit_format: diff
+  use_repo_map: true
+  examples_as_sys_msg: false
+  use_temperature: false
+  cache_control: true
+  overeager: true
+  extra_params:
+    max_tokens: 128000""")
 
 print("\n\n".join(out))
 PYEOF

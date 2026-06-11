@@ -174,7 +174,7 @@ class ThinkingCapture:
             t for t in self.turns if t.role == "assistant" and t.module == module
         ]
         is_vertex_module = bool(module_turns) and all(
-            getattr(t, "provider", "") == "vertex_ai" for t in module_turns
+            getattr(t, "provider", "") == "vertex_ai_gemini" for t in module_turns
         )
         metrics: dict = {
             "total_cost": sum(t.cost for t in module_turns),

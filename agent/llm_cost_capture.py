@@ -47,7 +47,7 @@ def _provider_from_model(model: str) -> str:
     if not model:
         return ""
     if model.startswith("vertex_ai/") or model.startswith("vertex_ai_beta/"):
-        return "vertex_ai"
+        return "vertex_ai_gemini" if "gemini" in model.lower() else "vertex_ai"
     if model.startswith("bedrock/"):
         return "bedrock"
     if model.startswith("openai/"):
@@ -84,7 +84,7 @@ class LlmCallRecord:
             "timestamp": self.timestamp,
             "status": self.status,
         }
-        if self.provider == "vertex_ai":
+        if self.provider == "vertex_ai_gemini":
             base["cached_content_tokens"] = self.cache_read_tokens
         else:
             base["cache_read_tokens"] = self.cache_read_tokens
@@ -115,7 +115,7 @@ class LlmCallLog:
     def by_source(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         for c in self.calls:
-            is_vertex = c.provider == "vertex_ai"
+            is_vertex = c.provider == "vertex_ai_gemini"
             if c.source not in out:
                 base: dict[str, Any] = {
                     "calls": 0,
@@ -152,7 +152,7 @@ class LlmCallLog:
             "cost_usd": sum(c.cost_usd for c in self.calls),
         }
         providers = {c.provider for c in self.calls}
-        if providers and providers <= {"vertex_ai"}:
+        if providers and providers <= {"vertex_ai_gemini"}:
             out["cached_content_tokens"] = sum(c.cache_read_tokens for c in self.calls)
         else:
             out["cache_read_tokens"] = sum(c.cache_read_tokens for c in self.calls)
