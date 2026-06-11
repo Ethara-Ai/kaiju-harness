@@ -205,11 +205,3 @@ COMMIT0_*.pdf.docx
 docs/commit0.gif
 .aider.model.metadata.json
 .aider.model.settings.yml
-Harbor_Data
-# GCP service account keys
-kaiju-*.json
-*-service-account*.json
-
-# Latest run state
-.latest_run_log
-.latest_run_pid
