@@ -401,7 +401,7 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
   examples_as_sys_msg: false
   use_temperature: false
   cache_control: true
-  overeager: true
+  overeager: false
   reasoning_tag: thinking
   remove_reasoning: thinking
   extra_params:
