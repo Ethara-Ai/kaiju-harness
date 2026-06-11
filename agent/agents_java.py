@@ -128,6 +128,14 @@ def _apply_thinking_capture_patches(
                     )
                     if details and hasattr(details, "get"):
                         thinking_tokens = details.get("reasoning_tokens", 0) or 0
+                if not thinking_tokens:
+                    _od = getattr(
+                        coder._last_completion_usage,
+                        "output_tokens_details",
+                        None,
+                    )
+                    if _od and hasattr(_od, "get"):
+                        thinking_tokens = _od.get("thinking_tokens", 0) or 0
 
             _model_name = getattr(getattr(coder, "main_model", None), "name", "") or ""
             _provider = ""

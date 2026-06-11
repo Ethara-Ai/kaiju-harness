@@ -135,7 +135,7 @@ ARN_CONFIGS = {
         "supports_assistant_prefill": True,
     },
     "BEDROCK_OPUS47_ARN": {
-        "max_input_tokens": 1000000,
+        "max_input_tokens": 200000,
         "max_output_tokens": 128000,
         "max_tokens": 128000,
         "mode": "chat",
@@ -213,7 +213,7 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
         "supports_assistant_prefill": False,
     }
     meta["vertex_ai/claude-opus-4-7"] = {
-        "max_input_tokens": 1000000,
+        "max_input_tokens": 200000,
         "max_output_tokens": 128000,
         "max_tokens": 128000,
         "mode": "chat",
@@ -231,22 +231,35 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
         "supports_assistant_prefill": True,
     }
     meta["vertex_ai/claude-opus-4-8"] = {
+        "cache_creation_input_token_cost": 6.25e-6,
+        "cache_creation_input_token_cost_above_1hr": 1e-5,
+        "cache_read_input_token_cost": 5e-7,
+        "input_cost_per_token": 5e-6,
+        "litellm_provider": "vertex_ai-anthropic_models",
         "max_input_tokens": 1000000,
         "max_output_tokens": 128000,
         "max_tokens": 128000,
         "mode": "chat",
         "edit_format": "diff",
-        "input_cost_per_token": 5e-6,
         "output_cost_per_token": 2.5e-5,
-        "cache_read_input_token_cost": 5e-7,
-        "cache_creation_input_token_cost": 6.25e-6,
-        "litellm_provider": "vertex_ai",
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01,
+        },
+        "supports_adaptive_thinking": True,
+        "supports_assistant_prefill": False,
+        "supports_computer_use": True,
         "supports_function_calling": True,
-        "supports_system_messages": True,
+        "supports_pdf_input": True,
+        "supports_prompt_caching": True,
+        "supports_reasoning": True,
+        "supports_response_schema": True,
+        "supports_sampling_params": False,
         "supports_tool_choice": True,
         "supports_vision": True,
-        "supports_prompt_caching": True,
-        "supports_assistant_prefill": True,
+        "supports_xhigh_reasoning_effort": True,
+        "supports_max_reasoning_effort": True,
     }
 
 print(json.dumps(meta, indent=2))
@@ -389,8 +402,13 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
   use_temperature: false
   cache_control: true
   overeager: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking
   extra_params:
-    max_tokens: 128000""")
+    max_tokens: 128000
+    thinking:
+      type: adaptive
+      display: summarized""")
 
 print("\n\n".join(out))
 PYEOF

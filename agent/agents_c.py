@@ -111,6 +111,10 @@ def _apply_thinking_capture_patches(
                 thinking_tokens = (
                     getattr(coder._last_completion_usage, "reasoning_tokens", 0) or 0
                 )
+                if not thinking_tokens:
+                    _od = getattr(coder._last_completion_usage, "output_tokens_details", None)
+                    if _od and hasattr(_od, "get"):
+                        thinking_tokens = _od.get("thinking_tokens", 0) or 0
             if coder._last_completion_usage:
                 getattr(coder._last_completion_usage, "prompt_tokens", 0) or 0
                 getattr(coder._last_completion_usage, "completion_tokens", 0) or 0

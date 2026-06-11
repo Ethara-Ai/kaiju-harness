@@ -428,6 +428,14 @@ def _apply_thinking_capture_patches(
                     )
                     if details and hasattr(details, "get"):
                         thinking_tokens = details.get("reasoning_tokens", 0) or 0
+                if not thinking_tokens:
+                    _od = getattr(
+                        coder._last_completion_usage,
+                        "output_tokens_details",
+                        None,
+                    )
+                    if _od and hasattr(_od, "get"):
+                        thinking_tokens = _od.get("thinking_tokens", 0) or 0
 
             from datetime import datetime, timezone
             _model_name = getattr(getattr(coder, "main_model", None), "name", "") or ""
@@ -473,6 +481,18 @@ def _apply_thinking_capture_patches(
             coder._snapshot_cache_write_tokens = (
                 getattr(usage, "cache_creation_input_tokens", 0) or 0
             )
+            _cache_creation = getattr(usage, "cache_creation", None)
+            if _cache_creation is not None:
+                _get = getattr(_cache_creation, "get", None)
+                if callable(_get):
+                    coder._snapshot_cache_5m_tokens = _get("ephemeral_5m_input_tokens", 0) or 0
+                    coder._snapshot_cache_1h_tokens = _get("ephemeral_1h_input_tokens", 0) or 0
+                else:
+                    coder._snapshot_cache_5m_tokens = getattr(_cache_creation, "ephemeral_5m_input_tokens", 0) or 0
+                    coder._snapshot_cache_1h_tokens = getattr(_cache_creation, "ephemeral_1h_input_tokens", 0) or 0
+            else:
+                coder._snapshot_cache_5m_tokens = 0
+                coder._snapshot_cache_1h_tokens = 0
             try:
                 from agent.llm_cost_capture import _compute_cost
                 model_name = getattr(coder, "main_model", None)
