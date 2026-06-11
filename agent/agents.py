@@ -45,6 +45,59 @@ def _patch_litellm_output_config_passthrough() -> None:
 
 _patch_litellm_output_config_passthrough()
 
+
+def _patch_litellm_completion_with_headroom() -> None:
+    """Compress outgoing litellm requests via Headroom before they reach a provider.
+
+    Wraps ``litellm.completion`` (the sync entrypoint Aider uses) so every
+    request from the kaiju agent flows through Headroom prompt compression.
+    Activation is gated by ``KAIJU_HEADROOM_ENABLED`` (read live, default ON)
+    and the wrapper is best-effort: any compression failure falls through to
+    the original messages so a provider call NEVER fails because of the
+    integration. Mirrors the shape of
+    ``_patch_litellm_output_config_passthrough`` above so reviewers can read
+    the two patches side-by-side. Idempotent: re-import is safe.
+    """
+    try:
+        import litellm  # type: ignore
+    except ImportError:
+        return
+    if getattr(litellm, "_kaiju_headroom_completion_patched", False):
+        return
+    try:
+        from agent.headroom_util import (
+            headroom_enabled,
+            maybe_compress_messages,
+            record_stats,
+        )
+    except Exception:
+        return
+
+    _orig_completion = litellm.completion
+
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        msgs = kwargs.get("messages")
+        if headroom_enabled() and isinstance(msgs, list) and msgs:
+            try:
+                new_msgs, stats = maybe_compress_messages(
+                    msgs,
+                    model=str(kwargs.get("model") or ""),
+                    kind="aider_call",
+                )
+                if stats:
+                    record_stats(stats)
+                kwargs["messages"] = new_msgs
+            except Exception:
+                # belt-and-suspenders: never let the patch fail the call
+                pass
+        return _orig_completion(*args, **kwargs)
+
+    litellm.completion = _wrapped
+    litellm._kaiju_headroom_completion_patched = True
+
+
+_patch_litellm_completion_with_headroom()
+
 _logger = logging.getLogger(__name__)
 
 

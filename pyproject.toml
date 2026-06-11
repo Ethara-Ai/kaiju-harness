@@ -32,6 +32,7 @@ dependencies = [
     "google-cloud-aiplatform>=1.156.0",
     "google-genai>=2.8.0",
     "google-auth>=2.53.0",
+    "headroom-ai>=0.24,<0.25",
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",

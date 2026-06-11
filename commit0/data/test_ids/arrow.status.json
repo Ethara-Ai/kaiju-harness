@@ -1,0 +1,14 @@
+{
+  "name": "arrow",
+  "repo_dir": "repos/arrow",
+  "reference_commit": null,
+  "python_version": "3.9",
+  "test_dir": "tests",
+  "status": "ok",
+  "test_count": 1902,
+  "bz2_written": true,
+  "failing_module": null,
+  "stderr_snippet": "",
+  "timestamp": "2026-06-11T13:28:36Z",
+  "_schema": "kaiju-test-id-status/1"
+}
