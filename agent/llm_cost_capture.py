@@ -66,8 +66,6 @@ class LlmCallRecord:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     thinking_tokens: int = 0
-    cache_write_5m_tokens: int = 0
-    cache_write_1h_tokens: int = 0
     cost_usd: float = 0.0
     duration_s: float = 0.0
     timestamp: str = ""
@@ -91,8 +89,6 @@ class LlmCallRecord:
         else:
             base["cache_read_tokens"] = self.cache_read_tokens
             base["cache_write_tokens"] = self.cache_write_tokens
-            base["cache_write_5m_tokens"] = self.cache_write_5m_tokens
-            base["cache_write_1h_tokens"] = self.cache_write_1h_tokens
         return base
 
 
@@ -133,8 +129,6 @@ class LlmCallLog:
                 else:
                     base["cache_read_tokens"] = 0
                     base["cache_write_tokens"] = 0
-                    base["cache_write_5m_tokens"] = 0
-                    base["cache_write_1h_tokens"] = 0
                 out[c.source] = base
             b = out[c.source]
             b["calls"] += 1
@@ -147,8 +141,6 @@ class LlmCallLog:
             else:
                 b["cache_read_tokens"] = b.get("cache_read_tokens", 0) + c.cache_read_tokens
                 b["cache_write_tokens"] = b.get("cache_write_tokens", 0) + c.cache_write_tokens
-                b["cache_write_5m_tokens"] = b.get("cache_write_5m_tokens", 0) + c.cache_write_5m_tokens
-                b["cache_write_1h_tokens"] = b.get("cache_write_1h_tokens", 0) + c.cache_write_1h_tokens
         return out
 
     def grand_totals(self) -> dict[str, Any]:
@@ -165,8 +157,6 @@ class LlmCallLog:
         else:
             out["cache_read_tokens"] = sum(c.cache_read_tokens for c in self.calls)
             out["cache_write_tokens"] = sum(c.cache_write_tokens for c in self.calls)
-            out["cache_write_5m_tokens"] = sum(c.cache_write_5m_tokens for c in self.calls)
-            out["cache_write_1h_tokens"] = sum(c.cache_write_1h_tokens for c in self.calls)
         return out
 
 
@@ -495,12 +485,6 @@ def _record_call(
             _od = getattr(usage, "output_tokens_details", None)
             if _od is not None:
                 thinking_t = _extract_int(_od, "thinking_tokens")
-        cache_5m_t = 0
-        cache_1h_t = 0
-        _cc = getattr(usage, "cache_creation", None)
-        if _cc is not None:
-            cache_5m_t = _extract_int(_cc, "ephemeral_5m_input_tokens")
-            cache_1h_t = _extract_int(_cc, "ephemeral_1h_input_tokens")
 
         computed_cost = _compute_cost(model, prompt_t, completion_t, cache_r, cache_w)
         if computed_cost > 0:
@@ -515,8 +499,7 @@ def _record_call(
                 cache_read_tokens=cache_r,
                 cache_write_tokens=cache_w,
                 thinking_tokens=thinking_t,
-                cache_write_5m_tokens=cache_5m_t,
-                cache_write_1h_tokens=cache_1h_t,
+
                 cost_usd=cost,
                 duration_s=duration,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -574,12 +557,6 @@ def _record_stream_chunk_usage(model: str, usage: Any) -> None:
             _od = getattr(usage, "output_tokens_details", None)
             if _od is not None:
                 thinking_t = _extract_int(_od, "thinking_tokens")
-        cache_5m_t = 0
-        cache_1h_t = 0
-        _cc = getattr(usage, "cache_creation", None)
-        if _cc is not None:
-            cache_5m_t = _extract_int(_cc, "ephemeral_5m_input_tokens")
-            cache_1h_t = _extract_int(_cc, "ephemeral_1h_input_tokens")
 
         dedup_key = f"call:{_normalize_model(model)}:{prompt_t}:{completion_t}:{cache_r}:{cache_w}"
         with _seen_lock:
@@ -597,8 +574,7 @@ def _record_stream_chunk_usage(model: str, usage: Any) -> None:
                 cache_read_tokens=cache_r,
                 cache_write_tokens=cache_w,
                 thinking_tokens=thinking_t,
-                cache_write_5m_tokens=cache_5m_t,
-                cache_write_1h_tokens=cache_1h_t,
+
                 cost_usd=cost,
                 duration_s=0.0,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -655,12 +631,6 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
             _od = getattr(usage, "output_tokens_details", None)
             if _od is not None:
                 thinking_t = _extract_int(_od, "thinking_tokens")
-        cache_5m_t = 0
-        cache_1h_t = 0
-        _cc = getattr(usage, "cache_creation", None)
-        if _cc is not None:
-            cache_5m_t = _extract_int(_cc, "ephemeral_5m_input_tokens")
-            cache_1h_t = _extract_int(_cc, "ephemeral_1h_input_tokens")
 
         dedup_key = f"call:{_normalize_model(model)}:{prompt_t}:{completion_t}:{cache_r}:{cache_w}"
         with _seen_lock:
@@ -680,8 +650,7 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
             prompt_tokens=prompt_t, completion_tokens=completion_t,
             cache_read_tokens=cache_r, cache_write_tokens=cache_w,
             thinking_tokens=thinking_t, cost_usd=cost,
-            cache_write_5m_tokens=cache_5m_t,
-            cache_write_1h_tokens=cache_1h_t,
+
             duration_s=duration_s,
             timestamp=datetime.now(timezone.utc).isoformat(),
             status="success",
