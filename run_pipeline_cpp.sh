@@ -67,6 +67,7 @@ Model presets:
   glm5     Bedrock GLM 5
   minimax  Bedrock MiniMax M2.5
   gpt54    OpenAI GPT-5.4
+  gpt55    OpenAI GPT-5.5 (reasoning_effort=high)
 
 Dataset examples:
   fmt_cpp              Uses fmt_cpp_dataset.json, repo_split=fmt_cpp
@@ -181,6 +182,11 @@ resolve_model() {
         gpt54)
             MODEL_NAME="openai/gpt-5.4"
             MODEL_SHORT="gpt-5.4"
+            CACHE_PROMPTS="false"
+            ;;
+        gpt55)
+            MODEL_NAME="openai/gpt-5.5-2026-04-23"
+            MODEL_SHORT="gpt-5.5"
             CACHE_PROMPTS="false"
             ;;
         *)

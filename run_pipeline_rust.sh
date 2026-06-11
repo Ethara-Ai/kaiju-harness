@@ -67,6 +67,7 @@ Model presets:
   glm5     Bedrock GLM 5
   minimax  Bedrock MiniMax M2.5
   gpt54    OpenAI GPT-5.4
+  gpt55    OpenAI GPT-5.5 (reasoning_effort=high)
 
 Dataset examples:
   uom_rust             Uses uom_rust_dataset.json, repo_split=uom_rust

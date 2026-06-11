@@ -43,7 +43,58 @@ def _patch_litellm_output_config_passthrough() -> None:
     cls._output_config_patched = True
 
 
+def _patch_litellm_responses_bridge_reasoning_capture() -> None:
+    """Recover OpenAI reasoning summaries that litellm's bridge silently drops.
+
+    litellm's responses-API bridge has a TODO in
+    ``completion_extras/litellm_responses_transformation/transformation.py``:
+    ``_handle_raw_dict_response_item`` returns ``(None, index)`` for any item
+    with ``type == "reasoning"``. OpenAI's Responses API returns reasoning items
+    as raw dicts (not SDK ``ResponseReasoningItem`` instances), so the
+    ``isinstance``-guarded extraction path never fires and summaries vanish.
+
+    This patch wraps the callback to (a) stash reasoning ``summary[].text`` on
+    the handler instance when a reasoning dict appears, then (b) attach it to
+    the next message-typed Choice's ``message.reasoning_content``.
+    """
+    try:
+        from litellm.completion_extras.litellm_responses_transformation.transformation import (
+            LiteLLMResponsesTransformationHandler,
+        )
+    except ImportError:
+        return
+    if getattr(LiteLLMResponsesTransformationHandler, "_reasoning_capture_patched", False):
+        return
+
+    _orig = LiteLLMResponsesTransformationHandler._handle_raw_dict_response_item
+
+    def _wrapped(self, item, index):
+        item_type = item.get("type") if isinstance(item, dict) else None
+        if item_type == "reasoning":
+            parts: list[str] = []
+            for s in (item.get("summary") or []) if isinstance(item, dict) else []:
+                t = s.get("text") if isinstance(s, dict) else getattr(s, "text", "")
+                if t:
+                    parts.append(t)
+            self._pending_reasoning_content = "\n\n".join(parts) if parts else None
+            return None, index
+        choice, new_index = _orig(self, item, index)
+        if item_type == "message" and choice is not None:
+            pending = getattr(self, "_pending_reasoning_content", None)
+            if pending and hasattr(choice, "message"):
+                try:
+                    choice.message.reasoning_content = pending
+                except Exception:
+                    pass
+                self._pending_reasoning_content = None
+        return choice, new_index
+
+    LiteLLMResponsesTransformationHandler._handle_raw_dict_response_item = _wrapped
+    LiteLLMResponsesTransformationHandler._reasoning_capture_patched = True
+
+
 _patch_litellm_output_config_passthrough()
+_patch_litellm_responses_bridge_reasoning_capture()
 
 _logger = logging.getLogger(__name__)
 
@@ -592,6 +643,12 @@ class AiderAgents(Agents):
         self.model_name = model_name
         self.cache_prompts = cache_prompts
 
+        # Required for reasoning_effort=high to also emit a summary through litellm's
+        # Responses-API bridge (litellm transformation.py: auto-summary is gated on this).
+        if model_name.startswith("openai/gpt-5"):
+            import litellm
+            litellm.reasoning_auto_summary = True
+
         # Check if API key is set for the model
         if "bedrock" in model_name:
             api_key = os.environ.get("AWS_ACCESS_KEY_ID", None) or os.environ.get(
@@ -614,10 +671,24 @@ class AiderAgents(Agents):
     def _load_model_settings() -> None:
         from aider import models as aider_models
         from pathlib import Path
+        import json
 
         settings_file = Path(".aider.model.settings.yml")
         if settings_file.exists():
             aider_models.register_models([str(settings_file)])
+
+        # Aider's register_litellm_models does NOT mutate litellm.model_cost,
+        # so the bridge's `mode: "responses"` check fails. Merge the JSON
+        # metadata into litellm.model_cost ourselves.
+        metadata_file = Path(".aider.model.metadata.json")
+        if metadata_file.exists():
+            import litellm
+            try:
+                meta = json.loads(metadata_file.read_text())
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+            for model, info in meta.items():
+                litellm.model_cost[model] = info
 
     def run(
         self,

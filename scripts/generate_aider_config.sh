@@ -262,6 +262,46 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
         "supports_max_reasoning_effort": True,
     }
 
+meta["openai/gpt-5.5-2026-04-23"] = {
+    "max_input_tokens": 1050000,
+    "max_output_tokens": 128000,
+    "max_tokens": 128000,
+    "mode": "responses",
+    "litellm_provider": "openai",
+    "input_cost_per_token": 5e-6,
+    "input_cost_per_token_above_272k_tokens": 1e-5,
+    "input_cost_per_token_flex": 2.5e-6,
+    "input_cost_per_token_batches": 2.5e-6,
+    "input_cost_per_token_priority": 1e-5,
+    "output_cost_per_token": 3e-5,
+    "output_cost_per_token_above_272k_tokens": 4.5e-5,
+    "output_cost_per_token_flex": 1.5e-5,
+    "output_cost_per_token_batches": 1.5e-5,
+    "output_cost_per_token_priority": 6e-5,
+    "cache_read_input_token_cost": 5e-7,
+    "cache_read_input_token_cost_above_272k_tokens": 1e-6,
+    "cache_read_input_token_cost_flex": 2.5e-7,
+    "cache_read_input_token_cost_priority": 1e-6,
+    "supported_endpoints": ["/v1/chat/completions", "/v1/batch", "/v1/responses"],
+    "supported_modalities": ["text", "image"],
+    "supported_output_modalities": ["text"],
+    "supports_function_calling": True,
+    "supports_native_streaming": True,
+    "supports_parallel_function_calling": True,
+    "supports_pdf_input": True,
+    "supports_prompt_caching": True,
+    "supports_reasoning": True,
+    "supports_response_schema": True,
+    "supports_system_messages": True,
+    "supports_tool_choice": True,
+    "supports_service_tier": True,
+    "supports_vision": True,
+    "supports_web_search": True,
+    "supports_none_reasoning_effort": True,
+    "supports_xhigh_reasoning_effort": True,
+    "supports_minimal_reasoning_effort": False,
+}
+
 print(json.dumps(meta, indent=2))
 PYEOF
 
@@ -409,6 +449,19 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
     thinking:
       type: adaptive
       display: summarized""")
+
+if os.environ.get("OPENAI_API_KEY", "").strip():
+    out.append("""\
+- name: openai/gpt-5.5-2026-04-23
+  edit_format: diff
+  use_repo_map: false
+  examples_as_sys_msg: false
+  use_temperature: 1.0
+  cache_control: false
+  streaming: false
+  extra_params:
+    reasoning_effort: high
+    num_retries: 3""")
 
 print("\n\n".join(out))
 PYEOF

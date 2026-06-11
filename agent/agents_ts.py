@@ -113,6 +113,7 @@ class TsAiderAgents(AiderAgents):
                 test_cmd=test_cmd,
                 io=io,
                 cache_prompts=self.cache_prompts,
+                detect_urls=False,
             )
             coder.max_reflections = self.max_iteration
             coder.stream = True

@@ -65,6 +65,12 @@ resolve_model() {
             CACHE_PROMPTS="false"
             return 0
             ;;
+        gpt55)
+            MODEL_NAME="openai/gpt-5.5-2026-04-23"
+            MODEL_SHORT="gpt-5.5"
+            CACHE_PROMPTS="false"
+            return 0
+            ;;
         gemini|gemini31|gemini-3.1-pro)
             MODEL_NAME="vertex_ai/gemini-3.1-pro-preview"
             MODEL_SHORT="gemini-3.1-pro"

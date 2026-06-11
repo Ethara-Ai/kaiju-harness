@@ -55,6 +55,14 @@ Required:
   --model    <preset|id>   Model preset or full model ID
   --dataset  <name|path>   Dataset name or path to JSON file
 
+Model presets:
+  opus     Bedrock Claude Opus 4.6
+  kimi     Bedrock Kimi K2.5
+  glm5     Bedrock GLM 5
+  minimax  Bedrock MiniMax M2.5
+  gpt54    OpenAI GPT-5.4
+  gpt55    OpenAI GPT-5.5 (reasoning_effort=high)
+
 Options:
   --branch         <name>    Override auto-generated branch name
   --repo-split     <name>    Override repo_split

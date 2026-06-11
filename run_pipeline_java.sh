@@ -71,6 +71,7 @@ Model presets:
   glm5     Bedrock GLM 5
   minimax  Bedrock MiniMax M2.5
   gpt54    OpenAI GPT-5.4
+  gpt55    OpenAI GPT-5.5 (reasoning_effort=high)
   nova-premier  Bedrock Nova Premier
   nova-lite     Bedrock Nova 2 Lite
 
