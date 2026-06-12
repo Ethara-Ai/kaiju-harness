@@ -303,14 +303,16 @@ def _load_pricing(model: str) -> dict[str, float]:
 
 
 def _compute_cost(model: str, p_tok: int, c_tok: int, cr_tok: int, cw_tok: int) -> float:
-    """Compute cost from token counts, correcting for litellm's cache-in-input folding.
+    """Compute cost from token counts.
 
-    Why: litellm's bedrock _transform_usage adds cache_read + cache_write into
-    prompt_tokens to match OpenAI's wire shape. Billing them at the regular
-    input rate then again at cache_read/cache_write rates double-counts. The
-    canonical Bedrock-billed input is prompt_tokens minus the cache portions.
+    Bedrock's _transform_usage folds cache_read + cache_write into prompt_tokens.
+    Subtract them to avoid double-billing. All other providers (Anthropic, Vertex AI
+    Anthropic) return prompt_tokens as fresh-only input; subtracting would undercount.
     """
-    regular_input = max(0, p_tok - cr_tok - cw_tok)
+    if model.startswith("bedrock/"):
+        regular_input = max(0, p_tok - cr_tok - cw_tok)
+    else:
+        regular_input = p_tok
     pr = _load_pricing(model)
     return (
         regular_input * pr["input"]

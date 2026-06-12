@@ -118,7 +118,7 @@ resolve_model() {
             MODEL_NAME="$arg"
             MODEL_SHORT=$(echo "$arg" | sed 's|.*/||' | tr -dc 'a-zA-Z0-9._-' | cut -c1-20)
             [[ -z "$MODEL_SHORT" ]] && MODEL_SHORT="custom"
-            if [[ "$arg" == bedrock/*claude* || "$arg" == bedrock/*anthropic* || "$arg" == anthropic/*claude* || "$arg" == anthropic/* ]]; then
+            if [[ "$arg" == bedrock/*claude* || "$arg" == bedrock/*anthropic* || "$arg" == anthropic/*claude* || "$arg" == anthropic/* || "$arg" == vertex_ai/*claude* || "$arg" == vertex_ai_beta/*claude* ]]; then
                 CACHE_PROMPTS="true"
             else
                 CACHE_PROMPTS="false"
@@ -170,11 +170,23 @@ resolve_model() {
 preflight_model_api() {
     log "  Probing model API: ${MODEL_NAME} ..."
 
-    if [[ "$MODEL_NAME" == vertex_ai/* ]]; then
-        if [[ -z "${VERTEX_AI_API_KEY:-}" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
-            echo "ERROR: VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS required for ${MODEL_NAME}" >&2
-            echo "       Add one to .env (see .env.example)." >&2
-            exit 2
+    if [[ "$MODEL_NAME" == vertex_ai/* || "$MODEL_NAME" == vertex_ai_beta/* ]]; then
+        if [[ "$MODEL_NAME" == vertex_ai/*gemini* || "$MODEL_NAME" == vertex_ai_beta/*gemini* ]]; then
+            # Gemini models: VERTEX_AI_API_KEY (Gemini Studio key) or ADC are both valid
+            if [[ -z "${VERTEX_AI_API_KEY:-}" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+                echo "ERROR: VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS required for ${MODEL_NAME}" >&2
+                echo "       Add one to .env (see .env.example)." >&2
+                exit 2
+            fi
+        else
+            # Non-Gemini Vertex AI models (e.g. claude-opus-4-7): litellm uses GCP ADC auth only.
+            # VERTEX_AI_API_KEY is a Gemini Studio key and is NOT injected for these models.
+            if [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+                echo "ERROR: GOOGLE_APPLICATION_CREDENTIALS required for ${MODEL_NAME}" >&2
+                echo "       VERTEX_AI_API_KEY is a Gemini Studio key and does not authenticate Vertex AI Claude models." >&2
+                echo "       Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json in .env." >&2
+                exit 2
+            fi
         fi
         if [[ -z "${VERTEXAI_LOCATION:-}" ]]; then
             echo "ERROR: VERTEXAI_LOCATION not set for ${MODEL_NAME}" >&2
