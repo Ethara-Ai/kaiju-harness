@@ -222,7 +222,7 @@ completion_kwargs = {
     "max_tokens": 64,
     "timeout": 60,
 }
-if m.name.startswith("vertex_ai/"):
+if m.name.startswith("vertex_ai/gemini"):
     _vk = os.environ.get("VERTEX_AI_API_KEY", "").strip()
     if _vk:
         completion_kwargs["gemini_api_key"] = _vk
