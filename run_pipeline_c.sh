@@ -501,6 +501,66 @@ init_results() {
 EOF
 }
 
+extract_all_stage_costs() {
+    local log_dir="$1"
+    if [[ ! -d "$log_dir" ]]; then
+        echo "0.0000"
+        return
+    fi
+    local err_file="${log_dir}/cost_extract.err"
+    [[ -w "$log_dir" ]] || err_file="/dev/null"
+    local result
+    result=$("$VENV_PYTHON" - "$log_dir" <<'PYEOF' 2>>"$err_file"
+import json, os, re, sys
+log_dir = sys.argv[1]
+
+oj_total = 0.0
+oj_count = 0
+for root, _d, files in os.walk(log_dir):
+    if "output.json" not in files:
+        continue
+    fpath = os.path.join(root, "output.json")
+    try:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+        c = (data.get("metrics") or {}).get("total_cost")
+        if c is not None:
+            oj_total += float(c)
+            oj_count += 1
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+if oj_count > 0:
+    print(f"{oj_total:.4f}")
+    sys.exit(0)
+
+COST_RE = re.compile(r"Cost:\s+\$\d+\.\d+\s+(?:message|request),\s+\$(\d+\.\d+)\s+session")
+fallback_total = 0.0
+for root, _d, files in os.walk(log_dir):
+    if "aider.log" not in files:
+        continue
+    fpath = os.path.join(root, "aider.log")
+    try:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            last_match = None
+            for line in f:
+                m = COST_RE.search(line)
+                if m:
+                    last_match = m
+            if last_match:
+                fallback_total += float(last_match.group(1))
+    except (OSError, ValueError):
+        pass
+print(f"{fallback_total:.4f}")
+PYEOF
+) || true
+    if [[ "$result" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "$result"
+    else
+        echo "0.0000"
+    fi
+}
+
 record_stage() {
     local stage_label="$1"
     local cost_usd="$2"
@@ -536,7 +596,7 @@ stage_1_draft() {
     run_agent_stage "stage1_draft" "$AGENT_CONFIG"
     run_evaluate "stage1_draft"
     parse_eval_output "$LOG_BASE/stage1_draft_eval.txt"
-    record_stage "stage1_draft" 0 "$PASS_RATE" "$COMPILE_ERRORS"
+    record_stage "stage1_draft" "$(extract_all_stage_costs "$LOG_BASE/stage1_draft")" "$PASS_RATE" "$COMPILE_ERRORS"
     log "Stage 1 complete: pass_rate=$PASS_RATE compile_errors=$COMPILE_ERRORS"
 }
 
@@ -546,7 +606,7 @@ stage_2_lint_refine() {
     run_agent_stage "stage2_lint" "$AGENT_CONFIG"
     run_evaluate "stage2_lint"
     parse_eval_output "$LOG_BASE/stage2_lint_eval.txt"
-    record_stage "stage2_lint" 0 "$PASS_RATE" "$COMPILE_ERRORS"
+    record_stage "stage2_lint" "$(extract_all_stage_costs "$LOG_BASE/stage2_lint")" "$PASS_RATE" "$COMPILE_ERRORS"
     log "Stage 2 complete: pass_rate=$PASS_RATE compile_errors=$COMPILE_ERRORS"
 }
 
@@ -558,7 +618,7 @@ stage_3_test_refine() {
     run_agent_stage "stage3_test" "$AGENT_CONFIG"
     run_evaluate "stage3_test"
     parse_eval_output "$LOG_BASE/stage3_test_eval.txt"
-    record_stage "stage3_test" 0 "$PASS_RATE" "$COMPILE_ERRORS"
+    record_stage "stage3_test" "$(extract_all_stage_costs "$LOG_BASE/stage3_test")" "$PASS_RATE" "$COMPILE_ERRORS"
     log "Stage 3 complete: pass_rate=$PASS_RATE compile_errors=$COMPILE_ERRORS"
 }
 

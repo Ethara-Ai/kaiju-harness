@@ -830,7 +830,6 @@ parse_eval_output() {
 
 extract_all_stage_costs() {
     local log_dir="$1"
-    local model_name="${2:-}"
     if [[ ! -d "$log_dir" ]]; then
         echo "0.0000"
         return
@@ -838,58 +837,54 @@ extract_all_stage_costs() {
     local err_file="${log_dir}/cost_extract.err"
     [[ -w "$log_dir" ]] || err_file="/dev/null"
     local result
-    result=$("$VENV_PYTHON" - "$log_dir" "$model_name" <<'PYEOF' 2>>"$err_file"
-import os, re, sys
+    result=$("$VENV_PYTHON" - "$log_dir" <<'PYEOF' 2>>"$err_file"
+import json, os, re, sys
 log_dir = sys.argv[1]
-model_name = sys.argv[2] if len(sys.argv) > 2 else ""
+
+# Truth source: output.json.metrics.total_cost (written by llm_cost_capture).
+# Includes aider main loop + summarizer + commit_msg + cache writes.
+oj_total = 0.0
+oj_count = 0
+for root, _d, files in os.walk(log_dir):
+    if "output.json" not in files:
+        continue
+    fpath = os.path.join(root, "output.json")
+    try:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+        c = (data.get("metrics") or {}).get("total_cost")
+        if c is not None:
+            oj_total += float(c)
+            oj_count += 1
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+if oj_count > 0:
+    print(f"{oj_total:.4f}")
+    sys.exit(0)
+
+# Fallback (no output.json present): aider.log session regex.
+# Only counts aider's main edit loop; misses summarizer + commit_msg + cache.
 COST_RE = re.compile(r"Cost:\s+\$\d+\.\d+\s+(?:message|request),\s+\$(\d+\.\d+)\s+session")
-TOKEN_RE = re.compile(r"Tokens:\s+([\d.]+)(k?)\s+sent,\s+([\d.]+)(k?)\s+received")
-total_cost = 0.0
-total_sent = 0
-total_recv = 0
-found_cost_line = False
-try:
-    for root, _dirs, files in os.walk(log_dir):
-        for fname in files:
-            if fname != "aider.log":
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                with open(fpath, encoding="utf-8", errors="replace") as f:
-                    last_match = None
-                    for line in f:
-                        m = COST_RE.search(line)
-                        if m:
-                            last_match = m
-                            found_cost_line = True
-                        elif "Tokens:" in line:
-                            tm = TOKEN_RE.search(line)
-                            if tm:
-                                s = float(tm.group(1)) * (1000 if tm.group(2) == "k" else 1)
-                                r = float(tm.group(3)) * (1000 if tm.group(4) == "k" else 1)
-                                total_sent += int(s)
-                                total_recv += int(r)
-                    if last_match:
-                        total_cost += float(last_match.group(1))
-            except (OSError, ValueError):
-                pass
-except Exception as exc:
-    print(f"cost_extract: {exc}", file=sys.stderr)
-if found_cost_line or total_cost > 0:
-    print(f"{total_cost:.4f}")
-elif (total_sent > 0 or total_recv > 0) and model_name:
-    from agent.agents import _resolve_pricing, register_bedrock_arn_pricing
-    register_bedrock_arn_pricing(model_name)
-    pricing = _resolve_pricing(model_name)
-    if pricing:
-        cost = total_sent * pricing.get("input_cost_per_token", 0) + total_recv * pricing.get("output_cost_per_token", 0)
-        print(f"{cost:.4f}")
-    else:
-        print("0.0000")
-else:
-    print("0.0000")
+fallback_total = 0.0
+for root, _d, files in os.walk(log_dir):
+    if "aider.log" not in files:
+        continue
+    fpath = os.path.join(root, "aider.log")
+    try:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            last_match = None
+            for line in f:
+                m = COST_RE.search(line)
+                if m:
+                    last_match = m
+            if last_match:
+                fallback_total += float(last_match.group(1))
+    except (OSError, ValueError):
+        pass
+print(f"{fallback_total:.4f}")
 PYEOF
-    ) || true
+) || true
     if [[ "$result" =~ ^[0-9]+\.[0-9]+$ ]]; then
         echo "$result"
     else
