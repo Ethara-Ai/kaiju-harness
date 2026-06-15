@@ -302,6 +302,11 @@ preflight() {
             echo "Error: OPENAI_API_KEY not set (required for model: $MODEL_NAME)"
             errors=$((errors + 1))
         fi
+    elif [[ "$MODEL_NAME" == vertex_ai/*claude* ]] || [[ "$MODEL_NAME" == vertex_ai_beta/*claude* ]]; then
+        if [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+            echo "Error: GOOGLE_APPLICATION_CREDENTIALS not set (required for Vertex AI Claude model: $MODEL_NAME)"
+            errors=$((errors + 1))
+        fi
     elif [[ "$MODEL_NAME" == *claude* ]] && [[ "$MODEL_NAME" != bedrock/* ]]; then
         if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
             echo "Error: ANTHROPIC_API_KEY not set (required for model: $MODEL_NAME)"
