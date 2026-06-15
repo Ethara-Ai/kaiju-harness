@@ -272,6 +272,35 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
         "supports_xhigh_reasoning_effort": True,
         "supports_max_reasoning_effort": True,
     }
+    meta["vertex_ai/claude-sonnet-4-6"] = {
+        "cache_creation_input_token_cost": 3.75e-6,
+        "cache_read_input_token_cost": 3e-7,
+        "input_cost_per_token": 3e-6,
+        "litellm_provider": "vertex_ai-anthropic_models",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "edit_format": "diff",
+        "output_cost_per_token": 1.5e-5,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01,
+        },
+        "supports_adaptive_thinking": True,
+        "supports_assistant_prefill": False,
+        "supports_computer_use": True,
+        "supports_function_calling": True,
+        "supports_pdf_input": True,
+        "supports_prompt_caching": True,
+        "supports_reasoning": True,
+        "supports_response_schema": True,
+        "supports_sampling_params": False,
+        "supports_tool_choice": True,
+        "supports_vision": True,
+        "supports_max_reasoning_effort": True,
+    }
 
 meta["openai/gpt-5.5-2026-04-23"] = {
     "max_input_tokens": 1050000,
@@ -452,6 +481,21 @@ if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APP
       display: summarized""")
     out.append("""\
 - name: vertex_ai/claude-opus-4-8
+  edit_format: diff
+  use_repo_map: true
+  examples_as_sys_msg: false
+  use_temperature: false
+  cache_control: true
+  overeager: false
+  reasoning_tag: thinking
+  remove_reasoning: thinking
+  extra_params:
+    max_tokens: 128000
+    thinking:
+      type: adaptive
+      display: summarized""")
+    out.append("""\
+- name: vertex_ai/claude-sonnet-4-6
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false

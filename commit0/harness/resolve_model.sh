@@ -113,6 +113,12 @@ resolve_model() {
             CACHE_PROMPTS="true"
             return 0
             ;;
+        sonnet46v|sonnet46vertex|claude-sonnet-4-6-vertex)
+            MODEL_NAME="vertex_ai/claude-sonnet-4-6"
+            MODEL_SHORT="claude-sonnet-4.6"
+            CACHE_PROMPTS="true"
+            return 0
+            ;;
         *)
             # Pass-through: caller supplied a full model string (openai/..., bedrock/..., bedrock/converse/arn:...)
             MODEL_NAME="$arg"
