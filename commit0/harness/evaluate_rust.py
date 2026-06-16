@@ -6,6 +6,7 @@ cargo/nextest output for result aggregation.
 
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterator, Union
 
@@ -29,6 +30,13 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Cargo test summary line: ``test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured...``
+# Robust to format drift via lookahead-style counts; only requires the three counters appear in order.
+_TEST_SUMMARY_RE = re.compile(
+    r"test\s+result:.*?(?P<passed>\d+)\s+passed.*?(?P<failed>\d+)\s+failed.*?(?P<ignored>\d+)\s+ignored",
+    re.IGNORECASE,
+)
 
 
 def _aggregate_rust_results(log_dir: str, name: str, out: list) -> None:
@@ -95,26 +103,21 @@ def _aggregate_rust_results(log_dir: str, name: str, out: list) -> None:
     num_ignored = 0
     found_summary = False
     for line in content.splitlines():
-        line = line.strip()
-        if line.startswith("test result:"):
-            found_summary = True
-            parts = line.split()
-            for i, part in enumerate(parts):
-                if part == "passed;":
-                    try:
-                        num_passed += int(parts[i - 1])
-                    except (ValueError, IndexError):
-                        pass
-                elif part == "failed;":
-                    try:
-                        num_failed += int(parts[i - 1])
-                    except (ValueError, IndexError):
-                        pass
-                elif part == "ignored;":
-                    try:
-                        num_ignored += int(parts[i - 1])
-                    except (ValueError, IndexError):
-                        pass
+        match = _TEST_SUMMARY_RE.search(line)
+        if not match:
+            continue
+        found_summary = True
+        try:
+            num_passed += int(match.group("passed"))
+            num_failed += int(match.group("failed"))
+            num_ignored += int(match.group("ignored"))
+        except (ValueError, IndexError) as exc:
+            logger.warning(
+                "Malformed test result line in %s: %r (%s)",
+                test_output_file,
+                line[:200],
+                exc,
+            )
 
     num_tests = num_passed + num_failed + num_ignored
     passed_rate = num_passed / num_tests if num_tests > 0 else 0.0
@@ -163,35 +166,57 @@ def main(
         repo_split,
     )
 
-    rust_repo_names = set()
-    if repo_split == "all":
-        for repos in split_dict.values():
-            rust_repo_names.update(r.split("/")[-1] for r in repos)
-    elif repo_split in split_dict:
-        rust_repo_names = {r.split("/")[-1] for r in split_dict[repo_split]}
+    # Resolve repo_split to a set of dataset repo names to evaluate.
+    #
+    # Semantics:
+    #   - 'all' + RUST_SPLIT populated  → union of curated splits, intersected with dataset
+    #   - 'all' + RUST_SPLIT empty      → every repo in the dataset (default for ad-hoc
+    #                                     local datasets where RUST_SPLIT isn't seeded)
+    #   - <curated-split-name>          → that curated subset, intersected with dataset
+    #   - <repo-name>                   → single repo, matched with hyphen/underscore
+    #                                     normalisation ('foo-bar' equivalent to 'foo_bar')
+    def _normalize(name: str) -> str:
+        return name.replace("-", "_")
 
-    repos = []
-    if repo_split == "all" or repo_split in split_dict:
-        repos = list(rust_repo_names)
+    dataset_repo_names = {ex["repo"].split("/")[-1] for ex in dataset_list}
+
+    if repo_split == "all":
+        if split_dict:
+            curated = {r.split("/")[-1] for rs in split_dict.values() for r in rs}
+            rust_repo_names = dataset_repo_names & curated
+            if not rust_repo_names:
+                # Curated splits don't overlap this dataset (common for custom
+                # datasets registered with the local pipeline). Fall back to
+                # evaluating every entry.
+                rust_repo_names = dataset_repo_names
+        else:
+            # RUST_SPLIT is populated at runtime by dataset loaders; when empty
+            # (the default for ad-hoc datasets) every dataset entry is in-scope.
+            rust_repo_names = dataset_repo_names
+    elif repo_split in split_dict:
+        curated = {r.split("/")[-1] for r in split_dict[repo_split]}
+        rust_repo_names = dataset_repo_names & curated
     else:
-        repos = [repo_split]
+        # Treat repo_split as a single repo name; allow hyphen/underscore equivalence.
+        target = _normalize(repo_split)
+        rust_repo_names = {n for n in dataset_repo_names if _normalize(n) == target}
 
     triples = []
     log_dirs = []
     for example in dataset_list:
         repo_name = example["repo"].split("/")[-1]
-        if repo_split == "all":
-            if repo_name not in rust_repo_names:
-                continue
-        elif repo_split in split_dict:
-            if repo_name not in rust_repo_names:
-                continue
-        else:
-            if repo_name.replace("-", "_") != repo_split.replace("-", "_"):
-                continue
+        if repo_name not in rust_repo_names:
+            continue
 
-        test_dir = example["test"]["test_dir"]
-        hashed_test_ids = get_hash_string(test_dir)
+        # Hash the SAME string we pass to run_rust_tests as test_ids — otherwise
+        # the writer (run_rust_tests) and the reader (this aggregator) compute
+        # different log-dir paths and we silently report '0/0 passed' for runs
+        # that actually wrote results. Previously evaluate_rust hashed
+        # example['test']['test_dir'] while run_rust_tests hashed the test_ids
+        # argument (always empty string), so 17/17 passing runs were reported as
+        # 0/0 because the aggregator read from the wrong directory.
+        test_ids = ""  # full suite; no per-test filter applied for Rust runs
+        hashed_test_ids = get_hash_string(test_ids)
         repo_branch = branch
         if repo_branch is None:
             git_path = os.path.join(base_dir, repo_name)

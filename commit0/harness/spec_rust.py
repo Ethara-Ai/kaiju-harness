@@ -68,16 +68,26 @@ class RustSpec(Spec):
             f"tests/ '**/tests/' benches/ '**/benches/' "
             f"Cargo.toml '**/Cargo.toml' Cargo.lock '**/Cargo.lock' "
             f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
-            f"2>/dev/null || true"
+            f"2>revert_stderr.log; revert_rc=$?; "
+            f"if [ $revert_rc -ne 0 ]; then "
+            f"  echo \"WARN: test-path revert returned $revert_rc (see revert_stderr.log)\" >&2; "
+            f"fi"
         )
 
         return [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
             f"if [ -s {diff_path} ]; then",
-            f"  git apply -v {diff_path}",
-            "  if [ $? -ne 0 ]; then",
+            f"  git apply --allow-empty --3way -v {diff_path} 2>git_apply_stderr.log",
+            "  apply_rc=$?",
+            "  if [ $apply_rc -ne 0 ]; then",
+            f"    echo \"INFO: --3way apply failed (rc=$apply_rc); retrying with plain git apply\" >&2",
+            f"    git apply --allow-empty -v {diff_path} 2>>git_apply_stderr.log",
+            "    apply_rc=$?",
+            "  fi",
+            "  if [ $apply_rc -ne 0 ]; then",
             '    echo "PATCH APPLY FAILED" > test_output.txt',
+            '    cat git_apply_stderr.log >> test_output.txt 2>/dev/null || true',
             "    echo 1 > cargo_test_exit_code.txt",
             "    exit 0",
             "  fi",

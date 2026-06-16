@@ -200,11 +200,52 @@ def get_tests(
         ...,
         help="Rust repo name",
     ),
+    base_dir: str = typer.Option(
+        "repos",
+        help="Base directory where Rust repos are cloned (default: repos)",
+    ),
 ) -> None:
-    """Get test IDs for a Rust repository."""
-    raise NotImplementedError(
-        "get-tests is not yet implemented for Rust. "
-        "Use the agent-side get_rust_test_ids() from agent.agent_utils_rust instead."
+    """Get test IDs for a Rust repository via ``cargo test --list``.
+
+    Calls the retry-with-backoff function in ``agent.agent_utils_rust`` and
+    persists the result to ``commit0/data/rust_test_ids/<repo>.json`` so
+    subsequent pipeline runs (and the agent) can read from cache instead of
+    re-running cargo.
+    """
+    import json
+    from agent.agent_utils_rust import get_rust_test_ids
+    from commit0.harness.constants_rust import RUST_TEST_IDS_DIR
+
+    repo_path = os.path.join(base_dir, repo_name)
+    if not os.path.isdir(repo_path):
+        raise typer.BadParameter(
+            f"Repo path not found: {repo_path!r}. Run 'commit0 setup' first."
+        )
+
+    ids = get_rust_test_ids(repo_path)
+    if not ids:
+        typer.echo(
+            f"WARNING: no test IDs collected for {repo_name!r}. "
+            "Check that the Rust toolchain can build the repo (cargo --list "
+            "may have failed). Run 'commit0 health-check' to diagnose.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    RUST_TEST_IDS_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path_json = RUST_TEST_IDS_DIR / f"{repo_name}.json"
+    cache_path_bz2 = RUST_TEST_IDS_DIR / f"{repo_name}.bz2"
+
+    # Write both .json (human-readable / debug) AND .bz2 (canonical cache
+    # format used by the other harness languages). The agent's loader at
+    # agent_utils_rust.get_rust_test_ids tries .json first then falls back to
+    # .bz2 — keeping both keeps the cache resilient to either being lost.
+    import bz2 as _bz2
+    cache_path_json.write_text(json.dumps(ids, indent=2))
+    cache_path_bz2.write_bytes(_bz2.compress("\n".join(ids).encode("utf-8")))
+    typer.echo(
+        f"Collected {len(ids)} test IDs → "
+        f"{cache_path_json.name} + {cache_path_bz2.name}"
     )
 
 

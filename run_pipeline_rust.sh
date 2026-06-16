@@ -34,6 +34,9 @@ MAX_ITERATION=3
 # Rust pipeline — spec info enabled by default (use --no-spec-info to disable)
 LANGUAGE="rust"
 USE_SPEC_INFO="true"
+USE_UNIT_TESTS_INFO="true"
+REPO_MAP_TOKENS=1024
+STRIP_AUX_DOCS="false"
 
 # ============================================================
 # Argument Parsing
@@ -84,6 +87,9 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
   --no-spec-info             Disable spec/paper injection (default: enabled)
+  --no-unit-tests-info       Disable inline-test injection into prompt (default: enabled; Stage 1 only)
+  --no-repo-map              Disable aider's internal repo-map (default: enabled, map_tokens=1024)
+  --strip-aux-docs           Hide README/CHANGELOG/HISTORY/etc. from agent's view (default: keep)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
@@ -104,6 +110,9 @@ while [[ $# -gt 0 ]]; do
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --no-spec-info) USE_SPEC_INFO="false"; shift ;;
+        --no-unit-tests-info) USE_UNIT_TESTS_INFO="false"; shift ;;
+        --no-repo-map) REPO_MAP_TOKENS=0; shift ;;
+        --strip-aux-docs) STRIP_AUX_DOCS="true"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -296,13 +305,46 @@ set_sample_vars 1
 preflight() {
     local errors=0
 
+    # Auto-detect Docker CLI on macOS where Docker Desktop ships the binary at
+    # /Applications/Docker.app/Contents/Resources/bin/docker but the symlink
+    # in /usr/local/bin can become stale (points to an unmounted DMG path).
+    # Without this, eval + build steps fail with 'docker: command not found'
+    # even though Docker Desktop is fully installed and running.
+    if ! command -v docker &>/dev/null; then
+        local _docker_app_bin="/Applications/Docker.app/Contents/Resources/bin"
+        if [[ -x "$_docker_app_bin/docker" ]]; then
+            export PATH="$_docker_app_bin:$PATH"
+            echo "  Docker CLI not on PATH; auto-resolved to $_docker_app_bin/docker"
+        fi
+    fi
+
     # timeout is used for eval and API probe (not for agent runs — watchdog handles those)
-    for cmd in jq bc timeout; do
+    # Item 10: cargo+rustc on PATH so toolchain issues surface in preflight, not mid-stage.
+    for cmd in jq bc timeout cargo rustc docker; do
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: Required command '$cmd' not found"
             errors=$((errors + 1))
         fi
     done
+
+    # Item 10: probe toolchain versions; surface mismatch before agent runs.
+    if command -v cargo &>/dev/null && command -v rustc &>/dev/null; then
+        local cargo_v rustc_v
+        cargo_v=$(cargo --version 2>/dev/null | awk '{print $2}')
+        rustc_v=$(rustc --version 2>/dev/null | awk '{print $2}')
+        if [[ -z "$cargo_v" || -z "$rustc_v" ]]; then
+            echo "Error: cargo/rustc found but --version probe failed (cargo='$cargo_v' rustc='$rustc_v')"
+            errors=$((errors + 1))
+        else
+            echo "  Toolchain: rustc $rustc_v, cargo $cargo_v"
+            if [[ -n "${RUST_VERSION:-}" ]] && [[ "$RUST_VERSION" != "stable" ]]; then
+                if [[ "$rustc_v" != "$RUST_VERSION"* ]]; then
+                    echo "Warning: rustc version '$rustc_v' does not match pinned RUST_VERSION='$RUST_VERSION'."
+                    echo "  Use 'rustup default $RUST_VERSION' for reproducible runs."
+                fi
+            fi
+        fi
+    fi
 
     if [[ ! -x "$VENV_PYTHON" ]]; then
         echo "Error: Python venv not found at $VENV_PYTHON"
@@ -431,7 +473,9 @@ ensure_spec_docs_rust() {
 
     log "Ensuring spec docs are available for all Rust repos..."
 
-    "$VENV_PYTHON" - "$DATASET_FILE" "$REPO_BASE" "$BASE_DIR" <<'PYEOF'
+    local ensure_log="${BASE_DIR}/logs/ensure_specs.log"
+    mkdir -p "$(dirname "$ensure_log")"
+    "$VENV_PYTHON" - "$DATASET_FILE" "$REPO_BASE" "$BASE_DIR" <<'PYEOF' | tee "$ensure_log"
 import json, os, sys, shutil
 from pathlib import Path
 
@@ -457,6 +501,8 @@ if not entries:
 
 specs_dir = os.path.join(base_dir, "specs_rust")
 os.makedirs(specs_dir, exist_ok=True)
+
+failed_repos = []  # tracks per-repo spec provisioning failures (Item 6)
 
 for entry in entries:
     repo = entry.get("repo", "")
@@ -516,15 +562,31 @@ for entry in entries:
                 print(f"  OK   {repo_name}: scraped and placed spec.pdf.bz2")
             else:
                 print(f"  WARN {repo_name}: scrape returned no output")
+                failed_repos.append(repo_name)
         except Exception as e:
             print(f"  WARN {repo_name}: scrape failed: {e}")
+            failed_repos.append(repo_name)
     else:
         print(f"  WARN {repo_name}: spec '{spec_ref}' not found in {specs_dir}")
+        failed_repos.append(repo_name)
+
+if failed_repos:
+    print(f"[ENSURE_SPECS_SUMMARY] failures={len(failed_repos)} repos={','.join(failed_repos)}")
+else:
+    print("[ENSURE_SPECS_SUMMARY] failures=0")
+
 
 PYEOF
-    local rc=$?
+    local rc=${PIPESTATUS[0]}
     if [[ $rc -ne 0 ]]; then
         log "  WARNING: Spec doc provisioning had errors (rc=$rc) — continuing anyway."
+    fi
+    # Surface per-repo failures from the Python summary line (Item 6)
+    local summary_line
+    summary_line=$(grep '\[ENSURE_SPECS_SUMMARY\]' "$ensure_log" 2>/dev/null | tail -n1 || true)
+    if [[ -n "$summary_line" ]] && ! echo "$summary_line" | grep -q 'failures=0'; then
+        log "  ⚠  Spec provisioning failures detected — see verify_spec_docs_rust for fatal gate."
+        log "  ${summary_line}"
     fi
 }
 
@@ -676,6 +738,8 @@ max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
+repo_map_tokens: ${REPO_MAP_TOKENS}
+strip_aux_docs: ${STRIP_AUX_DOCS}
 language: rust
 EOF
     log "  Wrote agent config: ${AGENT_CONFIG}"
@@ -713,10 +777,29 @@ watchdog_run() {
     if [[ "$_probe_mtime" -eq 0 ]] 2>/dev/null; then
         log "  WATCHDOG: WARNING — get_mtime returned 0 for /proc/self/status. File-activity detection may be non-functional."
         mtime_functional="false"
+        log "  WATCHDOG: Inactivity-timeout disabled; relying only on absolute wall-time cap."
+    fi
+
+    # Item 8 (hardened): when mtime probing is broken, tighten the absolute cap
+    # so a stalled agent cannot spin indefinitely. Floor is env-configurable via
+    # WATCHDOG_MTIME_FALLBACK_MIN_SECS (default 3600s = 1 hour).
+    if [[ "$mtime_functional" == "false" ]] && [[ "$absolute_max" -gt 0 ]]; then
+        local _orig_max="$absolute_max"
+        local _floor="${WATCHDOG_MTIME_FALLBACK_MIN_SECS:-3600}"
+        if ! [[ "$_floor" =~ ^[0-9]+$ ]] || [[ "$_floor" -lt 1 ]]; then
+            log "  WATCHDOG: WARNING — WATCHDOG_MTIME_FALLBACK_MIN_SECS='$_floor' invalid; using 3600s."
+            _floor=3600
+        fi
+        absolute_max=$(( absolute_max / 2 ))
+        if [[ "$absolute_max" -lt "$_floor" ]]; then
+            absolute_max="$_floor"
+        fi
+        log "  WATCHDOG: mtime non-functional — tightened absolute_max from ${_orig_max}s to ${absolute_max}s (floor=${_floor}s)."
     fi
 
     while kill -0 "$agent_pid" 2>/dev/null; do
-        sleep 15
+        # Item 18: poll faster so short-lived failures surface promptly.
+        sleep 5
 
         local now_epoch
         now_epoch=$(date +%s)
@@ -869,6 +952,49 @@ EVAL_NUM_TESTS=0
 EVAL_PASS_RATE="0.0"
 EVAL_RUNTIME="0.0"
 EVAL_ELAPSED=0
+
+# ============================================================
+# Docker image build (idempotent, one-time per pipeline run)
+# ============================================================
+#
+# Without this, the eval step fails with HTTP 404 'image not found on Docker
+# Hub' because nothing else in the pipeline builds the repo image. cli_rust.py
+# build is itself idempotent (skips existing images), so multiple calls are
+# safe but we still gate on a flag to avoid double-logging.
+
+_pipeline_build_done="false"
+
+run_build_once() {
+    if [[ "$_pipeline_build_done" == "true" ]]; then
+        return 0
+    fi
+    log "  Ensuring Docker images for eval are built (one-time per pipeline run)..."
+
+    local build_log="${LOG_BASE}/docker_build.log"
+    local cmd=(
+        "$VENV_PYTHON" commit0/cli_rust.py build
+        --commit0-config-file "$COMMIT0_CONFIG"
+        --num-workers 2
+    )
+
+    local start_time
+    start_time=$(date +%s)
+    set +e
+    "${cmd[@]}" >"$build_log" 2>&1
+    local build_rc=$?
+    set -e
+    local elapsed=$(( $(date +%s) - start_time ))
+
+    if [[ $build_rc -ne 0 ]]; then
+        log "  Docker image build FAILED (rc=$build_rc) in ${elapsed}s — last 15 lines:"
+        tail -15 "$build_log" | while IFS= read -r line; do log "    | $line"; done
+        log "  Continuing pipeline; eval will fail with image-not-found if image absent."
+    else
+        log "  Docker image build OK in ${elapsed}s (log: ${build_log})"
+        _pipeline_build_done="true"
+    fi
+}
+
 
 run_evaluate() {
     local branch="$1"
@@ -1095,7 +1221,13 @@ stage_1_draft() {
     log "STAGE 1: Draft Initial Implementations"
     log "======================================================================"
 
-    write_agent_config "false" "false" "false" "true" "false" "$USE_SPEC_INFO"
+    # Build Docker image FIRST — before the agent burns API credits on a
+    # trajectory we can't evaluate. Idempotent: subsequent stages no-op via
+    # _pipeline_build_done flag. Failure here doesn't abort the pipeline; the
+    # eval step will surface a clearer image-not-found error if build broke.
+    run_build_once
+
+    write_agent_config "false" "false" "false" "$USE_UNIT_TESTS_INFO" "false" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
@@ -1313,12 +1445,75 @@ print_summary_table() {
 
 PIPELINE_SUCCESS="false"
 
+strip_aux_docs_in_repos() {
+    [[ "$STRIP_AUX_DOCS" != "true" ]] && return 0
+    log "Stripping auxiliary docs from agent's view (strip_aux_docs=true)..."
+    local strip_count=0
+    local _slist
+    if [[ -f "$DATASET_FILE" ]]; then
+        _slist=$(_PIPELINE_DATASET_FILE="$DATASET_FILE" "$VENV_PYTHON" -c "
+import json, os
+with open(os.environ['_PIPELINE_DATASET_FILE']) as f:
+    data = json.load(f)
+if isinstance(data, dict) and 'data' in data:
+    data = data['data']
+for item in data:
+    print(item['repo'].split('/')[-1])
+" 2>/dev/null || true)
+    fi
+    while IFS= read -r _repo; do
+        [[ -z "$_repo" ]] && continue
+        local _rdir="${REPO_BASE}/${_repo}"
+        [[ ! -d "$_rdir" ]] && continue
+        for fname in README.md README.rst README.txt README \
+                     CHANGELOG.md CHANGELOG.rst CHANGELOG CHANGES.md CHANGES \
+                     HISTORY.md HISTORY.rst HISTORY \
+                     AUTHORS AUTHORS.md CONTRIBUTORS CONTRIBUTORS.md \
+                     NOTICE MAINTAINERS CODEOWNERS RELEASES.md RELEASE_NOTES.md; do
+            if [[ -f "${_rdir}/${fname}" ]]; then
+                rm -f "${_rdir}/${fname}" 2>/dev/null && strip_count=$((strip_count + 1))
+            fi
+        done
+    done <<< "$_slist"
+    log "  Stripped ${strip_count} aux-doc file(s) across repos."
+}
+
+restore_aux_docs_in_repos() {
+    [[ "$STRIP_AUX_DOCS" != "true" ]] && return 0
+    local _slist
+    if [[ -f "$DATASET_FILE" ]]; then
+        _slist=$(_PIPELINE_DATASET_FILE="$DATASET_FILE" "$VENV_PYTHON" -c "
+import json, os
+with open(os.environ['_PIPELINE_DATASET_FILE']) as f:
+    data = json.load(f)
+if isinstance(data, dict) and 'data' in data:
+    data = data['data']
+for item in data:
+    print(item['repo'].split('/')[-1])
+" 2>/dev/null || true)
+    fi
+    while IFS= read -r _repo; do
+        [[ -z "$_repo" ]] && continue
+        local _rdir="${REPO_BASE}/${_repo}"
+        [[ ! -d "$_rdir" ]] && continue
+        (cd "$_rdir" && git checkout HEAD -- README.md README.rst README.txt README \
+            CHANGELOG.md CHANGELOG.rst CHANGELOG CHANGES.md CHANGES \
+            HISTORY.md HISTORY.rst HISTORY \
+            AUTHORS AUTHORS.md CONTRIBUTORS CONTRIBUTORS.md \
+            NOTICE MAINTAINERS CODEOWNERS RELEASES.md RELEASE_NOTES.md \
+            2>/dev/null) || true
+    done <<< "$_slist"
+    log "  Restored aux-doc files via git checkout."
+}
+
 cleanup() {
     if [[ -n "$AGENT_PID" ]] && kill -0 "$AGENT_PID" 2>/dev/null; then
         kill -- -"$AGENT_PID" 2>/dev/null || true
         sleep 2
         kill -9 -- -"$AGENT_PID" 2>/dev/null || true
     fi
+
+    restore_aux_docs_in_repos
 
     if [[ "$PIPELINE_SUCCESS" == "true" ]]; then
         for _si in $(seq 1 "$NUM_SAMPLES"); do
@@ -1398,6 +1593,8 @@ run_single_sample() {
             return 1
         fi
     fi
+
+    strip_aux_docs_in_repos
 
     if [[ -n "$SKIP_TO_STAGE" ]]; then
         if [[ ! -f "$PIPELINE_LOG" ]]; then

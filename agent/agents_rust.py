@@ -51,6 +51,7 @@ class RustAiderAgents(AiderAgents):
         current_module: str = "",
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
+        repo_map_tokens: int = 1024,
     ) -> AgentReturn:
         """Start aider agent (Rust variant)."""
         if test_cmd:
@@ -98,6 +99,7 @@ class RustAiderAgents(AiderAgents):
                 test_cmd=test_cmd,
                 io=io,
                 cache_prompts=self.cache_prompts,
+                map_tokens=repo_map_tokens,  # 0 disables aider's auto repo-map
                 detect_urls=False,  # Prevent aider from scraping URLs in lint/test output
             )
             coder.max_reflections = self.max_iteration

@@ -5,15 +5,35 @@ filtering: excludes ``target/`` build artifacts and ensures ``Cargo.lock``
 is included for reproducibility.
 """
 
+import logging
 import re
 
 import git
 
 from commit0.harness.utils import generate_patch_between_commits
 
+logger = logging.getLogger(__name__)
+
+
+class InvalidRustPatchError(Exception):
+    """Raised when a generated Rust patch fails post-filter validation.
+
+    Indicates a regression in :func:`_filter_target_dir` or an upstream change
+    to git diff output that lets ``target/`` artefacts through. The raw patch
+    text is preserved on the exception so callers can persist it for postmortem.
+    """
+
+    def __init__(self, patch: str, message: str = "patch contains target/ artefacts") -> None:
+        super().__init__(message)
+        self.patch = patch
+
 
 def generate_rust_patch(
-    repo_dir: str, base_commit: str, target_commit: str
+    repo_dir: str,
+    base_commit: str,
+    target_commit: str,
+    *,
+    strict: bool = False,
 ) -> str:
     """Generate a patch between two commits with Rust-specific filtering.
 
@@ -29,16 +49,37 @@ def generate_rust_patch(
         The old commit hash or reference.
     target_commit : str
         The new commit hash or reference.
+    strict : bool, keyword-only, default False
+        When True, raise :class:`InvalidRustPatchError` if post-filter
+        validation detects ``target/`` residue. When False (default,
+        preserves legacy behaviour), log a warning and return the patch
+        unchanged so callers can decide how to react.
 
     Returns
     -------
     str
         Filtered patch string.
 
+    Raises
+    ------
+    InvalidRustPatchError
+        When *strict* is True and validation fails. The raw filtered
+        patch is preserved on the exception for postmortem inspection.
+
     """
     repo = git.Repo(repo_dir)
     raw_patch = generate_patch_between_commits(repo, base_commit, target_commit)
-    return _filter_target_dir(raw_patch)
+    filtered = _filter_target_dir(raw_patch)
+    if not validate_rust_patch(filtered):
+        msg = (
+            f"Rust patch validation failed for repo_dir={repo_dir!r}: "
+            "_filter_target_dir let target/ artefacts through. This indicates "
+            "a regression in the filter or an upstream change to git diff output."
+        )
+        if strict:
+            raise InvalidRustPatchError(filtered, msg)
+        logger.warning("%s (strict=False, returning patch as-is)", msg)
+    return filtered
 
 
 def validate_rust_patch(patch_content: str) -> bool:

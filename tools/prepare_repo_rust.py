@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -117,7 +118,7 @@ def clone_repo(full_name: str, clone_dir: Path) -> Path:
 # ─── Stubbing ────────────────────────────────────────────────────────────────
 
 
-def stub_source_dir(repo_dir: Path, src_dir_relative: str) -> tuple[int, int]:
+def stub_source_dir(repo_dir: Path, src_dir_relative: str, strip_docs: bool = False) -> tuple[int, int]:
     """Stub all .rs files in src_dir using ruststubber --in-place.
 
     The ruststubber binary walks the directory, skips target/ directories,
@@ -132,7 +133,7 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str) -> tuple[int, int]:
 
     try:
         result = subprocess.run(
-            [str(RUSTSTUBBER), "--input-dir", str(src_dir), "--in-place"],
+            [str(RUSTSTUBBER), "--input-dir", str(src_dir), "--in-place"] + (["--strip-docs"] if strip_docs else []),
             capture_output=True,
             text=True,
             timeout=120,
@@ -144,7 +145,7 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str) -> tuple[int, int]:
     ok, fail = 0, 0
     for line in result.stderr.splitlines():
         if line.startswith("ruststubber:"):
-            m_ok = re.search(r"(\d+)\s+files?\s+stubbed", line)
+            m_ok = re.search(r"(\d+)\s+(?:files?\s+)?stubbed", line)
             m_err = re.search(r"(\d+)\s+errors?", line)
             if m_ok:
                 ok = int(m_ok.group(1))
@@ -165,19 +166,80 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str) -> tuple[int, int]:
 # ─── Spec Scraping ───────────────────────────────────────────────────────────
 
 
+def _ensure_spec_scrape_deps(auto_install: bool = True) -> bool:
+    """Verify spec-scrape dependencies are present; auto-install when missing.
+
+    Spec scraping requires Playwright + PyMuPDF + PyPDF2 + beautifulsoup4. On a
+    fresh kaiju-harness checkout these aren't in the venv. Without this helper,
+    every prep run silently falls through to 'Skipping spec generation' and the
+    agent's Stage 1 receives only the README fallback instead of full API docs.
+
+    Behaviour:
+      * Try to import scrape_rust_pdf (project-root module).
+      * On ImportError: pip-install the Python deps + `playwright install chromium`,
+        then retry the import.
+      * Honours env var SPEC_DEPS_AUTO_INSTALL=false (or 0/no) to opt out.
+
+    Returns True if scrape_rust_pdf is importable after this call, False otherwise.
+    """
+    try:
+        import scrape_rust_pdf  # noqa: F401
+        return True
+    except ImportError:
+        pass
+
+    env_setting = os.environ.get("SPEC_DEPS_AUTO_INSTALL", "").lower()
+    if env_setting in ("false", "0", "no"):
+        logger.warning(
+            "Spec-scrape deps missing and SPEC_DEPS_AUTO_INSTALL=%s; spec will be skipped",
+            env_setting,
+        )
+        return False
+    if not auto_install:
+        return False
+
+    logger.info(
+        "Spec-scrape deps missing; auto-installing playwright + PyMuPDF + PyPDF2 + "
+        "beautifulsoup4 (set SPEC_DEPS_AUTO_INSTALL=false to opt out)"
+    )
+    pip_pkgs = ["playwright", "PyMuPDF", "PyPDF2", "beautifulsoup4"]
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", *pip_pkgs],
+            check=True,
+            timeout=600,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to pip-install spec-scrape deps: %s", exc)
+        return False
+
+    logger.info("Installing Chromium for Playwright (~250 MB, one-time)")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+            timeout=900,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Failed to install Playwright Chromium: %s", exc)
+        return False
+
+    try:
+        import scrape_rust_pdf  # noqa: F401
+        return True
+    except ImportError:
+        logger.warning("scrape_rust_pdf still not importable after install")
+        return False
+
+
 def scrape_spec(crate: str, repo_dir: Path) -> Path | None:
     """Scrape docs.rs documentation for a crate into a compressed PDF.
 
     Places <crate>.pdf.bz2 at the repo root. Returns the path on success, None on failure.
     """
-    try:
-        from scrape_rust_pdf import scrape_rust_spec
-    except ImportError:
-        logger.warning(
-            "scrape_rust_pdf not available (missing deps: playwright, PyMuPDF, PyPDF2, beautifulsoup4). "
-            "Skipping spec generation."
-        )
+    if not _ensure_spec_scrape_deps():
         return None
+    from scrape_rust_pdf import scrape_rust_spec  # type: ignore
 
     tmp_specs = repo_dir / "_spec_tmp"
     try:
@@ -193,7 +255,7 @@ def scrape_spec(crate: str, repo_dir: Path) -> Path | None:
             return None
 
         src_path = Path(result)
-        dest_path = repo_dir / src_path.name
+        dest_path = repo_dir / "spec.pdf.bz2"  # always agent-canonical name
         shutil.move(str(src_path), str(dest_path))
         logger.info("Spec placed at repo root: %s", dest_path.name)
         return dest_path
@@ -224,8 +286,17 @@ def create_dataset_entry(
     version_conflicts: list[str] | None = None,
 ) -> dict:
     """Create a dataset entry compatible with RustRepoInstance."""
-    # Determine test_dir from src_dir (parent of /src usually)
-    test_dir = src_dir.rsplit("/src", 1)[0] if "/src" in src_dir else crate
+    # Derive test_dir from src_dir layout:
+    #   - workspace member (e.g. 'foo/src')       -> 'foo' (the member dir)
+    #   - single-crate (src_dir == 'src')          -> 'tests' (Rust integration-test convention)
+    # The harness uses test_dir as a hash key for log paths and (for
+    # workspace members) as the cd target for test runs. Falling back to the
+    # crate name was wrong: it would create paths like logs/<crate>/<crate>/
+    # and break workspace-member assumptions.
+    if "/src" in src_dir:
+        test_dir = src_dir.rsplit("/src", 1)[0]
+    else:
+        test_dir = "tests"
 
     return {
         "instance_id": f"commit-0/{crate}",
@@ -332,6 +403,7 @@ def prepare_rust_repo(
     packages: str = "pkg-config libssl-dev",
     skip_spec: bool = False,
     specs_dir: Path = SPECS_DIR,
+    strip_docs: bool = False,
 ) -> dict | None:
     """Run the full preparation pipeline for a single Rust repo/crate.
 
@@ -393,7 +465,7 @@ def prepare_rust_repo(
         git(repo_dir, "reset", "--hard", default_branch)
 
     # Step 5: Stub source files
-    ok, fail = stub_source_dir(repo_dir, src_dir)
+    ok, fail = stub_source_dir(repo_dir, src_dir, strip_docs=strip_docs)
     if ok == 0:
         logger.error("No files were stubbed. Aborting.")
         return None
@@ -639,6 +711,16 @@ def main() -> None:
         action="store_true",
         help="Skip scraping docs.rs spec PDF",
     )
+    parser.add_argument(
+        "--strip-docs",
+        action="store_true",
+        help=(
+            "Strip all #[doc] attributes (i.e. /// outer comments, //! inner "
+            "module docs, and explicit #[doc(...)] attrs) from every traversed "
+            "item. Increases benchmark difficulty by reducing context exposed "
+            "to the agent. Mirrors the Python pipeline's --strip-docstrings flag."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -685,6 +767,7 @@ def main() -> None:
         edition=args.edition,
         packages=args.packages,
         skip_spec=args.skip_spec,
+        strip_docs=args.strip_docs,
     )
 
     if entry is None:

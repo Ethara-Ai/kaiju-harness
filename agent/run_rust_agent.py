@@ -32,7 +32,8 @@ from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_rust import RUST_SPLIT
 from commit0.harness.split_utils import resolve_split
-from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
+from commit0.harness.patch_utils_rust import generate_rust_patch, InvalidRustPatchError
+from commit0.harness.utils import load_dataset_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +312,7 @@ def run_rust_agent_for_repo(
                     continue
 
                 test_cmd = "cargo test --all-features"
-                lint_cmd = get_rust_lint_cmd(repo_path)
+                lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
                 message, spec_costs = get_rust_message(
                     agent_config, repo_path, target_files=[src_file]
                 )
@@ -338,17 +339,32 @@ def run_rust_agent_for_repo(
                         current_module=src_file_name,
                         max_test_output_length=agent_config.max_test_output_length,
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        repo_map_tokens=agent_config.repo_map_tokens,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(test_log_dir)
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
-                    module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                        if pre_sha != post_sha
-                        else ""
-                    )
+                    module_patch = ""
+                    if pre_sha != post_sha:
+                        try:
+                            module_patch = generate_rust_patch(
+                                repo_path, pre_sha, post_sha, strict=True
+                            )
+                        except InvalidRustPatchError as exc:
+                            rejected_path = test_log_dir / ".rejected_patch.diff"
+                            try:
+                                rejected_path.write_text(exc.patch, encoding="utf-8")
+                                logger.error(
+                                    "InvalidRustPatchError for %s: %s. Rejected patch persisted to %s.",
+                                    src_file_name, exc, rejected_path,
+                                )
+                            except OSError as write_exc:
+                                logger.error(
+                                    "InvalidRustPatchError for %s: %s. Could not persist rejected patch to %s: %s",
+                                    src_file_name, exc, rejected_path, write_exc,
+                                )
                     module_turns = thinking_capture.get_module_turns(src_file_name)
                     if module_turns:
                         write_module_output_json(
@@ -389,7 +405,7 @@ def run_rust_agent_for_repo(
                     logger.info("Skipping already-linted file: %s", lint_file_name)
                     continue
 
-                lint_cmd = get_rust_lint_cmd(repo_path)
+                lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
 
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
@@ -408,17 +424,32 @@ def run_rust_agent_for_repo(
                         thinking_capture=thinking_capture,
                         current_stage="lint",
                         current_module=lint_file_name,
+                        repo_map_tokens=agent_config.repo_map_tokens,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(lint_log_dir)
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
-                    module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                        if pre_sha != post_sha
-                        else ""
-                    )
+                    module_patch = ""
+                    if pre_sha != post_sha:
+                        try:
+                            module_patch = generate_rust_patch(
+                                repo_path, pre_sha, post_sha, strict=True
+                            )
+                        except InvalidRustPatchError as exc:
+                            rejected_path = lint_log_dir / ".rejected_patch.diff"
+                            try:
+                                rejected_path.write_text(exc.patch, encoding="utf-8")
+                                logger.error(
+                                    "InvalidRustPatchError for %s: %s. Rejected patch persisted to %s.",
+                                    lint_file_name, exc, rejected_path,
+                                )
+                            except OSError as write_exc:
+                                logger.error(
+                                    "InvalidRustPatchError for %s: %s. Could not persist rejected patch to %s: %s",
+                                    lint_file_name, exc, rejected_path, write_exc,
+                                )
                     module_turns = thinking_capture.get_module_turns(lint_file_name)
                     if module_turns:
                         write_module_output_json(
@@ -460,7 +491,7 @@ def run_rust_agent_for_repo(
 
                 iter_message = message
 
-                lint_cmd = get_rust_lint_cmd(repo_path)
+                lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
                 with capture_module_calls(
@@ -477,17 +508,32 @@ def run_rust_agent_for_repo(
                         thinking_capture=thinking_capture,
                         current_stage="draft",
                         current_module=file_name,
+                        repo_map_tokens=agent_config.repo_map_tokens,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(file_log_dir)
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
-                    module_patch = (
-                        local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                        if pre_sha != post_sha
-                        else ""
-                    )
+                    module_patch = ""
+                    if pre_sha != post_sha:
+                        try:
+                            module_patch = generate_rust_patch(
+                                repo_path, pre_sha, post_sha, strict=True
+                            )
+                        except InvalidRustPatchError as exc:
+                            rejected_path = file_log_dir / ".rejected_patch.diff"
+                            try:
+                                rejected_path.write_text(exc.patch, encoding="utf-8")
+                                logger.error(
+                                    "InvalidRustPatchError for %s: %s. Rejected patch persisted to %s.",
+                                    file_name, exc, rejected_path,
+                                )
+                            except OSError as write_exc:
+                                logger.error(
+                                    "InvalidRustPatchError for %s: %s. Could not persist rejected patch to %s: %s",
+                                    file_name, exc, rejected_path, write_exc,
+                                )
                     module_turns = thinking_capture.get_module_turns(file_name)
                     if module_turns:
                         write_module_output_json(

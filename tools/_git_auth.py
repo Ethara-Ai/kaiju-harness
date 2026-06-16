@@ -68,23 +68,105 @@ class PushError(GitAuthError):
 _TOKEN_ENV_VARS = ("GITHUB_TOKEN", "GH_TOKEN", "GH_PAT", "GITHUB_PAT")
 
 
-def get_github_token(required: bool = True) -> str | None:
-    """Resolve a GitHub token from the standard env vars.
+_cached_resolved_token: str | None = None
 
-    Checks ``GITHUB_TOKEN``, ``GH_TOKEN``, ``GH_PAT``, ``GITHUB_PAT`` in that
-    order. If ``required`` is True and none are set, raises ``GitAuthError``
-    with a pointer to the token-creation page and the required scopes.
+
+def _gh_cli_token() -> str | None:
+    """Return the active gh CLI keyring token, or None if unavailable.
+
+    NOTE: ``gh auth token`` prioritizes ``GITHUB_TOKEN``/``GH_TOKEN`` env vars
+    over the keyring. If a stale .env GITHUB_TOKEN is set, it would mask the
+    valid keyring login and trigger HTTP 401 fallback. We strip those vars
+    from the subprocess env so the keyring value is always returned.
     """
+    clean_env = {k: v for k, v in os.environ.items() if k not in _TOKEN_ENV_VARS}
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            env=clean_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _token_authenticates(token: str) -> bool:
+    """Cheap pre-flight: does *token* authenticate against api.github.com?"""
+    if not token:
+        return False
+    try:
+        env = {**os.environ, "GH_TOKEN": token, "GIT_TERMINAL_PROMPT": "0"}
+        result = subprocess.run(
+            ["gh", "api", "user"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def get_github_token(required: bool = True) -> str | None:
+    """Resolve a GitHub token, with auto-fallback to gh CLI keyring.
+
+    Priority order:
+    1. Env vars (GITHUB_TOKEN, GH_TOKEN, GH_PAT, GITHUB_PAT). Each is validated
+       via ``gh api user`` before being accepted, so a stale .env token cannot
+       silently mask a working keyring login.
+    2. ``gh auth token`` (active keyring account) if no env token authenticates.
+
+    Self-healing: when ``.env`` GITHUB_TOKEN expires, the script falls through
+    to the keyring instead of failing with HTTP 401. This eliminates the manual
+    workaround of inline ``GITHUB_TOKEN=$(gh auth token) ./script.py``.
+
+    The resolved token is cached per process to avoid hitting ``gh api user``
+    on every call. Pass ``required=False`` to get ``None`` instead of an
+    exception when nothing works.
+    """
+    global _cached_resolved_token
+    if _cached_resolved_token:
+        return _cached_resolved_token
+
+    invalid_env_tokens: list[str] = []
     for var in _TOKEN_ENV_VARS:
         token = os.environ.get(var)
-        if token:
+        if not token:
+            continue
+        if _token_authenticates(token):
+            _cached_resolved_token = token
             return token
+        invalid_env_tokens.append(var)
+
+    if invalid_env_tokens:
+        logger.warning(
+            "Env GitHub token(s) %s failed validation; falling back to gh CLI keyring",
+            ", ".join(invalid_env_tokens),
+        )
+
+    keyring_token = _gh_cli_token()
+    if keyring_token and _token_authenticates(keyring_token):
+        if invalid_env_tokens:
+            logger.info("Using gh CLI keyring token (env token rejected)")
+        _cached_resolved_token = keyring_token
+        return keyring_token
+
     if required:
         raise GitAuthError(
-            "GITHUB_TOKEN (or GH_TOKEN / GH_PAT) is required but not set.\n"
-            "Get a Classic Personal Access Token with the 'repo' and "
-            "'admin:org' scopes from https://github.com/settings/tokens "
-            "and export it before running."
+            "No valid GitHub token available.\n"
+            "  Tried env vars: " + ", ".join(_TOKEN_ENV_VARS) + "\n"
+            "  Tried gh CLI keyring: empty or unauthenticated\n"
+            "Fix one of:\n"
+            "  - Run 'gh auth login' to authenticate the CLI keyring\n"
+            "  - Export a valid Classic PAT (repo + admin:org scopes) from "
+            "https://github.com/settings/tokens"
         )
     return None
 

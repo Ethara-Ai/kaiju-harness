@@ -177,6 +177,102 @@ _RUST_TEST_SUMMARIZER_SYSTEM_PROMPT = (
 )
 
 
+_TRANSIENT_CARGO_ERRORS = (
+    "failed to connect",
+    "connection refused",
+    "connection reset",
+    "network is unreachable",
+    "operation timed out",
+    "error sending request",
+    "503 service unavailable",
+    "502 bad gateway",
+    "could not connect to",
+    "blocking waiting for file lock",
+    "unexpected eof",
+)
+
+
+def _is_transient_cargo_error(stderr: str) -> bool:
+    """Heuristic check whether *stderr* indicates a transient cargo failure."""
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _TRANSIENT_CARGO_ERRORS)
+
+
+def _run_cargo_with_retry(
+    args: list[str],
+    cwd: str,
+    timeout: int = 120,
+    max_attempts: int = 3,
+    backoff_base: float = 2.0,
+):
+    """Run a cargo command, retrying on transient (network/lock) failures.
+
+    Retries are gated on stderr matching :data:`_TRANSIENT_CARGO_ERRORS`. Deterministic
+    failures (compile errors, missing manifest) return immediately. Backoff is
+    ``backoff_base ** attempt`` seconds with a small jitter to spread retries.
+
+    Returns the final :class:`subprocess.CompletedProcess` (success or last
+    failure), or ``None`` if cargo could not be launched at all.
+    """
+    import random
+    import time
+
+    last_result = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            logger.warning("cargo not found on PATH while running %s", args)
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "cargo %s attempt %d/%d timed out (cwd=%s)",
+                args[1] if len(args) > 1 else "?",
+                attempt,
+                max_attempts,
+                cwd,
+            )
+            if attempt >= max_attempts:
+                return last_result
+            time.sleep((backoff_base ** attempt) + random.uniform(0, 0.5))
+            continue
+        except OSError as exc:
+            logger.warning(
+                "cargo %s attempt %d/%d OSError (cwd=%s): %s",
+                args[1] if len(args) > 1 else "?",
+                attempt,
+                max_attempts,
+                cwd,
+                exc,
+            )
+            if attempt >= max_attempts:
+                return None
+            time.sleep((backoff_base ** attempt) + random.uniform(0, 0.5))
+            continue
+
+        if result.returncode == 0:
+            return result
+        if attempt >= max_attempts or not _is_transient_cargo_error(result.stderr):
+            return result
+        logger.warning(
+            "cargo %s attempt %d/%d transient failure rc=%d (cwd=%s); retrying",
+            args[1] if len(args) > 1 else "?",
+            attempt,
+            max_attempts,
+            result.returncode,
+            cwd,
+        )
+        last_result = result
+        time.sleep((backoff_base ** attempt) + random.uniform(0, 0.5))
+    return last_result
+
+
 def get_rust_test_ids(repo_path: str) -> list[str]:
     """Get Rust test identifiers by running ``cargo test --list``.
 
@@ -188,36 +284,27 @@ def get_rust_test_ids(repo_path: str) -> list[str]:
     """
     test_ids: list[str] = []
 
-    try:
-        result = subprocess.run(
-            ["cargo", "test", "--", "--list"],
-            capture_output=True,
-            text=True,
-            cwd=repo_path,
-            timeout=120,
+    result = _run_cargo_with_retry(
+        ["cargo", "test", "--", "--list"],
+        cwd=repo_path,
+        timeout=120,
+    )
+    if result is not None and result.returncode == 0:
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.endswith(": test"):
+                test_ids.append(line[: -len(": test")])
+            elif line.endswith(": benchmark"):
+                continue
+        if test_ids:
+            return sorted(test_ids)
+    elif result is not None:
+        logger.warning(
+            "cargo test --list failed after retries (rc=%d) in %s: %s",
+            result.returncode,
+            repo_path,
+            result.stderr[:500],
         )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.endswith(": test"):
-                    test_ids.append(line[: -len(": test")])
-                elif line.endswith(": benchmark"):
-                    continue
-            if test_ids:
-                return sorted(test_ids)
-        else:
-            logger.warning(
-                "cargo test --list failed (rc=%d) in %s: %s",
-                result.returncode,
-                repo_path,
-                result.stderr[:500],
-            )
-    except FileNotFoundError:
-        logger.warning("cargo not found on PATH, falling back to cached test IDs")
-    except subprocess.TimeoutExpired:
-        logger.warning("cargo test --list timed out in %s", repo_path)
-    except OSError as exc:
-        logger.warning("Failed to run cargo test --list in %s: %s", repo_path, exc)
 
     repo_name = os.path.basename(os.path.normpath(repo_path))
     cache_path = RUST_TEST_IDS_DIR / f"{repo_name}.json"

@@ -1,4 +1,4 @@
-FROM rust:1.88-bookworm
+FROM rust:1.96-bookworm
 
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
@@ -42,10 +42,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# rustup/cargo/rustc are provided by the rust:1.88-bookworm base image.
-# Add the components the harness relies on.
+# rustup/cargo/rustc are provided by the rust:<ver>-bookworm base image.
+# Add the components and binaries the harness relies on:
+#   - rustfmt + clippy: required for Stage 2 (lint refine)
+#   - cargo-nextest:    used by the Rust test runner (JSON output parsing)
+# Pin nextest with --locked so the image is reproducible across builds.
 RUN rustup component add rustfmt clippy && \
-    rustc --version && cargo --version && rustfmt --version && cargo clippy --version
+    cargo install cargo-nextest --locked --version ^0.9 && \
+    rustc --version && cargo --version && rustfmt --version && \
+    cargo clippy --version && cargo nextest --version
 
 # Cross-distro SSL cert symlinks for libraries that look in RHEL/Fedora paths
 RUN mkdir -p /etc/pki/tls/certs /etc/pki/tls /etc/pki/ca-trust/extracted/pem /etc/ssl/certs && \

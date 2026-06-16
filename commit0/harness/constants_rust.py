@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 from typing import Dict, List
 
 from pydantic import Field
@@ -24,8 +25,11 @@ __all__ = [
     "TestStatus",
 ]
 
-# Rust toolchain version
-RUST_VERSION = "stable"
+# Rust toolchain version. Pinned for reproducibility across runs.
+# Override via the RUST_VERSION environment variable when needed (e.g. for a
+# bisect, MSRV check, or nightly-only feature). The default below should match
+# the version installed in the Rust base Dockerfile to avoid silent drift.
+RUST_VERSION = os.environ.get("RUST_VERSION", "1.84.0")
 
 # Marker used to identify stub functions in Rust source
 RUST_STUB_MARKER = 'panic!("STUB: not implemented")'
@@ -36,13 +40,19 @@ RUST_BASE_BRANCH = "commit0"
 # Entries to add to .gitignore for Rust repos
 RUST_GITIGNORE_ENTRIES = ["target/", ".aider*", "logs/"]
 
-# Repo split mapping for Rust repos. Curated subsets only — the "all" subset is
-# derived dynamically from the loaded dataset by
-# ``commit0.harness.split_utils.resolve_split``.
+# Curated Rust repo splits.
+#
+# This dict is populated at runtime by dataset loaders (see commit0/cli_rust.py
+# and tools/prepare_repo_rust.py) rather than at import time, so it is empty
+# here by design. To discover the active splits, inspect the dataset JSON's
+# ``repo_split`` field or call ``commit0.harness.split_utils.resolve_split``.
+# The literal "all" split is also derived dynamically from the loaded dataset.
 RUST_SPLIT: Dict[str, list[str]] = {}
 
-# cargo-nextest version for test execution
-CARGO_NEXTEST_VERSION = "0.9.96"
+# cargo-nextest version for test execution. Override via the
+# CARGO_NEXTEST_VERSION env var to pick up format or behaviour changes in newer
+# nextest releases (the JSON event schema may change between minor versions).
+CARGO_NEXTEST_VERSION = os.environ.get("CARGO_NEXTEST_VERSION", "0.9.96")
 
 # Log directory for Rust test runs
 RUN_RUST_TESTS_LOG_DIR = Path("logs/rust_tests")

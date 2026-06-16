@@ -34,6 +34,10 @@ class AgentConfig:
     trajectory_md: bool = True  # Whether to write trajectory.md
     output_jsonl: bool = False  # Whether to write output.jsonl
 
+    # --- Rust-specific difficulty levers (Stage 1 zero-shot evaluation) ---
+    repo_map_tokens: int = 1024  # Aider auto repo-map budget; 0 disables
+    strip_aux_docs: bool = False  # If True, README/CHANGELOG/etc hidden from agent
+
     def __post_init__(self):
         if not isinstance(self.model_name, str) or not self.model_name.strip():
             raise ValueError(

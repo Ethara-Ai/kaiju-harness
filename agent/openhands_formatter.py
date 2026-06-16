@@ -23,11 +23,12 @@ class EditBlock:
     new_str: str
 
 
+# Open-list extension match: starts with a letter, 1-8 alphanumeric chars.
+# Covers every common source/config extension (.rs, .toml, .lock, .gitignore,
+# .dockerfile, .conf, etc.) without requiring updates as new file types ship.
+# Constrained to avoid matching prose like "see section 3.4" or numeric suffixes.
 _FILENAME_RE = re.compile(
-    r"^([^\s`#>][^\n]*?"
-    r"\.(?:py|pyx|pxd|pyi|json|toml|yaml|yml|cfg|ini|txt|md|rst|"
-    r"js|jsx|ts|tsx|html|css|scss|sh|bash|c|cpp|h|hpp|go|rs|java|rb|"
-    r"xml|sql|env|lock|conf))\s*$",
+    r"^([^\s`#>][^\n]*?\.[a-zA-Z][a-zA-Z0-9]{0,7})\s*$",
     re.MULTILINE,
 )
 
@@ -37,10 +38,7 @@ _REPLACE_MARKER = ">>>>>>> REPLACE"
 
 
 _WHOLE_FILE_RE = re.compile(
-    r"^([^\s`#>][^\n]*?"
-    r"\.(?:py|pyx|pxd|pyi|json|toml|yaml|yml|cfg|ini|txt|md|rst|"
-    r"js|jsx|ts|tsx|html|css|scss|sh|bash|c|cpp|h|hpp|go|rs|java|rb|"
-    r"xml|sql|env|lock|conf))\s*\n"
+    r"^([^\s`#>][^\n]*?\.[a-zA-Z][a-zA-Z0-9]{0,7})\s*\n"
     r"```\w*\n(.*?)```",
     re.MULTILINE | re.DOTALL,
 )
