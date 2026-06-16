@@ -1,0 +1,25 @@
+{
+  "stats": {
+    "suites": 1,
+    "tests": 4,
+    "passes": 2,
+    "pending": 1,
+    "failures": 1,
+    "duration": 40
+  },
+  "tests": [
+    {"title": "ok1", "fullTitle": "g ok1", "duration": 5, "state": "passed"},
+    {"title": "bad1", "fullTitle": "g bad1", "duration": 7, "state": "failed", "err": {"message": "expected true"}},
+    {"title": "todo1", "fullTitle": "g todo1", "duration": 0, "state": "pending"}
+  ],
+  "pending": [
+    {"title": "todo1", "fullTitle": "g todo1", "duration": 0}
+  ],
+  "failures": [
+    {"title": "bad1", "fullTitle": "g bad1", "duration": 7, "state": "failed"}
+  ],
+  "passes": [
+    {"title": "ok1", "fullTitle": "g ok1", "duration": 5, "state": "passed"},
+    {"title": "ok2", "fullTitle": "g ok2", "duration": 6, "state": "passed"}
+  ]
+}

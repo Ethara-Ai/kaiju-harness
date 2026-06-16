@@ -1,0 +1,9 @@
+{
+  "numTotalTests": 3,
+  "testResults": [
+    {
+      "name": "/repo/__tests__/q.test.js",
+      "assertionResults": [
+        {"fullName": "a", "status": "passed", "duration": 1},
+        {"fullName": "b", "status": "failed", "duration": 2},
+        {"fullName": "c", "status": "pas

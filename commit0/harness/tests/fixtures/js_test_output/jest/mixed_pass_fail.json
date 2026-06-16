@@ -1,0 +1,39 @@
+{
+  "numTotalTests": 4,
+  "numPassedTests": 2,
+  "numFailedTests": 1,
+  "success": false,
+  "testResults": [
+    {
+      "name": "/repo/__tests__/queue.test.js",
+      "status": "failed",
+      "assertionResults": [
+        {
+          "fullName": "Queue accepts options",
+          "title": "accepts options",
+          "status": "passed",
+          "duration": 5
+        },
+        {
+          "fullName": "Queue rejects bad concurrency",
+          "title": "rejects bad concurrency",
+          "status": "failed",
+          "duration": 8,
+          "failureMessages": ["Expected throw"]
+        },
+        {
+          "fullName": "Queue pause and resume",
+          "title": "pause and resume",
+          "status": "passed",
+          "duration": 11
+        },
+        {
+          "fullName": "Queue future feature",
+          "title": "future feature",
+          "status": "pending",
+          "duration": 0
+        }
+      ]
+    }
+  ]
+}

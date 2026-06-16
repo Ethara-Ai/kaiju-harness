@@ -1,0 +1,8 @@
+{
+  "stats": {"passes": 2, "failures": 1},
+  "passes": [
+    {"fullTitle": "g ok1", "state": "passed"},
+    {"fullTitle": "g ok2", "state": "passed"}
+  ],
+  "failures": [
+    {"fullTitle": "g bad1", "state": "fai

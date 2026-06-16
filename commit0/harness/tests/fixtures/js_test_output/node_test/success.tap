@@ -1,0 +1,15 @@
+TAP version 14
+# Subtest: top-level
+ok 1 - alpha
+  ---
+  duration_ms: 4.5
+  ...
+ok 2 - beta
+  ---
+  duration_ms: 3.2
+  ...
+1..2
+# tests 2
+# pass 2
+# fail 0
+# duration_ms 7.7

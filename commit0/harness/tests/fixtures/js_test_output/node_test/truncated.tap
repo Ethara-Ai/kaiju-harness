@@ -1,0 +1,16 @@
+TAP version 14
+ok 1 - one
+  ---
+  duration_ms: 1.1
+  ...
+not ok 2 - two
+  ---
+  duration_ms: 2.2
+  ...
+ok 3 - three
+  ---
+  duration_ms: 3.3
+  ...
+not ok 4 - four
+  ---
+  duration_ms:

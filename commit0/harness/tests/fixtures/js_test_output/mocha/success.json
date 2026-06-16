@@ -1,0 +1,42 @@
+{
+  "stats": {
+    "suites": 1,
+    "tests": 2,
+    "passes": 2,
+    "pending": 0,
+    "failures": 0,
+    "duration": 25
+  },
+  "tests": [
+    {
+      "title": "adds",
+      "fullTitle": "math adds",
+      "file": "/repo/test/math.test.js",
+      "duration": 12,
+      "state": "passed"
+    },
+    {
+      "title": "subtracts",
+      "fullTitle": "math subtracts",
+      "file": "/repo/test/math.test.js",
+      "duration": 13,
+      "state": "passed"
+    }
+  ],
+  "pending": [],
+  "failures": [],
+  "passes": [
+    {
+      "title": "adds",
+      "fullTitle": "math adds",
+      "duration": 12,
+      "state": "passed"
+    },
+    {
+      "title": "subtracts",
+      "fullTitle": "math subtracts",
+      "duration": 13,
+      "state": "passed"
+    }
+  ]
+}

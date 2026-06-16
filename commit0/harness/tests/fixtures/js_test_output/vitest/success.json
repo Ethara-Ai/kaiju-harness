@@ -1,0 +1,26 @@
+{
+  "numTotalTests": 2,
+  "numPassedTests": 2,
+  "numFailedTests": 0,
+  "success": true,
+  "testResults": [
+    {
+      "name": "/repo/test/utils.test.js",
+      "status": "passed",
+      "assertionResults": [
+        {
+          "fullName": "utils > sum adds numbers",
+          "title": "sum adds numbers",
+          "status": "passed",
+          "duration": 4
+        },
+        {
+          "fullName": "utils > clamp clamps to range",
+          "title": "clamp clamps to range",
+          "status": "passed",
+          "duration": 3
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "numTotalTests": 3,
+  "numPassedTests": 1,
+  "numFailedTests": 1,
+  "success": false,
+  "testResults": [
+    {
+      "name": "/repo/test/parse.test.js",
+      "status": "failed",
+      "assertionResults": [
+        {
+          "fullName": "parse > handles empty",
+          "title": "handles empty",
+          "status": "passed",
+          "duration": 2
+        },
+        {
+          "fullName": "parse > rejects malformed",
+          "title": "rejects malformed",
+          "status": "failed",
+          "duration": 5
+        },
+        {
+          "fullName": "parse > supports streaming (todo)",
+          "title": "supports streaming (todo)",
+          "status": "skipped",
+          "duration": 0
+        }
+      ]
+    }
+  ]
+}

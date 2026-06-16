@@ -1,0 +1,28 @@
+{
+  "numTotalTests": 2,
+  "numPassedTests": 2,
+  "numFailedTests": 0,
+  "success": true,
+  "testResults": [
+    {
+      "name": "/repo/__tests__/queue.test.js",
+      "status": "passed",
+      "assertionResults": [
+        {
+          "ancestorTitles": ["Queue"],
+          "fullName": "Queue processes tasks in order",
+          "title": "processes tasks in order",
+          "status": "passed",
+          "duration": 12
+        },
+        {
+          "ancestorTitles": ["Queue"],
+          "fullName": "Queue respects concurrency",
+          "title": "respects concurrency",
+          "status": "passed",
+          "duration": 18
+        }
+      ]
+    }
+  ]
+}
