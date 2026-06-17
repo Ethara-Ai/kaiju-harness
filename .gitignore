@@ -206,3 +206,10 @@ docs/commit0.gif
 .aider.model.metadata.json
 .aider.model.settings.yml
 Harbor_Data/
+
+# Audit harness runtime artifacts (CRUCIBLE.md / kaiju re-audit)
+# Note: audit/ source code IS committed; only runtime outputs are ignored
+audit/results/
+audit/runs/
+audit/.cache/
+audit/.venv/
