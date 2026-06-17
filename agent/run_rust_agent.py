@@ -176,6 +176,38 @@ def get_rust_message(
     return message, spec_costs
 
 
+_BLIND_LINT_SHELL = (
+    '_out=$(cargo clippy --all-targets --all-features -- -D warnings 2>&1); '
+    '_rc=$?; '
+    'if [ $_rc -eq 0 ]; then echo "build clean"; '
+    'else _n=$(printf "%s" "$_out" | grep -cE "^error\\[E[0-9]+\\]" 2>/dev/null); '
+    '[ -z "$_n" ] && _n=0; '
+    'printf "build failed: %s compile errors\\n" "$_n"; fi; '
+    'exit $_rc'
+)
+
+_BLIND_TEST_SHELL = (
+    '_out=$(cargo test --all-features 2>&1); '
+    '_rc=$?; '
+    '_summary=$(printf "%s" "$_out" | grep -E "^test result:" | tail -1); '
+    'if [ -n "$_summary" ]; then printf "%s\\n" "$_summary"; '
+    'else _n=$(printf "%s" "$_out" | grep -cE "^error\\[E[0-9]+\\]" 2>/dev/null); '
+    '[ -z "$_n" ] && _n=0; '
+    'printf "compilation failed: %s errors\\n" "$_n"; fi; '
+    'exit $_rc'
+)
+
+
+def _make_blind_lint_cmd() -> str:
+    """Wrap clippy so output is just \"build clean\" or \"build failed: N errors\"."""
+    return f"bash -c '{_BLIND_LINT_SHELL}' --"
+
+
+def _make_blind_test_cmd() -> str:
+    """Wrap cargo test so output is just the summary line, no per-test failures."""
+    return f"bash -c '{_BLIND_TEST_SHELL}'"
+
+
 def get_rust_lint_cmd(repo_path: str) -> str:
     """Return the cargo clippy lint command for the repo at *repo_path*.
 
@@ -264,6 +296,39 @@ def run_rust_agent_for_repo(
 
     target_edit_files = get_target_edit_files_rust(repo_path)
     all_source_files = find_rust_files_to_edit(repo_path)
+    if agent_config.strip_non_stubs:
+        # Use base_commit's stub list (persistent across stages). The current
+        # target_edit_files becomes empty after Stage 1 fills the stubs, which
+        # would leave Stage 2/3 with no files to iterate. Reading the base_commit
+        # state keeps the strip filter consistent across all 3 stages.
+        import subprocess as _sp
+        _base = example["base_commit"]
+        _stubbed_at_base: set[str] = set()
+        try:
+            _ls = _sp.run(
+                ["git", "ls-tree", "-r", "--name-only", _base],
+                cwd=repo_path, capture_output=True, text=True, check=True,
+            )
+            for _rel in _ls.stdout.splitlines():
+                if not _rel.endswith(".rs"):
+                    continue
+                _show = _sp.run(
+                    ["git", "show", f"{_base}:{_rel}"],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+                if _show.returncode == 0 and 'panic!("STUB: not implemented")' in _show.stdout:
+                    _stubbed_at_base.add(os.path.join(repo_path, _rel))
+            all_source_files = [f for f in all_source_files if f in _stubbed_at_base]
+            logger.info(
+                "strip_non_stubs: kept %d/%d source files (filtered against base_commit %s)",
+                len(all_source_files), len(_stubbed_at_base), _base[:8],
+            )
+        except (_sp.CalledProcessError, OSError) as _e:
+            logger.warning(
+                "strip_non_stubs: failed to compute base-commit stub list (%s). Falling back to current target_edit_files (may break Stage 2/3).",
+                _e,
+            )
+            all_source_files = list(target_edit_files)
 
 
     experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
@@ -311,8 +376,14 @@ def run_rust_agent_for_repo(
                     logger.info("Skipping already-completed test module: %s", src_file_name)
                     continue
 
-                test_cmd = "cargo test --all-features"
+                test_cmd = (
+                    _make_blind_test_cmd()
+                    if agent_config.blind_tests
+                    else "cargo test --all-features"
+                )
                 lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd()
                 message, spec_costs = get_rust_message(
                     agent_config, repo_path, target_files=[src_file]
                 )
@@ -406,6 +477,8 @@ def run_rust_agent_for_repo(
                     continue
 
                 lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd()
 
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
@@ -492,6 +565,8 @@ def run_rust_agent_for_repo(
                 iter_message = message
 
                 lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd()
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
                 with capture_module_calls(

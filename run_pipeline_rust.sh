@@ -37,6 +37,9 @@ USE_SPEC_INFO="true"
 USE_UNIT_TESTS_INFO="true"
 REPO_MAP_TOKENS=1024
 STRIP_AUX_DOCS="false"
+BLIND_LINT="false"
+BLIND_TESTS="false"
+STRIP_NON_STUBS="false"
 
 # ============================================================
 # Argument Parsing
@@ -90,6 +93,9 @@ Options:
   --no-unit-tests-info       Disable inline-test injection into prompt (default: enabled; Stage 1 only)
   --no-repo-map              Disable aider's internal repo-map (default: enabled, map_tokens=1024)
   --strip-aux-docs           Hide README/CHANGELOG/HISTORY/etc. from agent's view (default: keep)
+  --blind-lint               Stage 2 sees only "build failed: N errors" (default: full clippy output)
+  --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
+  --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
@@ -113,6 +119,9 @@ while [[ $# -gt 0 ]]; do
         --no-unit-tests-info) USE_UNIT_TESTS_INFO="false"; shift ;;
         --no-repo-map) REPO_MAP_TOKENS=0; shift ;;
         --strip-aux-docs) STRIP_AUX_DOCS="true"; shift ;;
+        --blind-lint) BLIND_LINT="true"; shift ;;
+        --blind-tests) BLIND_TESTS="true"; shift ;;
+        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -740,6 +749,9 @@ trajectory_md: true
 output_jsonl: true
 repo_map_tokens: ${REPO_MAP_TOKENS}
 strip_aux_docs: ${STRIP_AUX_DOCS}
+blind_lint: ${BLIND_LINT}
+blind_tests: ${BLIND_TESTS}
+strip_non_stubs: ${STRIP_NON_STUBS}
 language: rust
 EOF
     log "  Wrote agent config: ${AGENT_CONFIG}"
@@ -971,6 +983,7 @@ run_build_once() {
     log "  Ensuring Docker images for eval are built (one-time per pipeline run)..."
 
     local build_log="${LOG_BASE}/docker_build.log"
+    mkdir -p "$(dirname "$build_log")"
     local cmd=(
         "$VENV_PYTHON" commit0/cli_rust.py build
         --commit0-config-file "$COMMIT0_CONFIG"

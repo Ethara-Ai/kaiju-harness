@@ -37,6 +37,9 @@ class AgentConfig:
     # --- Rust-specific difficulty levers (Stage 1 zero-shot evaluation) ---
     repo_map_tokens: int = 1024  # Aider auto repo-map budget; 0 disables
     strip_aux_docs: bool = False  # If True, README/CHANGELOG/etc hidden from agent
+    blind_lint: bool = False  # If True, Stage 2 sees only "build failed: N errors" not full output
+    blind_tests: bool = False  # If True, Stage 3 sees only summary line not per-test failures
+    strip_non_stubs: bool = False  # If True, hide non-stubbed source from agent context
 
     def __post_init__(self):
         if not isinstance(self.model_name, str) or not self.model_name.strip():
