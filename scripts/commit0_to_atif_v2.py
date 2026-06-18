@@ -587,7 +587,6 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
         instance_id = f"{instance_id}__{branch_suffix}"
     st.instance_id = instance_id
     st.md_edit_count = _md_search_replace_count(md)
-    start_ts = timestamps[0] if real_ts else None
 
     steps: list[Step] = []
     sid = 0

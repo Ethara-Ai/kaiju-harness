@@ -81,7 +81,7 @@ class RustSpec(Spec):
             f"  git apply --allow-empty --3way -v {diff_path} 2>git_apply_stderr.log",
             "  apply_rc=$?",
             "  if [ $apply_rc -ne 0 ]; then",
-            f"    echo \"INFO: --3way apply failed (rc=$apply_rc); retrying with plain git apply\" >&2",
+            "    echo \"INFO: --3way apply failed (rc=$apply_rc); retrying with plain git apply\" >&2",
             f"    git apply --allow-empty -v {diff_path} 2>>git_apply_stderr.log",
             "    apply_rc=$?",
             "  fi",

@@ -102,7 +102,7 @@ def _collect_pom(repo_root: Path) -> list[Signal]:
         return []
     # Strip default namespace to make ElementTree XPath work without prefixes
     no_ns = re.sub(r'\sxmlns="[^"]+"', "", content, count=1)
-    import xml.etree.ElementTree as ET
+    import defusedxml.ElementTree as ET
 
     try:
         root = ET.fromstring(no_ns)

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-commit0_to_harbor_dataset.py
+"""commit0_to_harbor_dataset.py
 
 Converts raw kaiju/commit0 task directories into Harbor TaskConfig v1.2 dataset packages.
 
@@ -398,8 +397,7 @@ REQUIRED_OUTPUT_FILES = (
 # ---------------------------------------------------------------------------
 
 def escape_toml_string(value: str) -> str:
-    """
-    Escape a string for safe inclusion in a TOML basic-string literal.
+    """Escape a string for safe inclusion in a TOML basic-string literal.
     Escapes: backslash, double-quote, newline, carriage return, tab.
     """
     if not isinstance(value, str):
@@ -422,8 +420,7 @@ def toml_string_list(items: list[str]) -> str:
 
 
 def validate_required_fields(data: dict, task_name: str, language: str = "python") -> None:
-    """
-    Validate the kaiju RepoInstance JSON has all fields the converter consumes.
+    """Validate the kaiju RepoInstance JSON has all fields the converter consumes.
     Raises ValueError with a clear message naming the missing field path.
     """
     missing = [f for f in REQUIRED_INSTANCE_FIELDS if f not in data]
@@ -460,8 +457,7 @@ def validate_required_fields(data: dict, task_name: str, language: str = "python
 
 
 def validate_instance_id(instance_id: str) -> None:
-    """
-    Validate that instance_id matches Harbor's PackageInfo.name regex.
+    """Validate that instance_id matches Harbor's PackageInfo.name regex.
     Harbor's TaskConfig.model_validate_toml will reject mismatches; we fail
     earlier here with a clear message.
     """
@@ -474,8 +470,7 @@ def validate_instance_id(instance_id: str) -> None:
 
 
 def validate_fork_repo(fork_repo: str, task_name: str) -> None:
-    """
-    Validate data['repo'] is a plausible GitHub <org>/<name> path.
+    """Validate data['repo'] is a plausible GitHub <org>/<name> path.
     Rejects empty strings, missing/extra slashes, shell-special characters.
     """
     if not fork_repo or not isinstance(fork_repo, str):
@@ -499,11 +494,10 @@ def validate_fork_repo(fork_repo: str, task_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def load_dataset_json(task_dir: pathlib.Path, task_name: str) -> dict[str, Any]:
-    """
-    Load <task>_dataset.json. Handles:
-      - JSON array (canonical commit0 format) — returns first record (warns if >1)
-      - Wrapped object {'entries' | 'instances' | 'data': [...]}
-      - Bare JSON object — returned as-is
+    """Load <task>_dataset.json. Handles:
+    - JSON array (canonical commit0 format) — returns first record (warns if >1)
+    - Wrapped object {'entries' | 'instances' | 'data': [...]}
+    - Bare JSON object — returned as-is
     """
     json_path = task_dir / f"{task_name}_dataset.json"
     if not json_path.exists():
@@ -539,8 +533,7 @@ def load_dataset_json(task_dir: pathlib.Path, task_name: str) -> dict[str, Any]:
 
 
 def extract_spec_text(specs_dir: pathlib.Path, repo_name: str) -> str:
-    """
-    Decompress specs/<repo_name>.pdf.bz2 and extract text via PyMuPDF.
+    """Decompress specs/<repo_name>.pdf.bz2 and extract text via PyMuPDF.
     Returns up to MAX_SPEC_LENGTH chars. Returns "" if:
       - the bz2 file does not exist
       - the bz2 archive is corrupt
@@ -600,8 +593,7 @@ def extract_spec_text(specs_dir: pathlib.Path, repo_name: str) -> str:
 
 
 def load_test_ids(test_ids_dir: pathlib.Path, repo_name: str) -> list[str]:
-    """
-    Decompress test-ids/<repo_name>.bz2 and return list of pytest node IDs.
+    """Decompress test-ids/<repo_name>.bz2 and return list of pytest node IDs.
     - Strips trailing whitespace (CR/LF/space) from each line
     - Drops empty lines
     - Warns (does NOT auto-dedupe) if duplicates are present, so n_test_ids
@@ -630,8 +622,7 @@ def load_test_ids(test_ids_dir: pathlib.Path, repo_name: str) -> list[str]:
 
 
 def ecr_tag(instance_id: str) -> str:
-    """
-    Derive the ECR image tag from instance_id.
+    """Derive the ECR image tag from instance_id.
 
     Convention: tag = last '/'-segment.  ("commit-0/apispec" -> "apispec")
 
@@ -657,8 +648,7 @@ def build_task_package(
     skip_spec: bool = False,
     allow_unverified_ecr: bool = False,
 ) -> bool:
-    """
-    Build a Harbor task package for one commit0 task.
+    """Build a Harbor task package for one commit0 task.
 
     Returns True if the package was written, False if skipped (already exists).
     Raises on unrecoverable errors (missing required files, parse failures,

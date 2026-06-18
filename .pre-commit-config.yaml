@@ -51,3 +51,10 @@ repos:
   hooks:
     - id: shellcheck
       args: [--severity=error]
+
+# Secret scanning (audit finding CG-002). Blocks commits/PRs that introduce
+# credentials, API keys, or service-account JSON. Runs in CI via pre-commit.yml.
+- repo: https://github.com/gitleaks/gitleaks
+  rev: v8.21.2
+  hooks:
+    - id: gitleaks

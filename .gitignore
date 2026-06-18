@@ -124,6 +124,13 @@ celerybeat.pid
 # Environments
 .env
 !.env.example
+
+# GCP / cloud service-account keys (never commit credentials)
+*-service-account*.json
+*service_account*.json
+kaiju-*-*.json
+gcp-*.json
+*.serviceaccount.json
 .venv
 node_modules
 env/

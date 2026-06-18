@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     import fitz
     from bs4 import BeautifulSoup
     from PyPDF2 import PdfMerger
-    from playwright.sync_api import Browser, Page
 
 try:
     import fitz  # type: ignore[no-redef]

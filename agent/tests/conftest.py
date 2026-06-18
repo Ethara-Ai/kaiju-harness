@@ -30,7 +30,7 @@ def _install_aider_stubs() -> None:
         def __getattr__(self, name):
             return _StubClass()
 
-    class _StubException(Exception):
+    class _StubError(Exception):
         pass
 
     import importlib.machinery
@@ -45,7 +45,7 @@ def _install_aider_stubs() -> None:
     aider_io = _module("aider.io", {"InputOutput": _StubClass})
     aider_coders_base = _module(
         "aider.coders.base_coder",
-        {"FinishReasonLength": _StubException, "Coder": _StubClass},
+        {"FinishReasonLength": _StubError, "Coder": _StubClass},
     )
     aider_coders = _module(
         "aider.coders",
