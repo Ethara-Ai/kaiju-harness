@@ -187,8 +187,15 @@ lint.unfixable = []
 "tests/**/*.py" = ["D"]
 
 [tool.uv]
+# aiohttp: the aider-chat fork hard-pins aiohttp==3.13.3, which is vulnerable to
+# GHSA-63hf-3vf5-4wqf (CVE-2026-34520: llhttp C parser accepts NUL/control chars
+# in HTTP response headers). 3.13.4 is the patched release and an API-stable
+# patch bump, so we override the fork's exact pin. Kept on the 3.13.x line to
+# minimise regression risk in the litellm/aider completion path. aiohttp is
+# transitive-only (no direct imports in commit0).
 override-dependencies = [
     "litellm",
+    "aiohttp>=3.13.4,<3.14",
 ]
 
 [tool.uv.sources]

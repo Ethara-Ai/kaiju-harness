@@ -131,7 +131,9 @@ def get_blank_repo_metrics(
                 code_tree = ast.parse(code)
             except Exception as e:
                 logger.warning(
-                    "Trouble parsing %s: %s", os.path.join(blank_source_code_folder, filename), e
+                    "Trouble parsing %s: %s",
+                    os.path.join(blank_source_code_folder, filename),
+                    e,
                 )
                 continue
             for node in ast.walk(code_tree):
@@ -274,7 +276,7 @@ def render_mds(overwrite_previous: bool, subfolder: str = "docs") -> NoReturn:
 
                 for pytest_group, pytest_info in repo_pytest_results.items():
                     pytest_group = os.path.basename(pytest_group.strip("/"))
-                    patch_diff = f"""\n\n## Patch diff\n```diff\n{pytest_info['patch_diff']}```"""
+                    patch_diff = f"""\n\n## Patch diff\n```diff\n{pytest_info["patch_diff"]}```"""
                     if "failed_to_run" in pytest_info:
                         resolved = False
                         if write_submission:
@@ -367,7 +369,7 @@ def render_mds(overwrite_previous: bool, subfolder: str = "docs") -> NoReturn:
                     avg_pass_rate * 100,
                     f"\n|{display_name}|"
                     f"{repos_resolved}|"
-                    f"{avg_pass_rate*100:.2f}%|"
+                    f"{avg_pass_rate * 100:.2f}%|"
                     f"{total_duration:.2f}|"
                     f"{submission_date}|"
                     f"{analysis_link}|"
@@ -383,7 +385,7 @@ def render_mds(overwrite_previous: bool, subfolder: str = "docs") -> NoReturn:
                         avg_lite_pass_rate * 100,
                         f"\n|{display_name} (subset of `all`)|"
                         f"{lite_repos_resolved}|"
-                        f"{avg_lite_pass_rate*100:.2f}%|"
+                        f"{avg_lite_pass_rate * 100:.2f}%|"
                         f"{lite_total_duration:.2f}|"
                         f"{submission_date}|"
                         f"{analysis_link}|"
@@ -446,9 +448,16 @@ def main(args: argparse.Namespace) -> NoReturn:
 
     if args.get_blank_details:
         if args.do_setup:
-            os.system(
-                f"commit0 setup {args.split} --base-dir {analysis_files_path}/repos "
-                f"--commit0-config-file {analysis_files_path}/repos/.commit0.yaml"
+            subprocess.run(
+                [
+                    "commit0",
+                    "setup",
+                    args.split,
+                    "--base-dir",
+                    f"{analysis_files_path}/repos",
+                    "--commit0-config-file",
+                    f"{analysis_files_path}/repos/.commit0.yaml",
+                ]
             )
         branch_name = "blank"
         if args.overwrite_previous_eval:
@@ -490,9 +499,16 @@ def main(args: argparse.Namespace) -> NoReturn:
             analysis_files_path, "repos", org_name, branch_name
         )
         if args.do_setup:
-            os.system(
-                f"commit0 setup {args.split} --base-dir {submission_repos_path} "
-                f"--commit0-config-file {commit0_config_file}"
+            subprocess.run(
+                [
+                    "commit0",
+                    "setup",
+                    args.split,
+                    "--base-dir",
+                    submission_repos_path,
+                    "--commit0-config-file",
+                    commit0_config_file,
+                ]
             )
         submission_metrics_output_file = os.path.join(
             analysis_files_path, org_name, f"{branch_name}.json"
@@ -517,9 +533,14 @@ def main(args: argparse.Namespace) -> NoReturn:
             else:
                 need_re_eval = True
         if args.overwrite_previous_eval or need_re_eval:
-            os.system(
-                "commit0 evaluate --reference "
-                f"--commit0-config-file {commit0_config_file}"
+            subprocess.run(
+                [
+                    "commit0",
+                    "evaluate",
+                    "--reference",
+                    "--commit0-config-file",
+                    commit0_config_file,
+                ]
             )
         # get coverage and pytest info for each repo
         for example in dataset:
@@ -593,9 +614,17 @@ def main(args: argparse.Namespace) -> NoReturn:
                 },
             )
             # run pytests
-            os.system(
-                f"commit0 evaluate --branch {branch_name} --timeout 1800"
-                f"--commit0-config-file {commit0_config_file}"
+            subprocess.run(
+                [
+                    "commit0",
+                    "evaluate",
+                    "--branch",
+                    branch_name,
+                    "--timeout",
+                    "1800",
+                    "--commit0-config-file",
+                    commit0_config_file,
+                ]
             )
             for example in dataset:
                 repo_name = example["repo"].split("/")[-1]
