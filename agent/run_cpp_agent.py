@@ -14,7 +14,6 @@ from tqdm import tqdm
 from agent.agent_utils import create_branch, load_agent_config
 from agent.agent_utils_cpp import (
     extract_cpp_function_stubs,
-    get_cpp_test_ids,
     get_target_edit_files_cpp,
 )
 from agent.agents_cpp import CppAiderAgents
@@ -32,6 +31,43 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _make_blind_lint_cmd(base_cmd: str) -> str:
+    """Wrap lint so agent sees only 'lint clean' or 'lint failed: N issues'."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "if [ $rc -eq 0 ]; then echo lint clean; "
+        "else n=$(printf \"%s\" \"$out\" | grep -cE \":[0-9]+:\" 2>/dev/null); n=${n:-0}; "
+        "printf \"lint failed: %s issues\\n\" \"$n\"; fi; exit $rc'"
+    )
+
+
+def _make_blind_test_cmd(base_cmd: str) -> str:
+    """Wrap test cmd so agent sees only the summary line, not per-test failures."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "summary=$(printf \"%s\" \"$out\" | grep -E \"passed|failed|error\" | tail -1); "
+        "if [ -n \"$summary\" ]; then printf \"%s\\n\" \"$summary\"; "
+        "else printf \"tests done\\n\"; fi; exit $rc'"
+    )
+
+
+def _make_names_only_test_cmd(base_cmd: str) -> str:
+    """Wrap test cmd so agent sees only failed test node IDs + counts, no tracebacks."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "if [ $rc -eq 0 ]; then printf \"tests pass\\n\"; "
+        "else "
+        "failed=$(printf \"%s\" \"$out\" | sed -nE \"s/^FAILED ([^ ]+).*/- \\1/p\"); "
+        "n_failed=$(printf \"%s\" \"$failed\" | grep -cE \"^- \" 2>/dev/null); n_failed=${n_failed:-0}; "
+        "n_passed=$(printf \"%s\" \"$out\" | grep -oE \"[0-9]+ passed\" | head -1 | cut -d\" \" -f1); n_passed=${n_passed:-0}; "
+        "total=$((n_failed + n_passed)); "
+        "if [ -n \"$failed\" ]; then printf \"%s/%s tests failed:\\n%s\\n\" \"$n_failed\" \"$total\" \"$failed\"; "
+        "elif [ \"$n_passed\" -gt 0 ]; then printf \"tests pass (non-zero rc, likely coverage/lint gate): %s passed, rc=%s\\n\" \"$n_passed\" \"$rc\"; "
+        "else printf \"tests failed (no per-test names parsed): rc=%s\\n\" \"$rc\"; fi; "
+        "fi; exit $rc'"
+    )
 
 _CPP_PROMPT_PATH = Path(__file__).parent / "prompts" / "cpp_system_prompt.md"
 
@@ -155,7 +191,22 @@ def run_cpp_agent_for_repo(
         _mark_module_done(stable_log_dir)
         return
 
-    _test_ids = get_cpp_test_ids(repo_path)  # noqa: F841 — kept for parity with Rust agent
+    if agent_config.strip_non_stubs:
+        _stub_marker = 'throw std::runtime_error("STUB: not implemented")'
+        _filtered: list[str] = []
+        for _tf in target_files:
+            _full = Path(repo_path) / _tf
+            try:
+                if _full.exists() and _stub_marker in _full.read_text(errors="replace"):
+                    _filtered.append(_tf)
+            except OSError:
+                pass
+        logger.info(
+            "strip_non_stubs: kept %d/%d target files",
+            len(_filtered), len(target_files),
+        )
+        target_files = _filtered
+
 
     try:
         local_repo = Repo(repo_path)
@@ -174,6 +225,23 @@ def run_cpp_agent_for_repo(
 
     lint_cmd = get_cpp_lint_cmd(repo_path)
     test_cmd = "ctest --test-dir build --output-on-failure"
+
+    _test_files_ro = [
+        str(p) for p in Path(repo_path).rglob("*.cpp")
+        if "/test" in str(p) or "/tests/" in str(p)
+    ]
+    _test_files_ro += [
+        str(p) for p in Path(repo_path).rglob("*.hpp")
+        if "/test" in str(p) or "/tests/" in str(p)
+    ]
+
+    if agent_config.blind_lint and lint_cmd:
+        lint_cmd = _make_blind_lint_cmd(lint_cmd)
+    if agent_config.blind_tests:
+        test_cmd = _make_blind_test_cmd(test_cmd)
+    elif agent_config.names_only_tests:
+        test_cmd = _make_names_only_test_cmd(test_cmd)
+
 
     agent = CppAiderAgents(
         agent_config.max_iteration,
@@ -239,6 +307,8 @@ def run_cpp_agent_for_repo(
                             current_module=stem,
                             max_test_output_length=agent_config.max_test_output_length,
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                            test_files_readonly=_test_files_ro,
                         )
                 if agent_config.record_test_for_each_commit and commit0_config_file:
                     current_commit = local_repo.head.commit.hexsha
@@ -267,6 +337,8 @@ def run_cpp_agent_for_repo(
                             thinking_capture=thinking_capture,
                             current_stage="lint",
                             current_module=stem,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                            test_files_readonly=_test_files_ro,
                         )
             except Exception as e:
                 logger.error(f"Agent failed for {repo_name}/{tf} (lint mode): {e}")
@@ -289,6 +361,8 @@ def run_cpp_agent_for_repo(
                             thinking_capture=thinking_capture,
                             current_stage="draft",
                             current_module=stem,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                            test_files_readonly=_test_files_ro,
                         )
             except Exception as e:
                 logger.error(f"Agent failed for {repo_name}/{tf} (draft mode): {e}")

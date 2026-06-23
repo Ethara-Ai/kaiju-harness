@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from aider.coders import Coder
-from aider.io import InputOutput
+from agent.guarded_io import GuardedInputOutput
 from aider.models import Model
 
 from agent.agents import (
@@ -336,6 +336,8 @@ class JavaAgents(Agents):
         current_module: str = "",
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
+        test_files_readonly: Optional[list] = None,
+        inject_test_files_readonly: bool = True,
     ) -> AgentReturn:
         auto_test = bool(test_cmd)
         auto_lint = bool(lint_cmd)
@@ -363,24 +365,30 @@ class JavaAgents(Agents):
             handle_logging("httpx", log_file)
             handle_logging("backoff", log_file)
 
-            io = InputOutput(
+            io = GuardedInputOutput(
                 yes=True,
                 input_history_file=input_history_file,
                 chat_history_file=chat_history_file,
+                protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")
 
             coder = Coder.create(
                 main_model=self.model,
                 fnames=fnames,
+                read_only_fnames=(test_files_readonly or []) if inject_test_files_readonly else [],
                 auto_lint=auto_lint,
                 auto_test=auto_test,
                 lint_cmds={"java": lint_cmd},
                 test_cmd=test_cmd,
                 io=io,
                 cache_prompts=self.config.cache_prompts,
+                detect_urls=False,
             )
-            coder.max_reflections = self.config.max_iteration
+            if test_files_readonly and inject_test_files_readonly:
+                coder.max_reflections = min(self.config.max_iteration, 5)
+            else:
+                coder.max_reflections = self.config.max_iteration
             coder.stream = True
 
             if thinking_capture is not None:
@@ -391,12 +399,24 @@ class JavaAgents(Agents):
             if self.system_prompt:
                 coder.gpt_prompts.main_system += "\n\n" + self.system_prompt
 
-            coder.gpt_prompts.main_system += (
-                "\n\nNEVER edit test files. NEVER create new test files. Test files are"
-                " read-only reference material. If a test file is provided, use it ONLY"
-                " to understand expected behavior. Only modify implementation/source files"
-                " to make the tests pass."
-            )
+            if inject_test_files_readonly:
+                coder.gpt_prompts.main_system += (
+                    "\n\nNEVER edit test files. NEVER create new test files. "
+                    "Test files are read-only reference material \u2014 use ONLY to understand expected behavior. "
+                    "Modify implementation/source files to make tests pass."
+                )
+            else:
+                coder.gpt_prompts.main_system += (
+                    "\n\nTest files are UNAVAILABLE. NEVER ask to see them. NEVER request paths under src/test/. "
+                    "If aider prompts you to add a test file, the request will be REFUSED \u2014 do not retry."
+                    "\n\nYour job is SPEC-DRIVEN implementation:"
+                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`throw new UnsupportedOperationException`, TODO)."
+                    "\n  2. Infer expected behavior from method signatures, Javadoc, and the library specification."
+                    "\n  3. Implement from first principles \u2014 do NOT reverse-engineer from test outputs."
+                    "\n  4. Test feedback is intentionally minimal (counts only). Use it as a yes/no signal, not as a debugging aid."
+                    "\n  5. If you cannot infer behavior for a method, leave a TODO comment and move on. Do not stall."
+                    "\n\nThe test suite is complete and frozen. Your only output is implementation code in src/main/java/."
+                )
 
             _test_summarizer_costs: list[SummarizerCost] = []
 

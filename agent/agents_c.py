@@ -228,6 +228,8 @@ class CAgents(ABC):
         current_module: str = "",
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
+        test_files_readonly: Optional[list[str]] = None,
+        inject_test_files_readonly: bool = True,
     ) -> CAgentReturn:
         raise NotImplementedError
 
@@ -328,9 +330,11 @@ class AiderCAgents(CAgents):
         current_module: str = "",
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
+        test_files_readonly: Optional[list[str]] = None,
+        inject_test_files_readonly: bool = True,
     ) -> AiderCReturn:
         from aider.coders import Coder
-        from aider.io import InputOutput
+        from agent.guarded_io import GuardedInputOutput
 
         auto_test = bool(test_cmd)
         auto_lint = bool(lint_cmd)
@@ -354,10 +358,11 @@ class AiderCAgents(CAgents):
             handle_logging("httpx", log_file)
             handle_logging("backoff", log_file)
 
-            io = InputOutput(
+            io = GuardedInputOutput(
                 yes=True,
                 input_history_file=input_history_file,
                 chat_history_file=chat_history_file,
+                protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")
 
@@ -366,6 +371,7 @@ class AiderCAgents(CAgents):
             coder = Coder.create(
                 main_model=self.model,
                 fnames=fnames,
+                read_only_fnames=(test_files_readonly or []) if inject_test_files_readonly else [],
                 auto_lint=auto_lint,
                 auto_test=auto_test,
                 lint_cmds=lint_cmds,
@@ -374,18 +380,35 @@ class AiderCAgents(CAgents):
                 cache_prompts=self.cache_prompts,
                 detect_urls=False,
             )
-            coder.max_reflections = self.max_iteration
+            if test_files_readonly and inject_test_files_readonly:
+                coder.max_reflections = min(self.max_iteration, 5)
+            else:
+                coder.max_reflections = self.max_iteration
             coder.stream = True
-            coder.gpt_prompts.main_system += (
-                "\n\nNEVER edit test files (files under tests/, test/, or matching "
-                "test_*.c / *_test.c / check_*.c). Test files are read-only reference "
-                "material. Only modify implementation/source files to make the tests pass."
-                '\n\nIMPORTANT: Functions whose body calls `STUB_PANIC("...")` need'
-                " implementation. Replace the stub body with working C code. The code"
-                " must compile before any tests will run — if a function is incomplete,"
-                " leave a minimal placeholder that builds rather than a broken stub."
-                " Your job is to write the implementation code that makes existing tests pass."
-            )
+            if inject_test_files_readonly:
+                coder.gpt_prompts.main_system += (
+                    "\n\nNEVER edit test files (files under tests/, test/, or matching "
+                    "test_*.c / *_test.c / check_*.c). Test files are read-only reference "
+                    "material \u2014 use ONLY to understand expected behavior. "
+                    "Modify implementation/source files to make tests pass."
+                    '\n\nIMPORTANT: Functions whose body calls `STUB_PANIC("...")` need'
+                    " implementation. Replace the stub body with working C code. The code"
+                    " must compile before any tests will run \u2014 if a function is incomplete,"
+                    " leave a minimal placeholder that builds rather than a broken stub."
+                    " Your job is to write the implementation code that makes existing tests pass."
+                )
+            else:
+                coder.gpt_prompts.main_system += (
+                    "\n\nTest files are UNAVAILABLE. NEVER ask to see them. NEVER request paths under tests/. "
+                    "If aider prompts you to add a test file, the request will be REFUSED \u2014 do not retry."
+                    "\n\nYour job is SPEC-DRIVEN implementation:"
+                    "\n  1. Read the source files in /chat; identify unimplemented stubs (functions calling `STUB_PANIC(\"...\")`).",
+                    "\n  2. Infer expected behavior from function signatures, comments, and the library specification.",
+                    "\n  3. Implement from first principles \u2014 do NOT reverse-engineer from test outputs.",
+                    "\n  4. Test feedback is intentionally minimal (counts only). Use it as a yes/no signal, not as a debugging aid.",
+                    "\n  5. If you cannot infer behavior for a function, leave a minimal placeholder that builds. Do not stall.",
+                    "\n\nThe test suite is complete and frozen. Your only output is implementation code."
+                )
 
             _test_summarizer_costs: list[SummarizerCost] = []
 

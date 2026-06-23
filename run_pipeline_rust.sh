@@ -40,6 +40,8 @@ STRIP_AUX_DOCS="false"
 BLIND_LINT="false"
 BLIND_TESTS="false"
 STRIP_NON_STUBS="false"
+INJECT_TEST_FILES_READONLY="true"
+NAMES_ONLY_TESTS="false"
 
 # ============================================================
 # Argument Parsing
@@ -96,6 +98,8 @@ Options:
   --blind-lint               Stage 2 sees only "build failed: N errors" (default: full clippy output)
   --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
   --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
+  --names-only-tests         Stage 3 shows only failed test names, not tracebacks (default: full output)
+  --no-test-files-readonly   Do not inject test files as read-only reference (default: inject)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
@@ -122,6 +126,8 @@ while [[ $# -gt 0 ]]; do
         --blind-lint) BLIND_LINT="true"; shift ;;
         --blind-tests) BLIND_TESTS="true"; shift ;;
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
+        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
+        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -752,6 +758,8 @@ strip_aux_docs: ${STRIP_AUX_DOCS}
 blind_lint: ${BLIND_LINT}
 blind_tests: ${BLIND_TESTS}
 strip_non_stubs: ${STRIP_NON_STUBS}
+names_only_tests: ${NAMES_ONLY_TESTS}
+inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
 language: rust
 EOF
     log "  Wrote agent config: ${AGENT_CONFIG}"

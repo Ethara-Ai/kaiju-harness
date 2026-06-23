@@ -40,6 +40,11 @@ class JavaAgentConfig:
     output_jsonl: bool = False
     record_test_for_each_commit: bool = False
     model_short: str = ""
+    blind_lint: bool = False
+    blind_tests: bool = False
+    names_only_tests: bool = False
+    strip_non_stubs: bool = False
+    inject_test_files_readonly: bool = True
 
     def __post_init__(self):
         if not isinstance(self.model, str) or not self.model.strip():

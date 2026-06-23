@@ -23,7 +23,7 @@ from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
 from agent.llm_cost_capture import capture_module_calls
-from commit0.harness.constants_ts import TS_SPLIT
+from commit0.harness.constants_ts import TS_SPLIT, TS_STUB_MARKER
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_ts_test_ids import main as get_ts_tests
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
@@ -35,6 +35,9 @@ from agent.run_agent_no_rich import (
     _is_module_done,
     _mark_module_done,
     _get_stable_log_dir,
+    _make_blind_test_cmd,
+    _make_blind_lint_cmd,
+    _make_names_only_test_cmd,
 )
 import logging
 
@@ -120,6 +123,13 @@ def run_agent_for_repo_ts(
             branch,
             example["reference_commit"],
         )
+        if agent_config.strip_non_stubs:
+            orig_count = len(target_edit_files)
+            target_edit_files = [
+                f for f in target_edit_files
+                if (Path(repo_path) / f).exists() and TS_STUB_MARKER in (Path(repo_path) / f).read_text(errors="replace")
+            ]
+            logger.info("strip_non_stubs: kept %d/%d target files", len(target_edit_files), orig_count)
 
         test_files_str = [xx for x in get_ts_tests(repo_name, verbose=0) for xx in x]
         # TS test IDs use ' > ' separator (e.g., 'test/foo.test.ts > describe > test')
@@ -149,6 +159,7 @@ def run_agent_for_repo_ts(
             else:
                 logger.warning("Test file not found, skipping: %s", tf)
         test_files.sort()
+        test_files_readonly = [str(Path(repo_path) / tf) for tf in test_files]
 
         experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
 
@@ -204,9 +215,15 @@ def run_agent_for_repo_ts(
                         f" --commit0-config-file {shlex.quote(commit0_config_file)}"
                         f" --timeout 100"
                     )
+                    if agent_config.blind_tests:
+                        test_cmd = _make_blind_test_cmd(test_cmd)
+                    elif agent_config.names_only_tests:
+                        test_cmd = _make_names_only_test_cmd(test_cmd)
                     lint_cmd = get_ts_lint_cmd(
                         repo_name, agent_config.use_lint_info, commit0_config_file
                     )
+                    if agent_config.blind_lint and lint_cmd:
+                        lint_cmd = _make_blind_lint_cmd(lint_cmd)
                     message, spec_costs = get_message_ts(
                         agent_config, repo_path, test_files=[test_file]
                     )
@@ -233,6 +250,8 @@ def run_agent_for_repo_ts(
                             current_module=test_file_name,
                             max_test_output_length=agent_config.max_test_output_length,
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
@@ -285,6 +304,8 @@ def run_agent_for_repo_ts(
                     lint_cmd = get_ts_lint_cmd(
                         repo_name, agent_config.use_lint_info, commit0_config_file
                     )
+                    if agent_config.blind_lint and lint_cmd:
+                        lint_cmd = _make_blind_lint_cmd(lint_cmd)
 
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
@@ -303,6 +324,8 @@ def run_agent_for_repo_ts(
                             thinking_capture=thinking_capture,
                             current_stage="lint",
                             current_module=lint_file_name,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(lint_log_dir)
@@ -354,6 +377,8 @@ def run_agent_for_repo_ts(
                     lint_cmd = get_ts_lint_cmd(
                         repo_name, agent_config.use_lint_info, commit0_config_file
                     )
+                    if agent_config.blind_lint and lint_cmd:
+                        lint_cmd = _make_blind_lint_cmd(lint_cmd)
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
                     with capture_module_calls(
@@ -370,6 +395,8 @@ def run_agent_for_repo_ts(
                             thinking_capture=thinking_capture,
                             current_stage="draft",
                             current_module=file_name,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)

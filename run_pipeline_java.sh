@@ -50,6 +50,11 @@ SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_PARALLEL_REPOS=1
 MAX_TEST_OUTPUT_LENGTH=15000
+INJECT_TEST_FILES_READONLY="true"
+BLIND_LINT="false"
+BLIND_TESTS="false"
+NAMES_ONLY_TESTS="false"
+STRIP_NON_STUBS="false"
 
 print_usage() {
     cat <<'USAGE'
@@ -89,6 +94,11 @@ Options:
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
   --max-test-output-length <n>  Max test output length (default: 15000)
   --max-parallel-repos <n>     Max repos to run in parallel (default: 1, >1 enables batch mode)
+  --no-test-files-readonly        Disable test file injection as read-only context
+  --blind-lint                    Stage 2: show only lint count, not details
+  --blind-tests                   Stage 3: show only test summary line, not tracebacks
+  --names-only-tests              Stage 3: show only failed test names, not assertion text
+  --strip-non-stubs               Limit edits to files that contain stub markers
   -h, --help                 Show this help
 
 Examples:
@@ -118,6 +128,11 @@ while [[ $# -gt 0 ]]; do
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
+        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --blind-lint)             BLIND_LINT="true"; shift ;;
+        --blind-tests)            BLIND_TESTS="true"; shift ;;
+        --names-only-tests)       NAMES_ONLY_TESTS="true"; shift ;;
+        --strip-non-stubs)        STRIP_NON_STUBS="true"; shift ;;
         -h|--help)     print_usage ;;
         *)
             echo "Error: Unknown argument '$1'"
@@ -638,6 +653,22 @@ run_java_agent_loop() {
         common_flags+=(--override-previous)
     else
         common_flags+=(--no-override-previous)
+    fi
+
+    if [[ "$BLIND_LINT" == "true" ]]; then
+        common_flags+=(--blind-lint)
+    fi
+    if [[ "$BLIND_TESTS" == "true" ]]; then
+        common_flags+=(--blind-tests)
+    fi
+    if [[ "$NAMES_ONLY_TESTS" == "true" ]]; then
+        common_flags+=(--names-only-tests)
+    fi
+    if [[ "$STRIP_NON_STUBS" == "true" ]]; then
+        common_flags+=(--strip-non-stubs)
+    fi
+    if [[ "$INJECT_TEST_FILES_READONLY" == "false" ]]; then
+        common_flags+=(--no-inject-test-files-readonly)
     fi
 
     if [[ "$MAX_PARALLEL_REPOS" -gt 1 ]]; then

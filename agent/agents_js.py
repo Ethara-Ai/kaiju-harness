@@ -255,6 +255,8 @@ class JsAgents(ABC):
         current_module: str = "",
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
+        test_files_readonly: list[str] | None = None,
+        inject_test_files_readonly: bool = True,
     ) -> JsAgentReturn:
         raise NotImplementedError
 
@@ -354,6 +356,7 @@ class AiderJsAgents(JsAgents):
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
         test_files_readonly: list[str] | None = None,
+        inject_test_files_readonly: bool = True,
     ) -> AiderJsReturn:
         from aider.coders import Coder
         from agent.guarded_io import GuardedInputOutput
@@ -404,15 +407,16 @@ class AiderJsAgents(JsAgents):
             coder = Coder.create(
                 main_model=self.model,
                 fnames=fnames,
-                read_only_fnames=test_files_readonly or [],
+                read_only_fnames=(test_files_readonly or []) if inject_test_files_readonly else [],
                 auto_lint=auto_lint,
                 auto_test=auto_test,
                 lint_cmds=lint_cmds,
                 test_cmd=test_cmd,
                 io=io,
                 cache_prompts=self.cache_prompts,
+                detect_urls=False,
             )
-            if test_files_readonly:
+            if test_files_readonly and inject_test_files_readonly:
                 coder.max_reflections = min(self.max_iteration, 5)
             else:
                 coder.max_reflections = self.max_iteration

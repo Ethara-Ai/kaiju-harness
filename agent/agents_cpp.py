@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from aider.coders import Coder
-from aider.io import InputOutput
+from agent.guarded_io import GuardedInputOutput
 
 from agent.agents import AiderAgents, AiderReturn, AgentReturn, handle_logging, _apply_thinking_capture_patches
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
@@ -51,6 +51,8 @@ class CppAiderAgents(AiderAgents):
         current_module: str = "",
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
+        test_files_readonly: Optional[list[str]] = None,
+        inject_test_files_readonly: bool = True,
     ) -> AgentReturn:
         """Start aider agent (C++ variant)."""
         if test_cmd:
@@ -78,15 +80,18 @@ class CppAiderAgents(AiderAgents):
             handle_logging("httpx", log_file)
             handle_logging("backoff", log_file)
 
-            io = InputOutput(
+            io = GuardedInputOutput(
                 yes=True,
                 input_history_file=input_history_file,
                 chat_history_file=chat_history_file,
+                protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")
+            _read_only = (test_files_readonly or []) if inject_test_files_readonly else []
             coder = Coder.create(
                 main_model=self.model,
                 fnames=fnames,
+                read_only_fnames=_read_only,
                 auto_lint=auto_lint,
                 auto_test=auto_test,
                 lint_cmds={"c++": lint_cmd},  # CPP CHANGE 1: key is "c++", not "python"
@@ -95,23 +100,31 @@ class CppAiderAgents(AiderAgents):
                 cache_prompts=self.cache_prompts,
                 detect_urls=False,
             )
-            coder.max_reflections = self.max_iteration
+            if test_files_readonly and inject_test_files_readonly:
+                coder.max_reflections = min(self.max_iteration, 5)
+            else:
+                coder.max_reflections = self.max_iteration
             coder.stream = True
 
-            # CPP CHANGE 2: Append C++-specific system prompt instead of Python one.
-            coder.gpt_prompts.main_system += (
-                "\n\nYou are an expert C++ developer."
-                "\n\nNEVER edit test files. Test files are"
-                " read-only reference material. If a test file is provided, use it ONLY"
-                " to understand expected behavior. Only modify implementation/source files"
-                " to make the tests pass."
-                '\n\nIMPORTANT: If you see `throw std::runtime_error("STUB: not implemented")` placeholders, it means the'
-                " SOURCE code has unimplemented functions. Replace each"
-                ' `throw std::runtime_error("STUB: not implemented")`'
-                " with a correct implementation. Do NOT add new tests or modify existing"
-                " tests. The test suite is already complete -- your job is to write the"
-                " implementation code that makes existing tests pass."
-            )
+            # CPP CHANGE 2: System prompt — read-only vs blind mode
+            if inject_test_files_readonly:
+                coder.gpt_prompts.main_system += (
+                    "\n\nNEVER edit test files. NEVER create new test files. "
+                    "Test files are read-only reference material \u2014 use ONLY to understand expected behavior. "
+                    "Modify implementation/source files to make tests pass."
+                )
+            else:
+                coder.gpt_prompts.main_system += (
+                    "\n\nTest files are UNAVAILABLE. NEVER ask to see them. NEVER request paths under tests/. "
+                    "If aider prompts you to add a test file, the request will be REFUSED \u2014 do not retry."
+                    "\n\nYour job is SPEC-DRIVEN implementation:"
+                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`throw std::runtime_error(\"STUB: not implemented\")`).",
+                    "\n  2. Infer expected behavior from function signatures, type hints, docstrings, and the library specification."
+                    "\n  3. Implement from first principles \u2014 do NOT reverse-engineer from test outputs."
+                    "\n  4. Test feedback is intentionally minimal (counts only). Use it as a yes/no signal, not as a debugging aid."
+                    "\n  5. If you cannot infer behavior for a function, leave a TODO comment and move on. Do not stall."
+                    "\n\nThe test suite is complete and frozen. Your only output is implementation code in src/."
+                )
 
             _test_summarizer_costs: list[SummarizerCost] = []
 

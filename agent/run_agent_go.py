@@ -36,8 +36,14 @@ from agent.llm_cost_capture import capture_module_calls
 from agent.trajectory_writer import write_trajectory_md
 from agent.output_writer import extract_git_patch, build_metadata
 from agent.openhands_formatter import write_module_output_json
+from agent.run_agent_no_rich import (
+    _make_blind_lint_cmd,
+    _make_blind_test_cmd,
+    _make_names_only_test_cmd,
+)
 from commit0.harness.constants_go import (
     GO_SPLIT,
+    GO_STUB_MARKER,
 )
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_go_test_ids import main as get_go_test_ids
@@ -153,7 +159,16 @@ def run_agent_for_repo(
     )
     # Convert to relative paths for consistent log directory naming
     target_edit_files_rel = [os.path.relpath(f, repo_path) for f in target_edit_files]
+    if agent_config.strip_non_stubs:
+        orig_count = len(target_edit_files)
+        target_edit_files = [
+            f for f in target_edit_files
+            if Path(f).exists() and GO_STUB_MARKER in Path(f).read_text(errors="replace")
+        ]
+        target_edit_files_rel = [os.path.relpath(f, repo_path) for f in target_edit_files]
+        logger.info("strip_non_stubs: kept %d/%d target files", len(target_edit_files), orig_count)
     test_files = collect_go_test_files(repo_path)
+    test_files_readonly = test_files
     logger.info("Found %d target edit files for %s", len(target_edit_files), repo_name)
 
     test_files_str = [xx for x in get_go_test_ids(repo_name, verbose=0) for xx in x]
@@ -182,6 +197,10 @@ def run_agent_for_repo(
                     continue
                 update_queue.put(("set_current_file", (repo_name, test_id)))
                 test_cmd = f"{sys.executable} {_CLI_GO_PATH} test {repo_path} {test_id} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+                if agent_config.blind_tests:
+                    test_cmd = _make_blind_test_cmd(test_cmd)
+                elif agent_config.names_only_tests:
+                    test_cmd = _make_names_only_test_cmd(test_cmd)
                 short_test_id = (
                     test_id.rsplit("/", 1)[-1] if "/" in test_id else test_id
                 )
@@ -198,6 +217,8 @@ def run_agent_for_repo(
                     if agent_config.use_lint_info
                     else ""
                 )
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd(lint_cmd)
                 message, spec_costs = get_go_message(
                     agent_config,
                     repo_path,
@@ -225,6 +246,8 @@ def run_agent_for_repo(
                         current_module=test_id_safe,
                         max_test_output_length=agent_config.max_test_output_length,
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        test_files_readonly=test_files_readonly,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
@@ -244,6 +267,8 @@ def run_agent_for_repo(
                 repo_name,
                 commit0_config_file,
             )
+            if agent_config.blind_lint and lint_cmd:
+                lint_cmd = _make_blind_lint_cmd(lint_cmd)
             update_queue.put(("start_repo", (repo_name, len(target_edit_files_rel))))
             for edit_file, edit_file_rel in zip(
                 target_edit_files, target_edit_files_rel
@@ -272,6 +297,8 @@ def run_agent_for_repo(
                         current_module=file_name,
                         max_test_output_length=agent_config.max_test_output_length,
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        test_files_readonly=test_files_readonly,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
@@ -313,6 +340,8 @@ def run_agent_for_repo(
                     if agent_config.use_lint_info
                     else ""
                 )
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd(lint_cmd)
                 with capture_module_calls(
                     thinking_capture=thinking_capture,
                     module=file_name,
@@ -329,6 +358,8 @@ def run_agent_for_repo(
                         current_module=file_name,
                         max_test_output_length=agent_config.max_test_output_length,
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                        test_files_readonly=test_files_readonly,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha

@@ -207,6 +207,26 @@ def _make_blind_test_cmd() -> str:
     """Wrap cargo test so output is just the summary line, no per-test failures."""
     return f"bash -c '{_BLIND_TEST_SHELL}'"
 
+_NAMES_ONLY_TEST_SHELL = (
+    '_out=$(cargo test --all-features 2>&1); '
+    '_rc=$?; '
+    'if [ $_rc -eq 0 ]; then printf "tests pass\\n"; '
+    'else '
+    '_failed=$(printf "%s" "$_out" | sed -nE "s/^test (.+) \\.\\.\\. FAILED$/- \\1/p"); '
+    '_n_failed=$(printf "%s" "$_failed" | grep -cE "^- " 2>/dev/null); _n_failed=${_n_failed:-0}; '
+    '_n_passed=$(printf "%s" "$_out" | grep -oE "[0-9]+ passed" | head -1 | cut -d" " -f1); _n_passed=${_n_passed:-0}; '
+    '_total=$((_n_failed + _n_passed)); '
+    'if [ -n "$_failed" ]; then printf "%s/%s tests failed:\\n%s\\n" "$_n_failed" "$_total" "$_failed"; '
+    'elif [ "$_n_passed" -gt 0 ]; then printf "tests pass (non-zero rc, likely coverage/lint gate): %s passed, rc=%s\\n" "$_n_passed" "$_rc"; '
+    'else printf "tests failed (no per-test names parsed): rc=%s\\n" "$_rc"; fi; '
+    'fi; exit $_rc'
+)
+
+
+def _make_names_only_test_cmd() -> str:
+    """Wrap cargo test so agent sees only failed test names + counts, no tracebacks."""
+    return f"bash -c '{_NAMES_ONLY_TEST_SHELL}'"
+
 
 def get_rust_lint_cmd(repo_path: str) -> str:
     """Return the cargo clippy lint command for the repo at *repo_path*.
@@ -331,6 +351,10 @@ def run_rust_agent_for_repo(
             all_source_files = list(target_edit_files)
 
 
+    test_files_readonly = sorted(
+        str(p) for p in Path(repo_path).rglob("*.rs")
+        if "/tests/" in str(p) or p.parent.name == "tests"
+    )
     experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
     eval_results = {}
 
@@ -376,11 +400,12 @@ def run_rust_agent_for_repo(
                     logger.info("Skipping already-completed test module: %s", src_file_name)
                     continue
 
-                test_cmd = (
-                    _make_blind_test_cmd()
-                    if agent_config.blind_tests
-                    else "cargo test --all-features"
-                )
+                if agent_config.blind_tests:
+                    test_cmd = _make_blind_test_cmd()
+                elif agent_config.names_only_tests:
+                    test_cmd = _make_names_only_test_cmd()
+                else:
+                    test_cmd = "cargo test --all-features"
                 lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
                 if agent_config.blind_lint and lint_cmd:
                     lint_cmd = _make_blind_lint_cmd()
@@ -411,6 +436,8 @@ def run_rust_agent_for_repo(
                         max_test_output_length=agent_config.max_test_output_length,
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                         repo_map_tokens=agent_config.repo_map_tokens,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        test_files_readonly=test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(test_log_dir)
@@ -498,6 +525,8 @@ def run_rust_agent_for_repo(
                         current_stage="lint",
                         current_module=lint_file_name,
                         repo_map_tokens=agent_config.repo_map_tokens,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        test_files_readonly=test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(lint_log_dir)
@@ -584,6 +613,8 @@ def run_rust_agent_for_repo(
                         current_stage="draft",
                         current_module=file_name,
                         repo_map_tokens=agent_config.repo_map_tokens,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        test_files_readonly=test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(file_log_dir)

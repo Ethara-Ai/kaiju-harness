@@ -37,6 +37,41 @@ from commit0.harness.utils import _PROTECTED_TEST_PATHSPECS
 logger = logging.getLogger(__name__)
 
 
+def _make_blind_lint_cmd(base_cmd: str) -> str:
+    """Wrap lint so agent sees only 'lint clean' or 'lint failed: N issues'."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "if [ $rc -eq 0 ]; then echo lint clean; "
+        "else n=$(printf \"%s\" \"$out\" | grep -cE \":[0-9]+:\" 2>/dev/null); n=${n:-0}; "
+        "printf \"lint failed: %s issues\\n\" \"$n\"; fi; exit $rc'"
+    )
+
+
+def _make_blind_test_cmd(base_cmd: str) -> str:
+    """Wrap test cmd so agent sees only the summary line, not per-test failures."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "summary=$(printf \"%s\" \"$out\" | grep -E \"passed|failed|error\" | tail -1); "
+        "if [ -n \"$summary\" ]; then printf \"%s\\n\" \"$summary\"; "
+        "else printf \"tests done\\n\"; fi; exit $rc'"
+    )
+
+
+def _make_names_only_test_cmd(base_cmd: str) -> str:
+    """Wrap test cmd so agent sees only failed test node IDs + counts, no tracebacks."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "if [ $rc -eq 0 ]; then printf \"tests pass\\n\"; "
+        "else "
+        "failed=$(printf \"%s\" \"$out\" | sed -nE \"s/^FAILED ([^ ]+).*/- \\1/p\"); "
+        "n_failed=$(printf \"%s\" \"$failed\" | grep -cE \"^- \" 2>/dev/null); n_failed=${n_failed:-0}; "
+        "n_passed=$(printf \"%s\" \"$out\" | grep -oE \"[0-9]+ passed\" | head -1 | cut -d\" \" -f1); n_passed=${n_passed:-0}; "
+        "total=$((n_failed + n_passed)); "
+        "if [ -n \"$failed\" ]; then printf \"%s/%s tests failed:\\n%s\\n\" \"$n_failed\" \"$total\" \"$failed\"; "
+        "elif [ \"$n_passed\" -gt 0 ]; then printf \"tests pass (non-zero rc, likely coverage/lint gate): %s passed, rc=%s\\n\" \"$n_passed\" \"$rc\"; "
+        "else printf \"tests failed (no per-test names parsed): rc=%s\\n\" \"$rc\"; fi; "
+        "fi; exit $rc'"
+    )
 class DirContext:
     def __init__(self, d: str):
         self.dir = d
@@ -263,6 +298,11 @@ def run_java_agent(
 
     java_files = collect_java_files(repo_path)
     stubbed_files = [f for f in java_files if is_java_stubbed(f)]
+    if agent_config.strip_non_stubs:
+        logger.info(
+            "strip_non_stubs: Java already operates on stub-only files; %d/%d files are stubs",
+            len(stubbed_files), len(java_files),
+        )
 
     if not stubbed_files:
         logger.info("No stubbed files found in %s, skipping", repo_name)
@@ -287,6 +327,15 @@ def run_java_agent(
 
     compile_cmd = java_agent.get_compile_command(build_system, repo_path) if agent_config.compile_check else ""
     test_cmd = java_agent.get_test_command(build_system, repo_path)
+
+    test_files_readonly = _find_all_test_files(repo_path)
+
+    if agent_config.blind_tests:
+        test_cmd = _make_blind_test_cmd(test_cmd)
+    elif agent_config.names_only_tests:
+        test_cmd = _make_names_only_test_cmd(test_cmd)
+    if agent_config.blind_lint and compile_cmd:
+        compile_cmd = _make_blind_lint_cmd(compile_cmd)
 
     thinking_capture = (
         ThinkingCapture() if agent_config.capture_thinking else None
@@ -366,6 +415,8 @@ def run_java_agent(
                             current_module=test_log_name,
                             max_test_output_length=agent_config.max_test_output_length,
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
@@ -447,6 +498,8 @@ def run_java_agent(
                             current_module=file_log_name,
                             max_test_output_length=agent_config.max_test_output_length,
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         )
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)

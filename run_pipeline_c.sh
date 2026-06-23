@@ -50,6 +50,11 @@ SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
+BLIND_LINT="false"
+BLIND_TESTS="false"
+NAMES_ONLY_TESTS="false"
+STRIP_NON_STUBS="false"
+INJECT_TEST_FILES_READONLY="true"
 
 print_usage() {
     cat <<'USAGE'
@@ -72,6 +77,11 @@ Options:
   --max-wall-time  <secs>    Absolute per-stage wall-time cap (default: 86400)
   --num-samples    <n>       Number of independent samples (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
+  --blind-lint               Stage 2 sees only "lint failed: N issues" (default: full output)
+  --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
+  --names-only-tests         Stage 3 sees only failed test node IDs + count (default: full output)
+  --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
+  --no-test-files-readonly   Remove test source files from read-only agent context (default: injected)
   -h, --help                 Show this help
 USAGE
     exit 1
@@ -94,6 +104,11 @@ while [[ $# -gt 0 ]]; do
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
+        --blind-lint) BLIND_LINT="true"; shift ;;
+        --blind-tests) BLIND_TESTS="true"; shift ;;
+        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
+        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
+        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         -h|--help) print_usage ;;
         *) echo "Unknown argument: $1"; print_usage ;;
     esac
@@ -457,6 +472,14 @@ EOP
         --max-test-output-length "$MAX_TEST_OUTPUT_LENGTH" \
         --agent-config-file "$AGENT_CONFIG" \
         <<< "$user_prompt" > /dev/null
+    # Append anti-leakage flags (not in config_c CLI)
+    cat >> "$AGENT_CONFIG" <<EOF
+blind_lint: ${BLIND_LINT}
+blind_tests: ${BLIND_TESTS}
+names_only_tests: ${NAMES_ONLY_TESTS}
+strip_non_stubs: ${STRIP_NON_STUBS}
+inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
+EOF
 }
 
 # ------------------------------------------------------------

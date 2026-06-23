@@ -52,6 +52,11 @@ MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
+INJECT_TEST_FILES_READONLY="true"
+BLIND_LINT="false"
+BLIND_TESTS="false"
+NAMES_ONLY_TESTS="false"
+STRIP_NON_STUBS="false"
 
 print_usage() {
     cat <<'USAGE'
@@ -85,6 +90,11 @@ Options:
   --use-spec-info            Enable README-based spec context (default: off for JS)
   --num-samples    <n>       Number of independent samples to run (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
+  --no-test-files-readonly       Disable read-only test file injection
+  --blind-lint                   Hide full lint output from agent (default: false)
+  --blind-tests                  Hide full test output from agent (default: false)
+  --names-only-tests             Show only failed test names, not tracebacks (default: false)
+  --strip-non-stubs              Only pass stub files to agent (default: false)
   -h, --help                 Show this help
 USAGE
     exit 1
@@ -107,6 +117,11 @@ while [[ $# -gt 0 ]]; do
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
+        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --blind-lint) BLIND_LINT="true"; shift ;;
+        --blind-tests) BLIND_TESTS="true"; shift ;;
+        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
+        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         -h|--help)     print_usage ;;
         *)
             echo "Error: Unknown argument '$1'"
@@ -581,6 +596,11 @@ max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
+inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
+blind_lint: ${BLIND_LINT}
+blind_tests: ${BLIND_TESTS}
+names_only_tests: ${NAMES_ONLY_TESTS}
+strip_non_stubs: ${STRIP_NON_STUBS}
 EOF
     log "  Wrote JS agent config: ${AGENT_CONFIG}"
 }
