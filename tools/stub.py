@@ -16,13 +16,15 @@ Supports three removal modes (matching the official commit0 paper methodology):
 This is the missing tool from commit0 (arXiv:2412.01769, Section 3.2).
 
 Usage:
-    python -m tools.stub /path/to/repo /path/to/output [--removal-mode combined] [--strip-docstrings] [--dry-run] [--verbose]
+    python -m tools.stub /path/to/repo /path/to/output [--removal-mode combined] [--keep-docstrings] [--dry-run] [--verbose]
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import io
+import tokenize
 import logging
 import shutil
 import sys
@@ -462,7 +464,7 @@ class StubTransformer:
     def __init__(
         self,
         *,
-        keep_docstrings: bool = True,
+        keep_docstrings: bool = False,
         removal_mode: str = "all",
         import_time_names: set[str] | None = None,
     ) -> None:
@@ -496,7 +498,21 @@ class StubTransformer:
         replacements = self._collect_replacements(tree, lines)
         removals = self._collect_removals(tree, lines)
 
-        if not replacements and not removals:
+        # When keep_docstrings is False, also delete module-level and class-level
+        # docstrings. Function/method docstrings are already removed via body
+        # replacement in _collect_replacements. Docstrings can leak implementation
+        # intent ("This module uses lazy splitting") just like body comments, so
+        # we strip them when the caller opts into stripping at all.
+        doc_deletes: list[tuple[int, int, str | None]] = []
+        if not self.keep_docstrings:
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.Module, ast.ClassDef)) and n.body and is_docstring(n.body[0]):
+                    stmt = n.body[0]
+                    start_0 = stmt.lineno - 1
+                    end_0 = self._get_end_lineno(stmt, lines) - 1
+                    doc_deletes.append((start_0, end_0, None))
+
+        if not replacements and not removals and not doc_deletes:
             return source
 
         all_ops: list[tuple[int, int, str | None]] = []
@@ -504,6 +520,7 @@ class StubTransformer:
             all_ops.append((body_start, body_end, indent_str))
         for func_start, func_end in removals:
             all_ops.append((func_start, func_end, None))
+        all_ops.extend(doc_deletes)
 
         all_ops = self._remove_nested_ops(all_ops)
         all_ops.sort(key=lambda r: r[0], reverse=True)
@@ -517,6 +534,7 @@ class StubTransformer:
                 self.stub_count += 1
 
         result = "".join(lines)
+        result = self._strip_standalone_comments(result)
 
         if self.removal_mode == "combined" and removals:
             result = self._fix_empty_classes(result, filename)
@@ -527,9 +545,9 @@ class StubTransformer:
         self,
         tree: ast.Module,
         lines: list[str],
-    ) -> list[tuple[int, int, str]]:
+    ) -> list[tuple[int, int, str | None]]:
         """Collect (body_start_0idx, body_end_0idx, indent) for each function to stub."""
-        replacements: list[tuple[int, int, str]] = []
+        replacements: list[tuple[int, int, str | None]] = []
 
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -560,18 +578,30 @@ class StubTransformer:
             if not body:
                 continue
 
-            body_start_1 = body[0].lineno
             body_end_1 = self._get_end_lineno(body[-1], lines)
-
-            body_start_0 = body_start_1 - 1
             body_end_0 = body_end_1 - 1
 
-            indent_str = self._get_indent(lines, body_start_0)
+            # Find where the function body truly begins — the line immediately
+            # after the def/async def header's closing colon. Using body[0].lineno
+            # would miss comment lines between the colon and the first real statement
+            # (comments are not AST nodes and would survive stubbing as hint leaks).
+            real_start_0 = self._find_body_real_start(node, lines)
+            body_start_0 = real_start_0
+
+            # Use body[0].lineno for indent detection (reliable; the def colon line
+            # or a comment line could have unexpected leading whitespace).
+            indent_str = self._get_indent(lines, node.body[0].lineno - 1)
 
             if self.keep_docstrings and body and is_docstring(body[0]):
                 doc_node = body[0]
+                doc_start_0 = doc_node.lineno - 1
                 doc_end_1 = self._get_end_lineno(doc_node, lines)
                 doc_end_0 = doc_end_1 - 1
+
+                # Delete any comment/blank lines between the def colon and the
+                # docstring — they are invisible to AST but can leak hints.
+                if real_start_0 < doc_start_0:
+                    replacements.append((real_start_0, doc_start_0 - 1, None))
 
                 if len(body) > 1:
                     body_start_0 = doc_end_0 + 1
@@ -708,12 +738,79 @@ class StubTransformer:
             return line[: len(line) - len(stripped)]
         return "    "  # Default to 4 spaces
 
+    @staticmethod
+    def _find_body_real_start(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        lines: list[str],
+    ) -> int:
+        """Return the 0-indexed line immediately after the function header's closing colon.
+
+        Scans forward from the ``def``/``async def`` line to find the first line whose
+        trailing content ends with ``:``.  This covers both single-line signatures
+        (``def foo():``) and multi-line signatures (``def foo(\n    x,\n):``).
+        Including pre-body comment lines in the replacement range prevents them from
+        leaking as implementation hints in the stubbed output.
+
+        Heuristic limitation: a multi-line parameter default whose continuation line
+        ends with ``:`` (e.g. ``x: dict = {"a":\n    1}`` split across lines) can
+        produce a false-positive, pointing ``real_start_0`` into the middle of the
+        signature.  The post-stub ``ast.parse()`` call in ``stub_file`` is the safety
+        net: any such corruption raises ``SyntaxError`` and the file is copied as-is.
+        """
+        first_stmt_0 = node.body[0].lineno - 1  # 0-indexed
+        def_start_0 = node.lineno - 1  # 0-indexed
+
+        for scan_0 in range(def_start_0, first_stmt_0):
+            if lines[scan_0].rstrip().endswith(":"):
+                return scan_0 + 1  # line immediately after the closing colon
+
+        # Fallback: start at body[0].lineno (original behaviour)
+        return first_stmt_0
+
+    @staticmethod
+    def _strip_standalone_comments(source: str) -> str:
+        """Remove standalone comment lines from the stubbed output.
+
+        Uses Python’s tokenizer so that ``#``-prefixed lines *inside*
+        docstrings and multi-line strings are never touched.  Only lines
+        where the comment is the sole non-whitespace content are removed;
+        inline comments on code lines (e.g. ``x = 1  # noqa``) survive.
+
+        Preserved standalone ``#`` lines:
+        - Shebang lines (``#!``)
+        - Encoding declarations (``# -*- coding:`` / ``# coding=``)
+        """
+        comment_lines: set[int] = set()
+        try:
+            toks = tokenize.generate_tokens(io.StringIO(source).readline)
+            for tok_type, tok_string, tok_start, _end, tok_line in toks:
+                if tok_type != tokenize.COMMENT:
+                    continue
+                # Standalone only: the comment must be the first non-whitespace
+                if not tok_line.lstrip().startswith("#"):
+                    continue
+                # Preserve shebang and encoding declarations
+                if tok_string.startswith("#!") or "coding" in tok_string[:30]:
+                    continue
+                comment_lines.add(tok_start[0])  # tok_start is (row, col), row is 1-indexed
+        except tokenize.TokenError:
+            return source  # fallback: don’t strip if tokenisation fails
+
+        if not comment_lines:
+            return source
+
+        out_lines: list[str] = []
+        for lineno, line in enumerate(source.splitlines(keepends=True), start=1):
+            if lineno not in comment_lines:
+                out_lines.append(line)
+        return "".join(out_lines)
+
 
 def stub_file(
     source_path: Path,
     output_path: Path,
     *,
-    keep_docstrings: bool = True,
+    keep_docstrings: bool = False,
     removal_mode: str = "all",
     dry_run: bool = False,
     import_time_names: set[str] | None = None,
@@ -776,7 +873,7 @@ def stub_directory(
     source_dir: Path,
     output_dir: Path,
     *,
-    keep_docstrings: bool = True,
+    keep_docstrings: bool = False,
     removal_mode: str = "all",
     dry_run: bool = False,
     verbose: bool = False,
@@ -944,9 +1041,9 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--strip-docstrings",
+        "--keep-docstrings",
         action="store_true",
-        help="Remove docstrings from stubbed functions (default: keep them)",
+        help="Keep docstrings in stubbed functions (default: strip them, since docstrings can leak implementation intent for benchmark stubbing).",
     )
     parser.add_argument(
         "--dry-run",
@@ -978,7 +1075,7 @@ def main() -> None:
     stats = stub_directory(
         args.source,
         args.output,
-        keep_docstrings=not args.strip_docstrings,
+        keep_docstrings=args.keep_docstrings,
         removal_mode=args.removal_mode,
         dry_run=args.dry_run,
         verbose=args.verbose,

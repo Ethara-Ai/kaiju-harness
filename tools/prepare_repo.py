@@ -302,7 +302,7 @@ def create_stubbed_branch(
             ", ".join(sorted(import_time_names)[:15]),
         )
     stubber = StubTransformer(
-        keep_docstrings=True,
+        keep_docstrings=False,
         removal_mode=removal_mode,
         import_time_names=import_time_names,
     )

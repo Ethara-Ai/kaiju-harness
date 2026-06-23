@@ -39,6 +39,42 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _make_blind_lint_cmd(base_cmd: str) -> str:
+    """Wrap lint so agent sees only 'lint clean' or 'lint failed: N issues'."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "if [ $rc -eq 0 ]; then echo lint clean; "
+        "else n=$(printf \"%s\" \"$out\" | grep -cE \":[0-9]+:\" 2>/dev/null); n=${n:-0}; "
+        "printf \"lint failed: %s issues\\n\" \"$n\"; fi; exit $rc'"
+    )
+
+
+def _make_blind_test_cmd(base_cmd: str) -> str:
+    """Wrap pytest so agent sees only the summary line, not per-test failures."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "summary=$(printf \"%s\" \"$out\" | grep -E \"passed|failed|error\" | tail -1); "
+        "if [ -n \"$summary\" ]; then printf \"%s\\n\" \"$summary\"; "
+        "else printf \"tests done\\n\"; fi; exit $rc'"
+    )
+
+
+def _make_names_only_test_cmd(base_cmd: str) -> str:
+    """Wrap test cmd so agent sees only failed test node IDs + counts, no tracebacks."""
+    return (
+        f"bash -c 'set +e; out=$({base_cmd} 2>&1); rc=$?; "
+        "if [ $rc -eq 0 ]; then printf \"tests pass\\n\"; "
+        "else "
+        "failed=$(printf \"%s\" \"$out\" | sed -nE \"s/^FAILED ([^ ]+).*/- \\1/p\"); "
+        "n_failed=$(printf \"%s\" \"$failed\" | grep -cE \"^- \" 2>/dev/null); n_failed=${n_failed:-0}; "
+        "n_passed=$(printf \"%s\" \"$out\" | grep -oE \"[0-9]+ passed\" | head -1 | cut -d\" \" -f1); n_passed=${n_passed:-0}; "
+        "total=$((n_failed + n_passed)); "
+        "if [ -n \"$failed\" ]; then printf \"%s/%s tests failed:\\n%s\\n\" \"$n_failed\" \"$total\" \"$failed\"; "
+        "elif [ \"$n_passed\" -gt 0 ]; then printf \"tests pass (non-zero rc, likely coverage/lint gate): %s passed, rc=%s\\n\" \"$n_passed\" \"$rc\"; "
+        "else printf \"tests failed (no per-test names parsed): rc=%s\\n\" \"$rc\"; fi; "
+        "fi; exit $rc'"
+    )
+
 def _is_module_done(log_dir: Path) -> bool:
     return (log_dir / ".done").exists()
 
@@ -139,6 +175,34 @@ def _run_agent_for_repo_impl(
         agent_config.use_topo_sort_dependencies,
     )
 
+    if agent_config.strip_non_stubs:
+        _base = example["base_commit"]
+        _stubbed_at_base: set[str] = set()
+        try:
+            _ls = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", _base],
+                cwd=repo_path, capture_output=True, text=True, check=True,
+            )
+            for _rel in _ls.stdout.splitlines():
+                if not _rel.endswith(".py"):
+                    continue
+                _show = subprocess.run(
+                    ["git", "show", f"{_base}:{_rel}"],
+                    cwd=repo_path, capture_output=True, text=True,
+                )
+                if _show.returncode == 0 and "raise NotImplementedError" in _show.stdout:
+                    _stubbed_at_base.add(_rel)
+            target_edit_files = [f for f in target_edit_files if f in _stubbed_at_base]
+            logger.info(
+                "strip_non_stubs: kept %d/%d target files (filtered against base_commit %s)",
+                len(target_edit_files), len(_stubbed_at_base), _base[:8],
+            )
+        except (subprocess.CalledProcessError, OSError) as _e:
+            logger.warning(
+                "strip_non_stubs: failed to compute base-commit stub list (%s). Keeping all target files.",
+                _e,
+            )
+
     lint_files = get_changed_files_from_commits(
         local_repo, "HEAD", example["base_commit"]
     )
@@ -213,10 +277,19 @@ def _run_agent_for_repo_impl(
                     )
                     continue
 
-                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+                if os.environ.get("KAIJU_DIRECT_PYTEST"):
+                    test_cmd = f"{sys.executable} -m pytest {test_file} --tb=short --continue-on-collection-errors --no-header -q"
+                else:
+                    test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+                if agent_config.blind_tests:
+                    test_cmd = _make_blind_test_cmd(test_cmd)
+                elif agent_config.names_only_tests:
+                    test_cmd = _make_names_only_test_cmd(test_cmd)
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd(lint_cmd)
                 message, spec_costs = get_message(
                     agent_config, repo_path, test_files=[test_file]
                 )
@@ -245,6 +318,7 @@ def _run_agent_for_repo_impl(
                         max_test_output_length=agent_config.max_test_output_length,
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                         test_files_readonly=test_files_readonly,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(test_log_dir)
@@ -296,6 +370,8 @@ def _run_agent_for_repo_impl(
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd(lint_cmd)
 
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
@@ -316,6 +392,7 @@ def _run_agent_for_repo_impl(
                         current_stage="lint",
                         current_module=lint_file_name,
                         test_files_readonly=test_files_readonly,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(lint_log_dir)
@@ -376,6 +453,8 @@ def _run_agent_for_repo_impl(
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
+                if agent_config.blind_lint and lint_cmd:
+                    lint_cmd = _make_blind_lint_cmd(lint_cmd)
                 pre_sha = local_repo.head.commit.hexsha
                 module_start = time.time()
                 with capture_module_calls(
@@ -394,6 +473,7 @@ def _run_agent_for_repo_impl(
                         current_stage="draft",
                         current_module=file_name,
                         test_files_readonly=test_files_readonly,
+                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     )
                 module_elapsed = time.time() - module_start
                 _mark_module_done(file_log_dir)

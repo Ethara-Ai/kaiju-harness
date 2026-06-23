@@ -220,3 +220,6 @@ audit/results/
 audit/runs/
 audit/.cache/
 audit/.venv/
+jobs/
+harbor-tasks/
+*.yaml

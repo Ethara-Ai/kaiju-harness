@@ -46,12 +46,18 @@ STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
 USE_SPEC_INFO="true"
+USE_UNIT_TESTS_INFO="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
+BLIND_LINT="false"
+BLIND_TESTS="false"
+NAMES_ONLY_TESTS="false"
+STRIP_NON_STUBS="false"
+INJECT_TEST_FILES_READONLY="true"
 
 print_usage() {
     cat <<'USAGE'
@@ -85,8 +91,14 @@ Options:
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
   --no-spec-info             Disable spec doc provisioning and agent spec context
+  --no-unit-tests-info       Disable injecting unit-test file contents into Stage 1 prompt (default: enabled; Stages 2/3 always disabled)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
+  --blind-lint               Stage 2 sees only "lint failed: N issues" (default: full output)
+  --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
+  --names-only-tests         Stage 3 sees only failed test node IDs + count (default: full output)
+  --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
+  --no-test-files-readonly       Remove test source files from read-only agent context (default: injected)
   -h, --help                 Show this help
 USAGE
     exit 1
@@ -104,10 +116,16 @@ while [[ $# -gt 0 ]]; do
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --no-spec-info) USE_SPEC_INFO="false"; shift ;;
+        --no-unit-tests-info) USE_UNIT_TESTS_INFO="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
+        --blind-lint) BLIND_LINT="true"; shift ;;
+        --blind-tests) BLIND_TESTS="true"; shift ;;
+        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
+        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
+        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
@@ -586,6 +604,11 @@ max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
+blind_lint: ${BLIND_LINT}
+blind_tests: ${BLIND_TESTS}
+names_only_tests: ${NAMES_ONLY_TESTS}
+strip_non_stubs: ${STRIP_NON_STUBS}
+inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
 EOF
     log "  Wrote agent config: ${AGENT_CONFIG}"
 }
@@ -1003,7 +1026,7 @@ stage_1_draft() {
     log "STAGE 1: Draft Initial Implementations"
     log "======================================================================"
 
-    write_agent_config "false" "false" "false" "true" "true" "$USE_SPEC_INFO"
+    write_agent_config "false" "false" "false" "$USE_UNIT_TESTS_INFO" "true" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
@@ -1348,6 +1371,7 @@ run_single_sample() {
     log "Inactivity:   ${INACTIVITY_TIMEOUT}s (watchdog kills stuck agents)"
     log "Wall-time cap: ${MAX_WALL_TIME}s (unconditional, 0=disable)"
     log "Spec Info:    ${USE_SPEC_INFO}"
+    log "Unit Tests Info: ${USE_UNIT_TESTS_INFO} (Stage 1 only; Stages 2/3 always disabled)"
     if [[ "$NO_STAGE3_LINT" == "true" ]]; then
         log "Stage3 Lint:  DISABLED (--no-stage3-lint)"
     else

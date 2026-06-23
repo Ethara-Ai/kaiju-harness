@@ -982,6 +982,8 @@ run_build_once() {
     fi
     log "  Ensuring Docker images for eval are built (one-time per pipeline run)..."
 
+    : "${LOG_BASE:?LOG_BASE must be set before run_build_once()}"
+    mkdir -p "$LOG_BASE"
     local build_log="${LOG_BASE}/docker_build.log"
     mkdir -p "$(dirname "$build_log")"
     local cmd=(
