@@ -488,6 +488,17 @@ def _apply_thinking_capture_patches(
                     if _od and hasattr(_od, "get"):
                         thinking_tokens = _od.get("thinking_tokens", 0) or 0
 
+            # Anthropic/Vertex AI Claude does not expose thinking_tokens in usage. Count from text.
+            if not thinking_tokens and coder._last_reasoning_content:
+                try:
+                    import litellm as _litellm
+                    _mn = getattr(getattr(coder, "main_model", None), "name", "") or ""
+                    thinking_tokens = _litellm.token_counter(
+                        model=_mn or "claude-3-opus-20240229",
+                        text=coder._last_reasoning_content,
+                    )
+                except Exception:
+                    thinking_tokens = max(1, len(coder._last_reasoning_content) // 4)
             from datetime import datetime, timezone
             _model_name = getattr(getattr(coder, "main_model", None), "name", "") or ""
             _provider = ""

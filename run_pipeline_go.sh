@@ -39,18 +39,12 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
-USE_SPEC_INFO="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
-INJECT_TEST_FILES_READONLY="true"
-BLIND_TESTS="false"
-NAMES_ONLY_TESTS="false"
-BLIND_LINT="false"
-STRIP_NON_STUBS="false"
 
 print_usage() {
     cat <<'USAGE'
@@ -76,15 +70,10 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3
-  --no-spec-info             Disable spec doc provisioning (enabled by default for Go)
   --inactivity-timeout <s>   Kill agent if no log activity for N seconds (default: 900)
   --max-wall-time  <secs>    Absolute per-stage wall-time cap (default: 86400)
   --num-samples    <n>       Number of independent samples (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
-  --blind-lint               Stage 2 sees only "lint failed: N issues" (default: full output)
-  --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
-  --names-only-tests         Stage 3 sees only failed test node IDs + count (default: full output)
-  --no-test-files-readonly   Remove test source files from read-only agent context (default: injected)
   -h, --help                 Show this help
 USAGE
     exit 1
@@ -101,16 +90,10 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";  shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";           shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
-        --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
-        --blind-lint) BLIND_LINT="true"; shift ;;
-        --blind-tests) BLIND_TESTS="true"; shift ;;
-        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
-        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
-        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
@@ -389,9 +372,7 @@ write_agent_config() {
     local run_tests="$1"
     local use_lint_info="$2"
     local run_entire_dir_lint="$3"
-    local use_unit_tests_info="$4"
-    local add_import_module_to_context="$5"
-    local use_spec_info="${6:-false}"
+    local add_import_module_to_context="$4"
 
     cat > "$AGENT_CONFIG" <<'YAMLEOF'
 agent_name: aider
@@ -412,9 +393,9 @@ use_topo_sort_dependencies: false
 add_import_module_to_context: ${add_import_module_to_context}
 use_repo_info: false
 max_repo_info_length: 10000
-use_unit_tests_info: ${use_unit_tests_info}
+use_unit_tests_info: false
 max_unit_tests_info_length: 10000
-use_spec_info: ${use_spec_info}
+use_spec_info: true
 max_spec_info_length: 10000
 spec_summary_max_tokens: 4000
 use_lint_info: ${use_lint_info}
@@ -429,11 +410,11 @@ max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
-blind_lint: ${BLIND_LINT}
-blind_tests: ${BLIND_TESTS}
-names_only_tests: ${NAMES_ONLY_TESTS}
-inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
-strip_non_stubs: ${STRIP_NON_STUBS}
+blind_lint: false
+blind_tests: false
+names_only_tests: false
+inject_test_files_readonly: true
+strip_non_stubs: false
 EOF
     log "  Wrote agent Go config: ${AGENT_CONFIG}"
 }
@@ -452,10 +433,6 @@ AGENT_RC=0
 # ============================================================
 
 ensure_spec_docs_go() {
-    if [[ "$USE_SPEC_INFO" != "true" ]]; then
-        log "  Spec docs disabled — skipping."
-        return 0
-    fi
 
     log "Ensuring spec docs are available for all Go repos..."
 
@@ -548,9 +525,6 @@ PYEOF
 }
 
 verify_spec_docs_go() {
-    if [[ "$USE_SPEC_INFO" != "true" ]]; then
-        return 0
-    fi
 
     log "Verifying all Go repos have spec docs..."
 
@@ -599,15 +573,13 @@ for r in sorted(GO_SPLIT.get('${REPO_SPLIT}', [])):
     if [[ "$missing" -gt 0 ]]; then
         log ""
         log "======================================================================"
-        log "FATAL: ${missing} Go repo(s) missing spec docs (use_spec_info=true)."
-        log "  The pipeline requires spec docs for all repos when use_spec_info"
-        log "  is true (default). Missing repos:"
+        log "FATAL: ${missing} Go repo(s) missing spec docs."
+        log "  The pipeline requires spec docs for all repos. Missing repos:"
         echo -e "$missing_repos" | while IFS= read -r line; do [[ -n "$line" ]] && log "$line"; done
         log ""
         log "  Options:"
         log "    1. Place spec.pdf or spec.pdf.bz2 in each repo directory"
         log "    2. Add 'specification' URLs to the dataset JSON and re-run"
-        log "    3. Pass --no-spec-info to run without spec context"
         log "======================================================================"
         return 1
     fi
@@ -980,7 +952,7 @@ stage_1_draft() {
     log "STAGE 1: Draft Initial Go Implementations"
     log "======================================================================"
 
-    write_agent_config "false" "false" "false" "true" "false" "$USE_SPEC_INFO"
+    write_agent_config "false" "false" "false" "false"
 
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
@@ -1028,7 +1000,7 @@ stage_2_lint_refine() {
     log "STAGE 2: Refine with Go Static Analysis (goimports/staticcheck/govet)"
     log "======================================================================"
 
-    write_agent_config "false" "true" "true" "false" "false" "$USE_SPEC_INFO"
+    write_agent_config "false" "true" "true" "false"
 
     local stage_log_dir="${LOG_BASE}/stage2_lint"
     mkdir -p "$stage_log_dir"
@@ -1089,7 +1061,7 @@ stage_3_test_refine() {
         log "  Stage 3 lint DISABLED (--no-stage3-lint)"
     fi
 
-    write_agent_config "true" "$s3_lint" "false" "false" "false" "$USE_SPEC_INFO"
+    write_agent_config "true" "$s3_lint" "false" "false"
 
     local stage_log_dir="${LOG_BASE}/stage3_tests"
     mkdir -p "$stage_log_dir"
@@ -1255,7 +1227,6 @@ run_single_sample() {
     log "Stage Timeout: ${STAGE_TIMEOUT}s | Eval Timeout: ${EVAL_TIMEOUT}s"
     log "Inactivity:   ${INACTIVITY_TIMEOUT}s"
     log "Wall-time cap: ${MAX_WALL_TIME}s"
-    log "Spec Info:    ${USE_SPEC_INFO}"
     log "Logs:         ${LOG_BASE}"
     log "Results:      ${PIPELINE_LOG}"
     log "Start time:   $(ts)"

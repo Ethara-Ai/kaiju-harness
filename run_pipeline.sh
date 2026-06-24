@@ -45,19 +45,12 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
-USE_SPEC_INFO="true"
-USE_UNIT_TESTS_INFO="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
-BLIND_LINT="false"
-BLIND_TESTS="false"
-NAMES_ONLY_TESTS="false"
-STRIP_NON_STUBS="false"
-INJECT_TEST_FILES_READONLY="true"
 
 print_usage() {
     cat <<'USAGE'
@@ -90,15 +83,8 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
-  --no-spec-info             Disable spec doc provisioning and agent spec context
-  --no-unit-tests-info       Disable injecting unit-test file contents into Stage 1 prompt (default: enabled; Stages 2/3 always disabled)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
-  --blind-lint               Stage 2 sees only "lint failed: N issues" (default: full output)
-  --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
-  --names-only-tests         Stage 3 sees only failed test node IDs + count (default: full output)
-  --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
-  --no-test-files-readonly       Remove test source files from read-only agent context (default: injected)
   -h, --help                 Show this help
 USAGE
     exit 1
@@ -115,17 +101,10 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
-        --no-spec-info) USE_SPEC_INFO="false"; shift ;;
-        --no-unit-tests-info) USE_UNIT_TESTS_INFO="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
-        --blind-lint) BLIND_LINT="true"; shift ;;
-        --blind-tests) BLIND_TESTS="true"; shift ;;
-        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
-        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
-        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
@@ -435,10 +414,6 @@ get_newest_aider_log() {
 # ============================================================
 
 ensure_spec_docs() {
-    if [[ "$USE_SPEC_INFO" != "true" ]]; then
-        log "  Spec docs disabled — skipping."
-        return 0
-    fi
 
     log "Ensuring spec docs are available for all repos..."
 
@@ -560,9 +535,7 @@ write_agent_config() {
     local run_tests="$1"
     local use_lint_info="$2"
     local run_entire_dir_lint="$3"
-    local use_unit_tests_info="$4"
-    local add_import_module_to_context="$5"
-    local use_spec_info="${6:-false}"
+    local add_import_module_to_context="$4"
 
     cat > "$AGENT_CONFIG" <<'YAMLEOF'
 agent_name: aider
@@ -587,9 +560,9 @@ use_topo_sort_dependencies: true
 add_import_module_to_context: ${add_import_module_to_context}
 use_repo_info: false
 max_repo_info_length: 10000
-use_unit_tests_info: ${use_unit_tests_info}
+use_unit_tests_info: false
 max_unit_tests_info_length: 10000
-use_spec_info: ${use_spec_info}
+use_spec_info: true
 max_spec_info_length: 10000
 spec_summary_max_tokens: 4000
 use_lint_info: ${use_lint_info}
@@ -604,11 +577,11 @@ max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
-blind_lint: ${BLIND_LINT}
-blind_tests: ${BLIND_TESTS}
-names_only_tests: ${NAMES_ONLY_TESTS}
-strip_non_stubs: ${STRIP_NON_STUBS}
-inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
+blind_lint: false
+blind_tests: false
+names_only_tests: false
+strip_non_stubs: false
+inject_test_files_readonly: true
 EOF
     log "  Wrote agent config: ${AGENT_CONFIG}"
 }
@@ -1026,7 +999,7 @@ stage_1_draft() {
     log "STAGE 1: Draft Initial Implementations"
     log "======================================================================"
 
-    write_agent_config "false" "false" "false" "$USE_UNIT_TESTS_INFO" "true" "$USE_SPEC_INFO"
+    write_agent_config "false" "false" "false" "true"
 
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
@@ -1074,7 +1047,7 @@ stage_2_lint_refine() {
     log "STAGE 2: Refine with Static Analysis (Lint)"
     log "======================================================================"
 
-    write_agent_config "false" "true" "true" "false" "false" "$USE_SPEC_INFO"
+    write_agent_config "false" "true" "true" "false"
 
     local stage_log_dir="${LOG_BASE}/stage2_lint"
     mkdir -p "$stage_log_dir"
@@ -1135,7 +1108,7 @@ stage_3_test_refine() {
         log "  Stage 3 lint DISABLED (--no-stage3-lint)"
     fi
 
-    write_agent_config "true" "$s3_lint" "false" "false" "false" "$USE_SPEC_INFO"
+    write_agent_config "true" "$s3_lint" "false" "false"
 
     local stage_log_dir="${LOG_BASE}/stage3_tests"
     mkdir -p "$stage_log_dir"
@@ -1271,9 +1244,6 @@ trap cleanup EXIT
 trap 'exit' INT TERM
 
 verify_spec_docs() {
-    if [[ "$USE_SPEC_INFO" != "true" ]]; then
-        return 0
-    fi
 
     log "Verifying all repos have spec docs..."
 
@@ -1323,14 +1293,13 @@ for r in sorted(SPLIT.get('${REPO_SPLIT}', [])):
         log ""
         log "======================================================================"
         log "FATAL: ${missing} repo(s) missing spec docs (use_spec_info=true)."
-        log "  The pipeline requires spec docs for all repos when --no-spec-info"
-        log "  is not set. Missing repos:"
+        log "  The pipeline requires spec docs for all repos."
+        log "  Missing repos:"
         echo -e "$missing_repos" | while IFS= read -r line; do [[ -n "$line" ]] && log "$line"; done
         log ""
         log "  Options:"
         log "    1. Place spec.pdf or spec.pdf.bz2 in each repo directory"
         log "    2. Add 'specification' URLs to the dataset JSON and re-run"
-        log "    3. Use --no-spec-info to run without spec context"
         log "======================================================================"
         return 1
     fi
@@ -1370,8 +1339,6 @@ run_single_sample() {
     log "Stage Timeout: ${STAGE_TIMEOUT}s (0=disabled) | Eval Timeout: ${EVAL_TIMEOUT}s"
     log "Inactivity:   ${INACTIVITY_TIMEOUT}s (watchdog kills stuck agents)"
     log "Wall-time cap: ${MAX_WALL_TIME}s (unconditional, 0=disable)"
-    log "Spec Info:    ${USE_SPEC_INFO}"
-    log "Unit Tests Info: ${USE_UNIT_TESTS_INFO} (Stage 1 only; Stages 2/3 always disabled)"
     if [[ "$NO_STAGE3_LINT" == "true" ]]; then
         log "Stage3 Lint:  DISABLED (--no-stage3-lint)"
     else

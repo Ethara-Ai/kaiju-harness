@@ -488,6 +488,16 @@ def _record_call(
             if _od is not None:
                 thinking_t = _extract_int(_od, "thinking_tokens")
 
+        # Claude adaptive thinking: count from response body when usage gives 0.
+        if thinking_t == 0 and response is not None:
+            try:
+                _msg = response.choices[0].message
+                _rc = getattr(_msg, "reasoning_content", None) or getattr(_msg, "reasoning", None)
+                if _rc and isinstance(_rc, str):
+                    import litellm as _litellm
+                    thinking_t = _litellm.token_counter(model=model, text=_rc)
+            except Exception:
+                pass
         computed_cost = _compute_cost(model, prompt_t, completion_t, cache_r, cache_w)
         if computed_cost > 0:
             cost = computed_cost
@@ -634,6 +644,16 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
             if _od is not None:
                 thinking_t = _extract_int(_od, "thinking_tokens")
 
+        # Claude adaptive thinking: count from response body when usage gives 0.
+        if thinking_t == 0 and response is not None:
+            try:
+                _msg = response.choices[0].message
+                _rc = getattr(_msg, "reasoning_content", None) or getattr(_msg, "reasoning", None)
+                if _rc and isinstance(_rc, str):
+                    import litellm as _litellm
+                    thinking_t = _litellm.token_counter(model=model, text=_rc)
+            except Exception:
+                pass
         dedup_key = f"call:{_normalize_model(model)}:{prompt_t}:{completion_t}:{cache_r}:{cache_w}"
         with _seen_lock:
             if dedup_key in _seen_call_ids:
