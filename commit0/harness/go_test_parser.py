@@ -131,7 +131,9 @@ def compute_go_pass_rate(
     """Compute pass rate. If expected_tests given, missing tests count as failures."""
     if expected_tests is not None:
         if not expected_tests:
-            return 1.0
+            # Zero-collection (broken/failed run): fail closed to 0.0, never full
+            # credit — matches evaluate_go.py:280 and the Python oracle (evaluate.py:269).
+            return 0.0
         passed = sum(1 for t in expected_tests if results.get(t) == TestStatus.PASSED)
         return passed / len(expected_tests)
 

@@ -107,8 +107,9 @@ class TestPassRate:
     def test_zero_when_empty(self):
         assert compute_c_pass_rate({}) == 0.0
 
-    def test_one_when_empty_expected_list(self):
-        assert compute_c_pass_rate({}, expected_tests=[]) == 1.0
+    def test_zero_when_empty_expected_list(self):
+        # empty expected set = zero tests collected (broken run): fail closed, no credit
+        assert compute_c_pass_rate({}, expected_tests=[]) == 0.0
 
     def test_pass_rate_against_expected(self):
         results = {

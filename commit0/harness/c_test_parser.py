@@ -134,7 +134,9 @@ def compute_c_pass_rate(
     if expected_tests is not None:
         expected = list(expected_tests)
         if not expected:
-            return 1.0
+            # Zero-collection (broken/failed run): fail closed to 0.0, never full
+            # credit — matches evaluate_c.py:281 and the Python oracle (evaluate.py:269).
+            return 0.0
         passed = sum(1 for t in expected if results.get(t) == TestStatus.PASSED)
         return passed / len(expected)
 
