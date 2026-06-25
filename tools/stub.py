@@ -510,7 +510,14 @@ class StubTransformer:
                     stmt = n.body[0]
                     start_0 = stmt.lineno - 1
                     end_0 = self._get_end_lineno(stmt, lines) - 1
-                    doc_deletes.append((start_0, end_0, None))
+                    # A docstring that is the SOLE statement of a class body
+                    # must become `pass`, not vanish — otherwise the class body
+                    # goes empty and the file fails to parse (IndentationError).
+                    if isinstance(n, ast.ClassDef) and len(n.body) == 1:
+                        indent = self._get_indent(lines, n.lineno - 1) + "    "
+                        doc_deletes.append((start_0, end_0, indent))
+                    else:
+                        doc_deletes.append((start_0, end_0, None))
 
         if not replacements and not removals and not doc_deletes:
             return source
