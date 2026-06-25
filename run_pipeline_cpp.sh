@@ -204,6 +204,31 @@ resolve_model() {
             MODEL_SHORT="gpt-5.5"
             CACHE_PROMPTS="false"
             ;;
+        opus47v|opus47vertex|claude-opus-4-7-vertex)
+            MODEL_NAME="vertex_ai/claude-opus-4-7"
+            MODEL_SHORT="claude-opus-4.7"
+            CACHE_PROMPTS="true"
+            ;;
+        opus48v|opus48vertex|claude-opus-4-8-vertex)
+            MODEL_NAME="vertex_ai/claude-opus-4-8"
+            MODEL_SHORT="claude-opus-4.8"
+            CACHE_PROMPTS="true"
+            ;;
+        sonnet46v|sonnet46vertex|claude-sonnet-4-6-vertex)
+            MODEL_NAME="vertex_ai/claude-sonnet-4-6"
+            MODEL_SHORT="claude-sonnet-4.6"
+            CACHE_PROMPTS="true"
+            ;;
+        gemini25pro|gemini-2.5-pro)
+            MODEL_NAME="vertex_ai/gemini-2.5-pro"
+            MODEL_SHORT="gemini-2.5-pro"
+            CACHE_PROMPTS="false"
+            ;;
+        gemini|gemini31|gemini-3.1-pro)
+            MODEL_NAME="vertex_ai/gemini-3.1-pro-preview"
+            MODEL_SHORT="gemini-3.1-pro"
+            CACHE_PROMPTS="false"
+            ;;
         *)
             MODEL_NAME="$arg"
             MODEL_SHORT=$(echo "$arg" | sed 's|.*/||' | tr -dc 'a-zA-Z0-9._-' | cut -c1-20)

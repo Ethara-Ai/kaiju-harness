@@ -365,8 +365,10 @@ def run_cpp_agent_for_repo(
                             test_files_readonly=_test_files_ro,
                         )
             except Exception as e:
-                logger.error(f"Agent failed for {repo_name}/{tf} (draft mode): {e}")
-                (file_log_dir / "error.log").write_text(str(e))
+                import traceback as _tb
+                tb_str = _tb.format_exc()
+                logger.error(f"Agent failed for {repo_name}/{tf} (draft mode): {e}\n{tb_str}")
+                (file_log_dir / "error.log").write_text(f"{e}\n\n{tb_str}")
 
         # Per-module .done marker — mirrors Java structure
         _mark_module_done(file_log_dir)
@@ -445,7 +447,7 @@ def run_cpp_agent(
     cpp_examples: list[RepoInstance] = []
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]
-        if repo_name in cpp_repo_names:
+        if not cpp_repo_names or repo_name in cpp_repo_names:
             cpp_examples.append(example)
 
     assert len(cpp_examples) > 0, (

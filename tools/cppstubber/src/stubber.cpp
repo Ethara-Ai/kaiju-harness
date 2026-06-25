@@ -65,7 +65,7 @@ bool StubVisitor::shouldSkip(const clang::FunctionDecl *FD) const {
         if (MD->isDefaulted() || MD->isDeleted())
             return true;
 
-        if (MD->isPureVirtual())
+        if (MD->isPure())
             return true;
 
         if (!config_.stub_private && MD->getAccess() == clang::AS_private)

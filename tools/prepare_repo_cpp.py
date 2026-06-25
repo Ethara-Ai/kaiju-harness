@@ -185,7 +185,8 @@ def generate_compile_commands(repo_dir: Path, build_system: str) -> bool:
 
 
 def _collect_cpp_files(directory: Path) -> list[str]:
-    CPP_EXTS = {".cpp", ".cc", ".cxx", ".c++"}
+    CPP_EXTS = {".cpp", ".cc", ".cxx", ".c++",
+                ".hpp", ".hh", ".hxx", ".h++", ".h"}
     SKIP_DIRS = {"build", "cmake-build-debug", "cmake-build-release", "builddir",
                  ".cache", "_deps", "third_party", "vendor", "extern", ".git", "test", "tests"}
     result = []
@@ -220,25 +221,47 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
 
     has_compdb = (repo_dir / "compile_commands.json").exists()
 
-    if CPPSTUBBER.exists() and has_compdb:
-        cpp_files = _collect_cpp_files(src_dir)
-        if not cpp_files:
-            logger.error("No C++ source files found in %s", src_dir)
-            return 0, 0
+    cpp_files = _collect_cpp_files(src_dir) if has_compdb else []
+    use_compdb_mode = CPPSTUBBER.exists() and has_compdb and bool(cpp_files)
 
-        logger.info("Running cppstubber on %d files in %s (using compile_commands.json)",
+    if use_compdb_mode:
+        logger.info("Running cppstubber on %d files in %s (compile_commands.json, per-file)",
                      len(cpp_files), src_dir_relative)
-        try:
-            cmd = [str(CPPSTUBBER), "-p", str(repo_dir), "--in-place"] + cpp_files
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300, cwd=repo_dir,
-            )
-        except subprocess.TimeoutExpired:
-            logger.error("cppstubber timed out on %s", src_dir_relative)
-            return 0, 1
+        aggregated_stdout = []
+        aggregated_stderr = []
+        crashed = 0
+        compdb_dir = repo_dir / "build"
+        if not (compdb_dir / "compile_commands.json").exists():
+            compdb_dir = repo_dir
+        for cf in cpp_files:
+            cf_abs = str(Path(cf).resolve())
+            cmd = [str(CPPSTUBBER), "-p", str(compdb_dir.resolve()), "--in-place",
+                   "--extra-arg=--gcc-toolchain=/usr", cf_abs]
+            try:
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=60, cwd=repo_dir,
+                )
+                if r.stdout:
+                    aggregated_stdout.append(r.stdout)
+                if r.returncode < 0:
+                    crashed += 1
+                    aggregated_stderr.append(f"{Path(cf).name}: crashed signal={-r.returncode}")
+                elif r.stderr and r.returncode != 0:
+                    aggregated_stderr.append(f"{Path(cf).name}: {r.stderr[:150]}")
+            except subprocess.TimeoutExpired:
+                aggregated_stderr.append(f"{Path(cf).name}: TIMEOUT after 60s")
+        if aggregated_stderr:
+            logger.info("cppstubber issues (first 3 of %d): %s",
+                        len(aggregated_stderr), aggregated_stderr[:3])
+        if crashed:
+            logger.warning("cppstubber crashed on %d file(s) — partial coverage", crashed)
+        class _PseudoResult:
+            returncode = 0
+            stdout = "\n".join(aggregated_stdout)
+            stderr = ""
+        result = _PseudoResult()
     elif CPPSTUBBER.exists():
-        logger.info("Running cppstubber on %s (--input-dir mode, no compile_commands.json)",
-                     src_dir_relative)
+        logger.info("Running cppstubber on %s (--input-dir mode)", src_dir_relative)
         try:
             result = subprocess.run(
                 [str(CPPSTUBBER), "--input-dir", str(src_dir), "--in-place"],
@@ -373,7 +396,7 @@ def create_dataset_entry(
     upstream: str,
     fork_name: str,
     repo_name: str,
-    src_dir: str,
+    src_dirs: list[str],
     test_cmd: str,
     base_commit: str,
     reference_commit: str,
@@ -385,7 +408,8 @@ def create_dataset_entry(
     version_source: str = "default",
     version_conflicts: list[str] | None = None,
 ) -> dict:
-    test_dir = src_dir.rsplit("/src", 1)[0] if "/src" in src_dir else "."
+    primary_src = src_dirs[0] if src_dirs else "."
+    test_dir = primary_src.rsplit("/src", 1)[0] if "/src" in primary_src else "."
 
     return {
         "instance_id": f"commit-0/{repo_name}",
@@ -412,7 +436,7 @@ def create_dataset_entry(
             "test_dir": test_dir,
             "test_framework": test_framework,
         },
-        "src_dir": src_dir,
+        "src_dir": ",".join(src_dirs),
         "language": "cpp",
     }
 
@@ -542,7 +566,7 @@ base_dir: repos
 
 def prepare_cpp_repo(
     upstream: str,
-    src_dir: str,
+    src_dirs: list[str],
     test_cmd: str,
     org: str = DEFAULT_ORG,
     clone_dir: Path | None = None,
@@ -591,12 +615,19 @@ def prepare_cpp_repo(
     else:
         logger.warning("compile_commands.json not generated (stubber may use fallback)")
 
-    ok, fail = stub_source_dir(repo_dir, src_dir, build_system)
+    ok, fail = 0, 0
+    for sd in src_dirs:
+        logger.info("Stubbing source dir: %s", sd)
+        sd_ok, sd_fail = stub_source_dir(repo_dir, sd, build_system)
+        ok += sd_ok
+        fail += sd_fail
     if ok == 0:
-        logger.error("No files/functions were stubbed. Aborting.")
+        logger.error("No files/functions were stubbed across any of %s. Aborting.", src_dirs)
         return None
 
-    cleaned = _strip_null_bytes(repo_dir / src_dir)
+    cleaned = 0
+    for sd in src_dirs:
+        cleaned += _strip_null_bytes(repo_dir / sd)
     if cleaned:
         logger.info("Stripped trailing null bytes from %d files", cleaned)
 
@@ -681,7 +712,7 @@ def prepare_cpp_repo(
         upstream=upstream,
         fork_name=fork_name,
         repo_name=repo_name,
-        src_dir=src_dir,
+        src_dirs=src_dirs,
         test_cmd=test_cmd,
         base_commit=base_commit,
         reference_commit=reference_commit,
@@ -729,7 +760,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--src-dir", required=True,
-        help="Relative path to source dir (e.g. src)",
+        help="Comma-separated source dir(s) (e.g. 'src' or 'src,include/fmt')",
     )
     parser.add_argument(
         "--test-cmd", required=True,
@@ -782,9 +813,13 @@ def main() -> None:
 
     setup_git_credentials(dry_run=args.dry_run)
 
+    src_dirs = [d.strip() for d in args.src_dir.split(",") if d.strip()]
+    if not src_dirs:
+        parser.error("--src-dir must contain at least one non-empty path")
+
     entry = prepare_cpp_repo(
         upstream=args.repo,
-        src_dir=args.src_dir,
+        src_dirs=src_dirs,
         test_cmd=args.test_cmd,
         org=args.org,
         clone_dir=args.clone_dir,

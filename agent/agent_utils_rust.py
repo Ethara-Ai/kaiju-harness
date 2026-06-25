@@ -361,17 +361,29 @@ def _get_dir_tree(dir_path: str, max_depth: int = 2, _depth: int = 0) -> str:
     return "\n".join(filter(None, lines))
 
 
+_MAX_DEP_CONTEXT_CHARS = 50_000
+
+
 def get_message_rust(
     agent_config: AgentConfig,
     repo_path: str,
     test_files: Optional[list[str]] = None,
+    target_files: Optional[list[str]] = None,
 ) -> tuple[str, list[SummarizerCost]]:
     """Build the agent prompt for a Rust repo.
 
     Loads ``rust_system_prompt.md`` and fills the ``{repo_name}``,
-    ``{function_list}``, and ``{file_context}`` placeholders.
-    Appends optional repo info, unit test info, and spec info sections
-    (mirrors the Python ``get_message``).
+    ``{function_list}``, and ``{file_context}`` placeholders. Appends optional
+    repo info, unit test info, and spec info sections.
+
+    Args:
+        agent_config: Agent configuration.
+        repo_path: Absolute path to the repo's working directory.
+        test_files: Optional list of test file paths for unit_tests_info section.
+        target_files: Optional explicit list of stub files to scope
+            ``function_list`` and ``file_context`` to. When omitted, all stubs
+            in the repo are discovered automatically. Per-file callers should
+            pass ``[single_file]`` to keep the prompt small on large crates.
 
     Returns (message, summarizer_costs).
     """
@@ -385,11 +397,14 @@ def get_message_rust(
         template = agent_config.user_prompt
 
     repo_name = os.path.basename(os.path.normpath(repo_path))
-    target_files = get_target_edit_files_rust(repo_path)
+    if target_files is None:
+        target_files = get_target_edit_files_rust(repo_path)
 
     function_lines: list[str] = []
     all_dep_content: list[str] = []
     seen_deps: set[str] = set()
+    dep_chars = 0
+    dep_cap_reached = False
 
     for fpath in target_files:
         stubs = extract_rust_function_stubs(fpath)
@@ -399,6 +414,8 @@ def get_message_rust(
                 f"- {stub['name']} ({rel}:{stub['line']}): {stub['signature']}"
             )
 
+        if dep_cap_reached:
+            continue
         deps = get_rust_file_dependencies(fpath)
         base_dir = os.path.dirname(fpath)
         for dep in deps:
@@ -421,7 +438,18 @@ def get_message_rust(
                     with open(dep_file, "r", encoding="utf-8", errors="ignore") as fh:
                         lines = fh.readlines()[:200]
                     dep_rel = os.path.relpath(dep_file, repo_path)
-                    all_dep_content.append(f"// --- {dep_rel} ---\n" + "".join(lines))
+                    block = f"// --- {dep_rel} ---\n" + "".join(lines)
+                    remaining = _MAX_DEP_CONTEXT_CHARS - dep_chars
+                    if remaining <= 0:
+                        dep_cap_reached = True
+                        break
+                    if len(block) > remaining:
+                        block = block[:remaining] + "\n// … dep_context cap reached …\n"
+                        dep_cap_reached = True
+                    all_dep_content.append(block)
+                    dep_chars += len(block)
+                    if dep_cap_reached:
+                        break
                 except OSError:
                     pass
 

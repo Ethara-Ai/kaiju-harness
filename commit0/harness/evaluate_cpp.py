@@ -250,6 +250,8 @@ def main(
     elif repo_split in split_dict:
         cpp_repo_names = {r.split("/")[-1] for r in split_dict[repo_split]}
 
+    accept_all_when_split_empty = (repo_split == "all" and not cpp_repo_names)
+
     repos = []
     if repo_split == "all" or repo_split in split_dict:
         repos = list(cpp_repo_names)
@@ -261,7 +263,7 @@ def main(
     for example in dataset_list:
         repo_name = example["repo"].split("/")[-1]
         if repo_split == "all":
-            if repo_name not in cpp_repo_names:
+            if not accept_all_when_split_empty and repo_name not in cpp_repo_names:
                 continue
         elif repo_split in split_dict:
             if repo_name not in cpp_repo_names:

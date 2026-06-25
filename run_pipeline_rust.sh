@@ -29,7 +29,7 @@ fi
 REPO_BASE="${BASE_DIR}/repos"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
-MAX_ITERATION=3
+MAX_ITERATION=1
 
 # Rust pipeline — spec info enabled by default (use --no-spec-info to disable)
 LANGUAGE="rust"
@@ -85,7 +85,7 @@ Dataset examples:
 Options:
   --branch         <name>    Override auto-generated branch name
   --repo-split     <name>    Override repo_split (required for custom dataset paths)
-  --max-iteration  <n>       Max agent iterations per stage (default: 3)
+  --max-iteration  <n>       Max agent iterations per stage (default: 1)
   --stage-timeout  <secs>    Hard stage timeout in seconds (default: 0=disabled, skipped if agent active)
   --inactivity-timeout <s>   Kill agent if no log activity for N seconds (default: 900)
   --max-wall-time  <secs>    Absolute per-stage wall-time cap in seconds (default: 86400, 0=disable)
@@ -1255,7 +1255,7 @@ stage_1_draft() {
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
 
-    run_agent "$BRANCH_NAME" "true" "$stage_log_dir"
+    run_agent "$BRANCH_NAME" "false" "$stage_log_dir"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
 

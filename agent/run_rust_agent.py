@@ -79,18 +79,36 @@ def _load_spec_text(repo_path: str) -> str:
         return ""
 
 
+_MAX_FILE_CONTEXT_CHARS = 50_000
+_MAX_PER_FILE_CONTEXT_CHARS = 20_000
+
+
 def get_rust_message(
     agent_config: AgentConfig,
     repo_path: str,
     target_files: list[str],
+    test_files: list[str] | None = None,
 ) -> tuple[str, list[SummarizerCost]]:
     """Build the Rust system prompt from the template.
 
     Fills ``{repo_name}``, ``{function_list}``, and ``{file_context}`` placeholders
     in ``agent/prompts/rust_system_prompt.md``.
 
-    Returns ``(formatted_message, summarizer_costs)`` — costs are always empty for
-    now (no spec summarization in V1).
+    Args:
+        agent_config: Agent configuration (controls which info sections render).
+        repo_path: Absolute path to the repo's working directory.
+        target_files: The stub files this invocation should focus on. **Must be
+            scoped to ONE file (or a small set) in per-file callers** — passing
+            every stub in the crate produces megabyte-scale prompts that exceed
+            model context windows on large crates (e.g. tokio).
+        test_files: Optional list of test file paths (absolute or repo-relative).
+            When provided AND ``agent_config.use_unit_tests_info`` is True, the
+            test bodies are concatenated and appended (capped at
+            ``agent_config.max_unit_tests_info_length`` chars). Pipeline
+            historically computed ``test_files_readonly`` but never threaded it
+            here, so this section was silently dead. Pass it explicitly now.
+
+    Returns ``(formatted_message, summarizer_costs)``.
     """
     repo_name = os.path.basename(repo_path)
 
@@ -104,14 +122,36 @@ def get_rust_message(
     function_list = "\n".join(function_lines) if function_lines else "(no stubs found)"
 
     context_parts: list[str] = []
+    running_chars = 0
+    truncated_files = 0
     for fpath in target_files:
+        if running_chars >= _MAX_FILE_CONTEXT_CHARS:
+            truncated_files += 1
+            continue
         rel = os.path.relpath(fpath, repo_path)
         try:
             with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                 content = fh.read()
-            context_parts.append(f"### {rel}\n```rust\n{content}\n```")
         except OSError as exc:
             logger.warning("Could not read %s for context: %s", fpath, exc)
+            continue
+        if len(content) > _MAX_PER_FILE_CONTEXT_CHARS:
+            content = (
+                content[:_MAX_PER_FILE_CONTEXT_CHARS]
+                + f"\n// … truncated ({len(content) - _MAX_PER_FILE_CONTEXT_CHARS} chars elided) …\n"
+            )
+        block = f"### {rel}\n```rust\n{content}\n```"
+        remaining = _MAX_FILE_CONTEXT_CHARS - running_chars
+        if len(block) > remaining:
+            block = block[:remaining] + "\n// … file_context cap reached …\n"
+        context_parts.append(block)
+        running_chars += len(block)
+
+    if truncated_files:
+        context_parts.append(
+            f"\n// … {truncated_files} additional file(s) elided to stay under "
+            f"file_context cap of {_MAX_FILE_CONTEXT_CHARS} chars …\n"
+        )
 
     file_context = "\n\n".join(context_parts) if context_parts else "(no files)"
 
@@ -129,6 +169,26 @@ def get_rust_message(
 
     if agent_config.use_user_prompt and agent_config.user_prompt:
         message = agent_config.user_prompt + "\n\n" + message
+
+    if agent_config.use_unit_tests_info and test_files:
+        unit_tests_section = "\n\n>>> Here is the Unit Tests Information:\n"
+        for tf in test_files:
+            tf_path = Path(tf) if os.path.isabs(tf) else Path(repo_path) / tf
+            if tf_path.exists():
+                try:
+                    unit_tests_section += (
+                        f"\n### {tf_path.name}\n```rust\n"
+                        + tf_path.read_text(errors="replace")
+                        + "\n```\n"
+                    )
+                except OSError as exc:
+                    logger.warning("Could not read test file %s: %s", tf_path, exc)
+        max_unit = max(0, int(getattr(agent_config, "max_unit_tests_info_length", 10000)))
+        if len(unit_tests_section) > max_unit:
+            unit_tests_section = (
+                unit_tests_section[:max_unit] + "\n... (truncated)\n"
+            )
+        message += unit_tests_section
 
     spec_costs: list[SummarizerCost] = []
     if agent_config.use_spec_info:
@@ -410,7 +470,10 @@ def run_rust_agent_for_repo(
                 if agent_config.blind_lint and lint_cmd:
                     lint_cmd = _make_blind_lint_cmd()
                 message, spec_costs = get_rust_message(
-                    agent_config, repo_path, target_files=[src_file]
+                    agent_config,
+                    repo_path,
+                    target_files=[src_file],
+                    test_files=test_files_readonly,
                 )
                 if thinking_capture is not None:
                     for c in spec_costs:
@@ -487,13 +550,6 @@ def run_rust_agent_for_repo(
                     )
 
         elif agent_config.run_entire_dir_lint:
-            message, spec_costs = get_rust_message(
-                agent_config, repo_path, target_files=all_source_files
-            )
-            if thinking_capture is not None:
-                for c in spec_costs:
-                    thinking_capture.summarizer_costs.add(c)
-
             lint_files = all_source_files
             for lint_file in lint_files:
                 lint_file_name = os.path.relpath(lint_file, repo_path).replace(".rs", "").replace("/", "__")
@@ -502,6 +558,16 @@ def run_rust_agent_for_repo(
                 if _is_module_done(lint_log_dir):
                     logger.info("Skipping already-linted file: %s", lint_file_name)
                     continue
+
+                message, spec_costs = get_rust_message(
+                    agent_config,
+                    repo_path,
+                    target_files=[lint_file],
+                    test_files=test_files_readonly,
+                )
+                if thinking_capture is not None:
+                    for c in spec_costs:
+                        thinking_capture.summarizer_costs.add(c)
 
                 lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
                 if agent_config.blind_lint and lint_cmd:
@@ -576,13 +642,6 @@ def run_rust_agent_for_repo(
                     )
 
         else:
-            message, spec_costs = get_rust_message(
-                agent_config, repo_path, target_files=target_edit_files
-            )
-            if thinking_capture is not None:
-                for c in spec_costs:
-                    thinking_capture.summarizer_costs.add(c)
-
             for f in target_edit_files:
                 file_name = os.path.relpath(f, repo_path).replace(".rs", "").replace("/", "__")
                 file_log_dir = experiment_log_dir / file_name
@@ -591,7 +650,15 @@ def run_rust_agent_for_repo(
                     logger.info("Skipping already-drafted file: %s", file_name)
                     continue
 
-                iter_message = message
+                iter_message, spec_costs = get_rust_message(
+                    agent_config,
+                    repo_path,
+                    target_files=[f],
+                    test_files=test_files_readonly,
+                )
+                if thinking_capture is not None:
+                    for c in spec_costs:
+                        thinking_capture.summarizer_costs.add(c)
 
                 lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
                 if agent_config.blind_lint and lint_cmd:
