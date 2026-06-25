@@ -6,6 +6,7 @@ use std::process;
 use clap::Parser;
 use walkdir::WalkDir;
 
+use ruststubber::cfg_test::attr_implies_test_gate;
 use ruststubber::{stub_source_with_options, StubOptions};
 
 /// Rust function body stubber.
@@ -29,15 +30,15 @@ struct Cli {
     #[arg(long, conflicts_with = "output_dir")]
     in_place: bool,
 
-    /// Strip every `#[doc = "..."]` attribute (i.e. `///` outer comments and
-    /// `//!` inner module docs) from every traversed item — functions,
-    /// structs, enums, unions, traits, impls, trait/impl/foreign items,
-    /// variants, fields, type aliases, consts, statics, macros, use
-    /// statements, and the file itself. Increases benchmark difficulty by
-    /// reducing context exposed to the agent (mirrors the Python pipeline's
-    /// --strip-docstrings flag).
+    /// Preserve doc comments, `//!`/`///` lines, `#[doc = "..."]` attributes
+    /// AND ordinary `//` and `/* */` comments in the stubbed output.
+    ///
+    /// Default behaviour (when this flag is absent) is to strip them all so
+    /// the agent sees only signatures, non-doc attributes, test code, and
+    /// `panic!("STUB: not implemented")` bodies. Pass `--keep-docs` only when
+    /// you explicitly want the upstream comments preserved.
     #[arg(long)]
-    strip_docs: bool,
+    keep_docs: bool,
 }
 
 fn is_in_target_dir(path: &Path) -> bool {
@@ -55,78 +56,6 @@ fn is_test_module_path(path: &Path) -> bool {
         let s = c.as_os_str().to_string_lossy();
         s == "tests" || s == "test"
     })
-}
-
-/// Does this attribute imply the item is only present when `cfg(test)` is true?
-///
-/// Handles these syntactic forms correctly:
-///   - `#[cfg(test)]`                   → true
-///   - `#[cfg(all(test, ...))]`         → true (test is a required conjunct)
-///   - `#[cfg(any(test, X))]`           → false (X alone could enable in production)
-///   - `#[cfg(not(test))]`              → false (production-only)
-///   - `#[cfg(feature = "test-utils")]` → false (name-value, not actually cfg(test))
-///   - `#[cfg_attr(c, cfg(test), ...)]` → true if any applied attr is cfg(test)-implying
-///
-/// This is a proper cfg-expression evaluator, not a substring match — so it
-/// gives the correct answer for the entire Rust cfg DSL.
-fn attr_implies_test_gate(attr: &syn::Attribute) -> bool {
-    let path = attr.path();
-    let syn::Meta::List(list) = &attr.meta else { return false };
-
-    if path.is_ident("cfg") {
-        let Ok(meta) = syn::parse2::<syn::Meta>(list.tokens.clone()) else { return false };
-        return cfg_expr_requires_test(&meta);
-    }
-    if path.is_ident("cfg_attr") {
-        // #[cfg_attr(condition, attr1, attr2, ...)] expands to #[attr1] #[attr2] when
-        // condition holds. We mark gated if any applied attr is itself cfg-test-implying.
-        let args = parse_meta_args(list);
-        if args.len() < 2 { return false }
-        return args[1..].iter().any(meta_implies_test_gate);
-    }
-    false
-}
-
-/// Evaluate `meta` as a cfg expression and return true iff it requires
-/// `test` to be true to evaluate true. Recursive over all / any / not.
-fn cfg_expr_requires_test(meta: &syn::Meta) -> bool {
-    match meta {
-        syn::Meta::Path(p) => p.is_ident("test"),
-        syn::Meta::List(list) => {
-            let name = list.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
-            let args = parse_meta_args(list);
-            match name.as_str() {
-                // all(A, B, C) is true iff every conjunct is true.
-                // It REQUIRES test iff at least one conjunct requires test.
-                "all" => args.iter().any(cfg_expr_requires_test),
-                // any(A, B, C) is true iff at least one disjunct is true.
-                // It REQUIRES test iff every disjunct requires test.
-                "any" => !args.is_empty() && args.iter().all(cfg_expr_requires_test),
-                // not(X) can be true without test=true. It never requires test.
-                "not" => false,
-                _ => false,
-            }
-        }
-        syn::Meta::NameValue(_) => false,
-    }
-}
-
-/// Like cfg_expr_requires_test but operates on items that may be `cfg(...)`
-/// attributes themselves (used for cfg_attr's applied-attr list).
-fn meta_implies_test_gate(meta: &syn::Meta) -> bool {
-    let syn::Meta::List(list) = meta else { return false };
-    if !list.path.is_ident("cfg") { return false }
-    let Ok(inner) = syn::parse2::<syn::Meta>(list.tokens.clone()) else { return false };
-    cfg_expr_requires_test(&inner)
-}
-
-fn parse_meta_args(list: &syn::MetaList) -> Vec<syn::Meta> {
-    use syn::parse::Parser;
-    let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
-    parser.parse2(list.tokens.clone())
-        .ok()
-        .map(|p| p.into_iter().collect())
-        .unwrap_or_default()
 }
 
 /// Resolve candidate filesystem paths for an external `mod <name>;`.
@@ -348,6 +277,34 @@ fn find_crate_roots_via_filesystem(input_dir: &Path) -> Vec<PathBuf> {
 ///   2. Otherwise (or if cargo fails), walk the filesystem for lib.rs / main.rs
 ///      / bin/*.rs. This is the original fallback that handles subdirectory
 ///      inputs and crates that don't compile cleanly.
+pub fn is_proc_macro_crate(input_dir: &Path) -> bool {
+    let Some(manifest) = find_cargo_manifest(input_dir) else { return false };
+    let Ok(contents) = fs::read_to_string(&manifest) else { return false };
+    cargo_toml_declares_proc_macro(&contents)
+}
+
+fn cargo_toml_declares_proc_macro(contents: &str) -> bool {
+    let mut in_lib_section = false;
+    for raw in contents.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() { continue }
+        if let Some(stripped) = line.strip_prefix('[') {
+            let header = stripped.trim_end_matches(']').trim();
+            in_lib_section = header == "lib";
+            continue;
+        }
+        if in_lib_section {
+            let eq = match line.find('=') { Some(i) => i, None => continue };
+            let key = line[..eq].trim();
+            let val = line[eq + 1 ..].trim().trim_matches(',');
+            if key == "proc-macro" || key == "proc_macro" {
+                return val == "true";
+            }
+        }
+    }
+    false
+}
+
 fn collect_test_gated_files(input_dir: &Path) -> HashSet<PathBuf> {
     let mut gated: HashSet<PathBuf> = HashSet::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
@@ -376,6 +333,15 @@ fn main() {
     if !input_dir.is_dir() {
         eprintln!("Error: input directory does not exist: {}", input_dir.display());
         process::exit(1);
+    }
+
+    if is_proc_macro_crate(input_dir) {
+        eprintln!(
+            "ruststubber: detected proc-macro crate at {} — skipping entirely",
+            input_dir.display()
+        );
+        eprintln!("ruststubber: 0 stubbed, 0 non-rs copied, 0 test-modules skipped, 0 errors");
+        return;
     }
 
     let test_gated = collect_test_gated_files(input_dir);
@@ -460,7 +426,7 @@ fn main() {
             }
         };
 
-        let options = StubOptions { strip_docs: cli.strip_docs };
+        let options = StubOptions { strip_docs: !cli.keep_docs };
         match stub_source_with_options(&source, options) {
             Ok(output) => {
                 if let Err(e) = fs::write(&dest_path, output) {
@@ -501,6 +467,71 @@ mod tests {
             fs::write(&p, content).expect("write");
         }
         dir
+    }
+
+    #[test]
+    fn proc_macro_true_detected() {
+        let cargo = r#"
+[package]
+name = "x"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#;
+        assert!(cargo_toml_declares_proc_macro(cargo));
+    }
+
+    #[test]
+    fn proc_macro_false_or_absent_not_detected() {
+        assert!(!cargo_toml_declares_proc_macro("[package]\nname = \"x\"\n"));
+        assert!(!cargo_toml_declares_proc_macro("[lib]\nproc-macro = false\n"));
+        assert!(!cargo_toml_declares_proc_macro("[dependencies]\nproc-macro = true\n"));
+        assert!(!cargo_toml_declares_proc_macro(""));
+    }
+
+    #[test]
+    fn proc_macro_underscore_variant_detected() {
+        let cargo = "[lib]\nproc_macro = true\n";
+        assert!(cargo_toml_declares_proc_macro(cargo));
+    }
+
+    #[test]
+    fn proc_macro_with_comment_detected() {
+        let cargo = "[lib]\nproc-macro = true # this is a proc macro crate\n";
+        assert!(cargo_toml_declares_proc_macro(cargo));
+    }
+
+    #[test]
+    fn proc_macro_with_spaces_in_header_detected() {
+        let cargo = "[ lib ]\nproc-macro = true\n";
+        assert!(cargo_toml_declares_proc_macro(cargo));
+    }
+
+    #[test]
+    fn lib_dot_subsection_not_detected_as_lib() {
+        let cargo = "[lib.metadata]\nproc-macro = true\n";
+        assert!(!cargo_toml_declares_proc_macro(cargo));
+    }
+
+    #[test]
+    fn is_proc_macro_crate_walks_up_to_find_manifest() {
+        let dir = make_layout(&[
+            ("Cargo.toml", "[package]\nname = \"x\"\nversion = \"0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n"),
+            ("src/lib.rs", "pub fn foo() {}\n"),
+        ]);
+        assert!(is_proc_macro_crate(&dir.path().join("src")));
+        assert!(is_proc_macro_crate(dir.path()));
+    }
+
+    #[test]
+    fn is_proc_macro_crate_returns_false_for_regular_lib() {
+        let dir = make_layout(&[
+            ("Cargo.toml", "[package]\nname = \"x\"\nversion = \"0\"\nedition = \"2021\"\n"),
+            ("src/lib.rs", "pub fn foo() {}\n"),
+        ]);
+        assert!(!is_proc_macro_crate(&dir.path().join("src")));
     }
 
     #[test]

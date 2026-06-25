@@ -386,6 +386,7 @@ def get_message_rust(
             pass ``[single_file]`` to keep the prompt small on large crates.
 
     Returns (message, summarizer_costs).
+
     """
     spec_costs: list[SummarizerCost] = []
 

@@ -81,6 +81,7 @@ def _load_spec_text(repo_path: str) -> str:
 
 _MAX_FILE_CONTEXT_CHARS = 50_000
 _MAX_PER_FILE_CONTEXT_CHARS = 20_000
+_MAX_FUNCTION_LIST_CHARS = 30_000
 
 
 def get_rust_message(
@@ -109,15 +110,28 @@ def get_rust_message(
             here, so this section was silently dead. Pass it explicitly now.
 
     Returns ``(formatted_message, summarizer_costs)``.
+
     """
     repo_name = os.path.basename(repo_path)
 
     function_lines: list[str] = []
+    fl_chars = 0
+    fl_capped = False
     for fpath in target_files:
+        if fl_capped:
+            break
         stubs = extract_rust_function_stubs(fpath)
         rel = os.path.relpath(fpath, repo_path)
         for stub in stubs:
-            function_lines.append(f"- `{rel}` line {stub['line']}: `{stub['signature']}`")
+            line = f"- `{rel}` line {stub['line']}: `{stub['signature']}`"
+            if fl_chars + len(line) > _MAX_FUNCTION_LIST_CHARS:
+                function_lines.append(
+                    f"... (function_list cap of {_MAX_FUNCTION_LIST_CHARS} chars reached; remaining stubs elided) ..."
+                )
+                fl_capped = True
+                break
+            function_lines.append(line)
+            fl_chars += len(line) + 1
 
     function_list = "\n".join(function_lines) if function_lines else "(no stubs found)"
 

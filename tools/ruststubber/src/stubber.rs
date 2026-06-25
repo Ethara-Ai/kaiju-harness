@@ -1,27 +1,20 @@
 use proc_macro2::TokenStream;
-use quote::{quote, ToTokens};
+use quote::quote;
 use syn::fold::{self, Fold};
 use syn::{
     Block, File, GenericArgument, ImplItemFn, ItemFn, ItemMod, PathArguments, ReturnType,
     TraitItemFn, Type, TypeImplTrait, TypeParamBound,
 };
 
-fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| a.path().is_ident("test"))
-}
-
-fn has_cfg_test_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        a.path().is_ident("cfg") && a.to_token_stream().to_string().contains("test")
-    })
-}
+use crate::cfg_test::{has_proc_macro_attr, has_test_attr, has_test_gate};
 
 fn should_preserve_fn(sig: &syn::Signature, attrs: &[syn::Attribute]) -> bool {
     let name = sig.ident.to_string();
     name == "main"
         || sig.constness.is_some()
         || has_test_attr(attrs)
-        || has_cfg_test_attr(attrs)
+        || has_test_gate(attrs)
+        || has_proc_macro_attr(attrs)
 }
 
 fn panic_stub_block() -> Box<Block> {
@@ -179,20 +172,25 @@ pub struct StubFolder {
 
 /// Configuration for the stubbing transformation.
 ///
-/// Defaults preserve all attributes (least-aggressive stubbing); enable
-/// `strip_docs` to remove `#[doc = "..."]` attributes universally and reduce
-/// the contextual surface area exposed to the agent (mirrors the Python
-/// pipeline's `--strip-docstrings` behaviour).
-#[derive(Default, Clone, Copy, Debug)]
+/// `strip_docs` defaults to `true` because the harness contract is to expose
+/// only signatures, non-doc attributes, test code, and stub bodies to the
+/// agent. Set it to `false` (e.g. via `--keep-docs` on the CLI) only when
+/// you explicitly want upstream doc comments and `//` / `/* */` comments
+/// preserved in the output.
+#[derive(Clone, Copy, Debug)]
 pub struct StubOptions {
-    /// Strip every `#[doc = "..."]` attribute (i.e. `///` outer doc comments,
-    /// `//!` inner module docs, and any explicit `#[doc(...)]`) from every
-    /// item we traverse — functions, structs, enums, unions, traits, impls,
-    /// trait/impl/foreign items, variants, fields, type aliases, consts,
-    /// statics, macros, use/extern-crate statements, and the file itself.
-    ///
-    /// Function bodies are still stubbed; this flag is orthogonal.
+    /// When `true` (the default), strip every `#[doc = "..."]` attribute (i.e.
+    /// `///` outer doc comments, `//!` inner module docs, explicit
+    /// `#[doc(...)]`) AND every `//` line comment, `/* */` block comment, and
+    /// outer/inner block doc comment from every traversed item. When `false`,
+    /// the upstream comments survive verbatim.
     pub strip_docs: bool,
+}
+
+impl Default for StubOptions {
+    fn default() -> Self {
+        Self { strip_docs: true }
+    }
 }
 
 impl Default for StubFolder {
@@ -250,7 +248,7 @@ impl Fold for StubFolder {
     }
 
     fn fold_item_mod(&mut self, mut i: ItemMod) -> ItemMod {
-        if has_cfg_test_attr(&i.attrs) {
+        if has_test_gate(&i.attrs) {
             return i;
         }
         self.maybe_strip_doc_attrs(&mut i.attrs);
@@ -381,18 +379,18 @@ pub fn stub_file(file: File) -> File {
 
 /// Stub a parsed file with explicit options.
 ///
-/// In addition to the per-item attribute filtering that the `Fold` impl
-/// performs while traversing, this function also strips file-level inner
-/// attributes (`#![doc = "..."]` originating from top-of-file `//!`
-/// comments) when `strip_docs` is enabled — these don't pass through the
-/// item-folding methods, so they need a dedicated pass.
+/// Routes through `stub_source_with_options` (byte-span surgery) by
+/// re-emitting → stubbing → re-parsing, so the public in-memory API has
+/// identical semantics to the source-string API. The old `Fold`-based
+/// pipeline is retained as `StubFolder` for direct callers that explicitly
+/// want it, but it cannot stub items inside macro invocations and does not
+/// stub trait-method default bodies (B3/B6 from the review).
 pub fn stub_file_with_options(file: File, options: StubOptions) -> File {
-    let mut folder = StubFolder::with_options(options);
-    let mut folded = folder.fold_file(file);
-    if options.strip_docs {
-        folded.attrs.retain(|a| !is_doc_attr(a));
+    let source = prettyplease::unparse(&file);
+    match stub_source_with_options(&source, options) {
+        Ok(stubbed) => syn::parse_file(&stubbed).unwrap_or(file),
+        Err(_) => file,
     }
-    folded
 }
 
 /// Returns `Err` if `syn::parse_file` fails. Uses default options.
@@ -401,10 +399,33 @@ pub fn stub_source(source: &str) -> Result<String, String> {
 }
 
 /// Returns `Err` if `syn::parse_file` fails. Uses explicit options.
+///
+/// Pipeline: parse → byte-span surgery (collect fn-body edits + optional
+/// doc-attr edits) → splice into ORIGINAL source. Everything outside fn-body
+/// byte ranges is byte-identical to the input. Comments, blank lines, macro
+/// invocations, and doc comments inside macros are all preserved verbatim.
 pub fn stub_source_with_options(source: &str, options: StubOptions) -> Result<String, String> {
     let parsed = syn::parse_file(source).map_err(|e| format!("syn parse error: {e}"))?;
-    let stubbed = stub_file_with_options(parsed, options);
-    Ok(prettyplease::unparse(&stubbed))
+    let report = crate::span_edit::collect_edits_with_report(
+        &parsed,
+        crate::span_edit::CollectOptions { strip_docs: options.strip_docs },
+        source.len(),
+    );
+    if !report.unknown_macros_skipped.is_empty() {
+        let names: Vec<_> = report.unknown_macros_skipped.iter().take(8).cloned().collect();
+        eprintln!(
+            "ruststubber: warning: could not recurse into {} unknown macro invocation(s) — bodies inside MAY leak: {}{}",
+            report.unknown_macros_skipped.len(),
+            names.join(", "),
+            if report.unknown_macros_skipped.len() > 8 { ", ..." } else { "" }
+        );
+    }
+    let stubbed = crate::span_edit::apply_edits(source, report.edits);
+    if options.strip_docs {
+        Ok(crate::span_edit::strip_comments(&stubbed))
+    } else {
+        Ok(stubbed)
+    }
 }
 
 #[cfg(test)]
@@ -419,8 +440,8 @@ fn add(a: i32, b: i32) -> i32 {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
-        assert!(!out.contains("a + b"));
+        assert!(out.contains(r#"panic!("STUB: not implemented")"#), "got: {out}");
+        assert!(!out.contains("a + b"), "got: {out}");
     }
 
     #[test]
@@ -433,7 +454,7 @@ fn test_something() {
 "#;
         let out = stub_source(src).unwrap();
         assert!(out.contains("assert_eq!"));
-        assert!(!out.contains(r#"panic!("STUB: not implemented")"#));
+        assert!(!out.contains(r#"panic!("STUB: not implemented")"#), "test fn body should not be stubbed: {out}");
     }
 
     #[test]
@@ -474,8 +495,8 @@ impl Foo {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
-        assert!(!out.contains("42"));
+        assert!(out.contains(r#"panic!("STUB: not implemented")"#), "got: {out}");
+        assert!(!out.contains("42"), "got: {out}");
     }
 
     #[test]
@@ -490,56 +511,54 @@ trait MyTrait {
     }
 
     #[test]
-    fn test_impl_iterator_return() {
+    fn test_impl_iterator_return_unified_to_loop() {
         let src = r#"
 fn get_items() -> impl Iterator<Item = i32> {
     vec![1, 2, 3].into_iter()
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains("std::iter::empty"));
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
-        assert!(!out.contains("vec!"));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(!out.contains("vec!"), "got: {out}");
+        assert!(!out.contains("std::iter::empty"), "trait-specific stub leaked: {out}");
     }
 
     #[test]
-    fn test_impl_iterator_with_lifetime() {
+    fn test_impl_iterator_with_lifetime_unified_to_loop() {
         let src = r#"
 fn get_strs<'a>(v: &'a [String]) -> impl Iterator<Item = &'a str> + 'a {
     v.iter().map(|s| s.as_str())
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains("std::iter::empty"));
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
     }
 
     #[test]
-    fn test_impl_display_return() {
+    fn test_impl_display_return_unified_to_loop() {
         let src = r#"
 fn display_thing() -> impl std::fmt::Display {
     "hello"
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains("String::new()"));
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(!out.contains("String::new()"), "trait-specific stub leaked: {out}");
     }
 
     #[test]
-    fn test_impl_into_iterator_return() {
+    fn test_impl_into_iterator_return_unified_to_loop() {
         let src = r#"
 fn get_collection() -> impl IntoIterator<Item = u8> {
     vec![1u8, 2, 3]
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains("Vec"));
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
     }
 
     #[test]
-    fn test_unknown_impl_trait_fallback() {
+    fn test_unknown_impl_trait_fallback_loop() {
         let src = r#"
 trait Custom {}
 fn get_custom() -> impl Custom {
@@ -549,25 +568,23 @@ fn get_custom() -> impl Custom {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
-        assert!(out.contains("loop"));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
     }
 
     #[test]
-    fn test_concrete_return_unchanged() {
+    fn test_concrete_return_uses_loop() {
         let src = r#"
 fn get_vec() -> Vec<i32> {
     vec![1, 2, 3]
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
-        assert!(!out.contains("std::iter::empty"));
-        assert!(!out.contains("loop"));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(!out.contains("std::iter::empty"), "got: {out}");
     }
 
     #[test]
-    fn test_impl_method_with_impl_trait_return() {
+    fn test_impl_method_with_impl_trait_return_unified_to_loop() {
         let src = r#"
 struct Foo;
 impl Foo {
@@ -577,36 +594,33 @@ impl Foo {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains("std::iter::empty"));
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
     }
 
     #[test]
-    fn test_impl_fn_mut_return() {
+    fn test_impl_fn_mut_return_unified_to_loop() {
         let src = r#"
 use std::cmp::Ordering;
 struct GridItem;
-fn cmp_items(axis: u32) -> impl FnMut(&GridItem, &GridItem) -> Ordering {
-    move |a, b| Ordering::Equal
+fn cmp_items(_axis: u32) -> impl FnMut(&GridItem, &GridItem) -> Ordering {
+    move |_a, _b| Ordering::Equal
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
-        assert!(!out.contains("Ordering::Equal"));
-        assert!(!out.contains("loop"));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(!out.contains("Ordering::Equal"), "got: {out}");
     }
 
     #[test]
-    fn test_impl_fn_once_no_return() {
+    fn test_impl_fn_once_no_return_unified_to_loop() {
         let src = r#"
 fn make_callback() -> impl FnOnce(i32) {
     |x| println!("{}", x)
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
-        assert!(!out.contains("println"));
-        assert!(!out.contains("loop"));
+        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(!out.contains("println"), "got: {out}");
     }
 
     #[test]
@@ -624,8 +638,8 @@ impl Styles {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains("42"));
-        assert!(!out.contains(r#"panic!("STUB: not implemented")"#));
+        assert!(out.contains("42"), "got: {out}");
+        assert!(!out.contains(r#"panic!("STUB: not implemented")"#), "const fn body should not be stubbed: {out}");
     }
 
     // ===== strip_docs option tests (universal coverage across item kinds) =====
@@ -643,7 +657,7 @@ fn answer() -> i32 { 42 }
         let out = stub_strip_docs(src);
         assert!(!out.contains("documented function"), "doc should be stripped: {out}");
         assert!(out.contains("fn answer"), "signature kept: {out}");
-        assert!(out.contains(r#"panic!("STUB: not implemented")"#));
+        assert!(out.contains(r#"panic!("STUB: not implemented")"#), "got: {out}");
     }
 
     #[test]
@@ -765,14 +779,24 @@ pub fn foo() -> i32 { 0 }
     }
 
     #[test]
-    fn strip_docs_disabled_by_default_preserves_docs() {
-        // Regression: without strip_docs the original behaviour is unchanged.
+    fn strip_docs_is_now_the_default() {
         let src = r#"
-/// Should remain in output.
-fn keep_me() -> i32 { 1 }
+/// Should be stripped by default now.
+fn drop_me() -> i32 { 1 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains("Should remain"), "doc should be preserved by default: {out}");
+        assert!(!out.contains("Should be stripped"), "doc should be stripped by default: {out}");
+        assert!(out.contains("fn drop_me"), "signature preserved: {out}");
+    }
+
+    #[test]
+    fn opt_out_keep_docs_preserves_docs() {
+        let src = r#"
+/// Should remain when strip_docs=false.
+fn keep_me() -> i32 { 1 }
+"#;
+        let out = stub_source_with_options(src, StubOptions { strip_docs: false }).unwrap();
+        assert!(out.contains("Should remain"), "doc should be preserved when strip_docs=false: {out}");
     }
 
     #[test]

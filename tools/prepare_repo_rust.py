@@ -118,22 +118,27 @@ def clone_repo(full_name: str, clone_dir: Path) -> Path:
 # ─── Stubbing ────────────────────────────────────────────────────────────────
 
 
-def stub_source_dir(repo_dir: Path, src_dir_relative: str, strip_docs: bool = False) -> tuple[int, int]:
+def stub_source_dir(repo_dir: Path, src_dir_relative: str, strip_docs: bool = True) -> tuple[int, int]:
     """Stub all .rs files in src_dir using ruststubber --in-place.
 
     The ruststubber binary walks the directory, skips target/ directories,
     stubs .rs files, and copies non-.rs files unchanged. Returns (success_count, fail_count).
+
+    `strip_docs` defaults to True so the agent sees only signatures, non-doc
+    attributes, test code, and stub bodies. Pass strip_docs=False (which maps
+    to `--keep-docs` on the binary) only when upstream doc comments must
+    survive in the stubbed output.
     """
     src_dir = repo_dir / src_dir_relative
     if not src_dir.is_dir():
         logger.error("Source directory not found: %s", src_dir)
         return 0, 0
 
-    logger.info("Running ruststubber --in-place on %s", src_dir_relative)
+    logger.info("Running ruststubber --in-place on %s (strip_docs=%s)", src_dir_relative, strip_docs)
 
     try:
         result = subprocess.run(
-            [str(RUSTSTUBBER), "--input-dir", str(src_dir), "--in-place"] + (["--strip-docs"] if strip_docs else []),
+            [str(RUSTSTUBBER), "--input-dir", str(src_dir), "--in-place"] + ([] if strip_docs else ["--keep-docs"]),
             capture_output=True,
             text=True,
             timeout=120,
@@ -403,7 +408,7 @@ def prepare_rust_repo(
     packages: str = "pkg-config libssl-dev",
     skip_spec: bool = False,
     specs_dir: Path = SPECS_DIR,
-    strip_docs: bool = False,
+    strip_docs: bool = True,
 ) -> dict | None:
     """Run the full preparation pipeline for a single Rust repo/crate.
 
@@ -712,13 +717,13 @@ def main() -> None:
         help="Skip scraping docs.rs spec PDF",
     )
     parser.add_argument(
-        "--strip-docs",
+        "--keep-docs",
         action="store_true",
         help=(
-            "Strip all #[doc] attributes (i.e. /// outer comments, //! inner "
-            "module docs, and explicit #[doc(...)] attrs) from every traversed "
-            "item. Increases benchmark difficulty by reducing context exposed "
-            "to the agent. Mirrors the Python pipeline's --strip-docstrings flag."
+            "Preserve upstream doc comments, //! inner module docs, "
+            "#[doc=...] attributes, and ordinary // / /* */ comments in the "
+            "stubbed output. Default is to strip them so the agent sees only "
+            "signatures, non-doc attributes, test code, and stub bodies."
         ),
     )
 
@@ -767,7 +772,7 @@ def main() -> None:
         edition=args.edition,
         packages=args.packages,
         skip_spec=args.skip_spec,
-        strip_docs=args.strip_docs,
+        strip_docs=not args.keep_docs,
     )
 
     if entry is None:

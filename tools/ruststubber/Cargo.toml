@@ -5,9 +5,16 @@ edition = "2021"
 description = "Replaces Rust function bodies with panic!(\"STUB: not implemented\") using syn's Fold trait"
 
 [dependencies]
-syn = { version = "2", features = ["full", "visit-mut", "fold", "extra-traits"] }
+# `visit` for read-only AST walk used by the byte-span surgery pipeline.
+syn = { version = "2", features = ["full", "visit", "visit-mut", "fold", "extra-traits"] }
 quote = "1"
-proc-macro2 = "1"
+# `span-locations` exposes proc_macro2::Span::byte_range(), which the byte-span
+# surgery pipeline uses to map AST nodes back to original source bytes. The
+# offsets are accurate outside proc-macro contexts (our case is a build-time
+# CLI, so this is fine on stable). Pinned `>=1.0.66, <2` because byte_range's
+# semantics are not part of proc_macro2's stable semver contract — a 2.0
+# release could change or remove it.
+proc-macro2 = { version = ">=1.0.66, <2", features = ["span-locations"] }
 prettyplease = "0.2"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
