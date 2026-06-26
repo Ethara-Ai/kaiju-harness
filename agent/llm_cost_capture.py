@@ -54,6 +54,8 @@ def _provider_from_model(model: str) -> str:
         return "openai"
     if model.startswith("gemini/"):
         return "gemini"
+    if model.startswith("anthropic/"):
+        return "anthropic"
     return ""
 
 
@@ -267,7 +269,7 @@ def _load_pricing(model: str) -> dict[str, float]:
             data = json.loads(mp.read_text())
         except Exception:
             continue
-        entry = data.get(model) or data.get(model.replace("bedrock/", ""))
+        entry = data.get(model) or data.get(model.replace("bedrock/", "")) or data.get(model.replace("anthropic/", ""))
         if not entry and model.startswith("bedrock/converse/"):
             suffix = model[len("bedrock/converse/"):]
             for key, val in data.items():
@@ -284,6 +286,8 @@ def _load_pricing(model: str) -> dict[str, float]:
         try:
             import litellm
             entry = litellm.model_cost.get(model) or {}
+            if not entry and model.startswith("anthropic/"):
+                entry = litellm.model_cost.get(model[len("anthropic/"):]) or {}
             p["input"] = float(entry.get("input_cost_per_token") or 0)
             p["output"] = float(entry.get("output_cost_per_token") or 0)
             p["cache_read"] = float(entry.get("cache_read_input_token_cost") or 0)
@@ -328,6 +332,8 @@ def _normalize_model(model: str) -> str:
     m = model
     while m.startswith("bedrock/"):
         m = m[len("bedrock/"):]
+    while m.startswith("anthropic/"):
+        m = m[len("anthropic/"):]
     while m.startswith("vertex_ai/"):
         m = m[len("vertex_ai/"):]
     return m
@@ -718,6 +724,12 @@ def _wrap_litellm_completion() -> None:
 
             def wrapped_completion(*args: Any, **kwargs: Any) -> Any:
                 t0 = time.perf_counter()
+                _attempt_log = _current_log.get()
+                if _attempt_log is not None:
+                    try:
+                        _attempt_log.callback_event_count += 1
+                    except Exception:
+                        pass  # never block a completion on a counter bookkeeping error
                 result = original(*args, **kwargs)
                 model = kwargs.get("model") or (args[0] if args else "unknown")
                 is_stream = bool(kwargs.get("stream"))

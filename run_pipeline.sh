@@ -51,6 +51,7 @@ SKIP_TO_STAGE=""
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
+USE_CLAUDE_CODE="false"
 
 print_usage() {
     cat <<'USAGE'
@@ -85,6 +86,7 @@ Options:
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
+  --use-claude-code          Route Anthropic traffic through the local Claude Code OAuth bridge (uses your Claude subscription instead of an API key).
   -h, --help                 Show this help
 USAGE
     exit 1
@@ -107,6 +109,7 @@ while [[ $# -gt 0 ]]; do
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
+        --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         -h|--help)     print_usage ;;
         *)
             echo "Error: Unknown argument '$1'"
@@ -160,6 +163,12 @@ if [[ "$MODEL_NAME" == bedrock/* ]] && [[ -n "${AWS_BEARER_TOKEN_BEDROCK:-}" ]];
     # Also prevent boto3 from reading ~/.aws/credentials
     export AWS_SHARED_CREDENTIALS_FILE="/dev/null"
 fi
+
+# ============================================================
+# Claude Code OAuth bridge (optional --use-claude-code)
+# ============================================================
+source "${BASE_DIR}/scripts/_claude_code_pipeline_helper.sh"
+claude_code_maybe_start_bridge "$MODEL_NAME"
 
 # ============================================================
 # Resolve Dataset

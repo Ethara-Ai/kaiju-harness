@@ -160,6 +160,62 @@ for env_var, cfg in ARN_CONFIGS.items():
         arn = arn_raw if arn_raw.startswith("bedrock/") else f"bedrock/converse/{arn_raw}"
         meta[arn] = cfg
 
+# Anthropic-direct entries (used by the Claude Code OAuth bridge when --use-claude-code is set,
+# or any time the user runs --model anthropic/<id>). Always emit -- harmless if not used.
+_ANTHROPIC_DIRECT = {
+    "anthropic/claude-opus-4-7": {
+        "max_input_tokens": 200000, "max_output_tokens": 128000, "max_tokens": 128000,
+        "mode": "chat", "edit_format": "diff",
+        "input_cost_per_token": 5e-6, "output_cost_per_token": 2.5e-5,
+        "cache_creation_input_token_cost": 6.25e-6, "cache_read_input_token_cost": 5e-7,
+        "litellm_provider": "anthropic",
+        "supports_function_calling": True, "supports_system_messages": True,
+        "supports_tool_choice": True, "supports_vision": True,
+        "supports_prompt_caching": True, "supports_assistant_prefill": True,
+    },
+    "anthropic/claude-opus-4-8": {
+        "max_input_tokens": 200000, "max_output_tokens": 128000, "max_tokens": 128000,
+        "mode": "chat", "edit_format": "diff",
+        "input_cost_per_token": 5e-6, "output_cost_per_token": 2.5e-5,
+        "cache_creation_input_token_cost": 6.25e-6, "cache_read_input_token_cost": 5e-7,
+        "litellm_provider": "anthropic",
+        "supports_function_calling": True, "supports_system_messages": True,
+        "supports_tool_choice": True, "supports_vision": True,
+        "supports_prompt_caching": True, "supports_assistant_prefill": True,
+    },
+    "anthropic/claude-sonnet-4-6": {
+        "max_input_tokens": 200000, "max_output_tokens": 64000, "max_tokens": 64000,
+        "mode": "chat", "edit_format": "diff",
+        "input_cost_per_token": 3e-6, "output_cost_per_token": 1.5e-5,
+        "cache_creation_input_token_cost": 3.75e-6, "cache_read_input_token_cost": 3e-7,
+        "litellm_provider": "anthropic",
+        "supports_function_calling": True, "supports_system_messages": True,
+        "supports_tool_choice": True, "supports_vision": True,
+        "supports_prompt_caching": True, "supports_assistant_prefill": True,
+    },
+    "anthropic/claude-haiku-4-5-20251001": {
+        "max_input_tokens": 200000, "max_output_tokens": 64000, "max_tokens": 64000,
+        "mode": "chat", "edit_format": "diff",
+        "input_cost_per_token": 1e-6, "output_cost_per_token": 5e-6,
+        "cache_creation_input_token_cost": 1.25e-6, "cache_read_input_token_cost": 1e-7,
+        "litellm_provider": "anthropic",
+        "supports_function_calling": True, "supports_system_messages": True,
+        "supports_tool_choice": True, "supports_vision": True,
+        "supports_prompt_caching": True, "supports_assistant_prefill": True,
+    },
+    "anthropic/claude-haiku-4-5": {
+        "max_input_tokens": 200000, "max_output_tokens": 64000, "max_tokens": 64000,
+        "mode": "chat", "edit_format": "diff",
+        "input_cost_per_token": 1e-6, "output_cost_per_token": 5e-6,
+        "cache_creation_input_token_cost": 1.25e-6, "cache_read_input_token_cost": 1e-7,
+        "litellm_provider": "anthropic",
+        "supports_function_calling": True, "supports_system_messages": True,
+        "supports_tool_choice": True, "supports_vision": True,
+        "supports_prompt_caching": True, "supports_assistant_prefill": True,
+    },
+}
+meta.update(_ANTHROPIC_DIRECT)
+
 if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
     meta["vertex_ai/gemini-3.1-pro-preview"] = {
         "max_input_tokens": 1048576,
@@ -432,6 +488,31 @@ for env_var, cfg in ARN_SETTINGS.items():
             + cfg["extra"]
         )
         out.append(entry)
+
+# Anthropic-direct settings (always emitted; bridge users get cache_control + thinking).
+for _name in (
+    "anthropic/claude-opus-4-7",
+    "anthropic/claude-opus-4-8",
+    "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-haiku-4-5-20251001",
+    "anthropic/claude-haiku-4-5",
+):
+    out.append(f"""\
+- name: {_name}
+  edit_format: diff
+  use_repo_map: true
+  examples_as_sys_msg: false
+  use_temperature: false
+  extra_params:
+    max_tokens: 32000
+    thinking:
+      type: enabled
+      budget_tokens: 10000
+  cache_control: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking
+  accepts_settings:
+    - thinking_tokens""")
 
 if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
     out.append("""\

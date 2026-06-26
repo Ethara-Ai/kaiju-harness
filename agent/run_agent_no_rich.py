@@ -35,6 +35,7 @@ from agent.run_agent import (
     run_eval_after_each_commit,
 )
 import logging
+from agent.claude_code.recovery import run_with_recovery
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +306,7 @@ def _run_agent_for_repo_impl(
                                     log_dir=test_log_dir,
                                     model_short=agent_config.model_short,
                                 ):
-                    _ = agent.run(
+                    _ = run_with_recovery(agent.run, 
                         "",
                         test_cmd,
                         lint_cmd,
@@ -319,7 +320,7 @@ def _run_agent_for_repo_impl(
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    )
+                    _kaiju_log_dir=test_log_dir,)
                 module_elapsed = time.time() - module_start
                 _mark_module_done(test_log_dir)
 
@@ -381,7 +382,7 @@ def _run_agent_for_repo_impl(
                                     log_dir=lint_log_dir,
                                     model_short=agent_config.model_short,
                                 ):
-                    _ = agent.run(
+                    _ = run_with_recovery(agent.run, 
                         "",
                         "",
                         lint_cmd,
@@ -393,7 +394,7 @@ def _run_agent_for_repo_impl(
                         current_module=lint_file_name,
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    )
+                    _kaiju_log_dir=lint_log_dir,)
                 module_elapsed = time.time() - module_start
                 _mark_module_done(lint_log_dir)
 
@@ -463,7 +464,7 @@ def _run_agent_for_repo_impl(
                                     log_dir=file_log_dir,
                                     model_short=agent_config.model_short,
                                 ):
-                    _ = agent.run(
+                    _ = run_with_recovery(agent.run, 
                         iter_message,
                         "",
                         lint_cmd,
@@ -474,7 +475,7 @@ def _run_agent_for_repo_impl(
                         current_module=file_name,
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    )
+                    _kaiju_log_dir=file_log_dir,)
                 module_elapsed = time.time() - module_start
                 _mark_module_done(file_log_dir)
 

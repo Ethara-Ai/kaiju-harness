@@ -37,6 +37,7 @@ MAX_ITERATION=3
 # ============================================================
 
 MODEL_ARG=""
+USE_CLAUDE_CODE="false"
 DATASET_ARG=""
 BRANCH_OVERRIDE=""
 REPO_SPLIT_OVERRIDE=""
@@ -93,6 +94,7 @@ Options:
   --num-samples    <n>       Number of independent samples (pass@k, default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
   --max-test-output-length <n>  Max test output length (default: 15000)
+  --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
   --max-parallel-repos <n>     Max repos to run in parallel (default: 1, >1 enables batch mode)
   --no-test-files-readonly        Disable test file injection as read-only context
   --blind-lint                    Stage 2: show only lint count, not details
@@ -134,6 +136,7 @@ while [[ $# -gt 0 ]]; do
         --names-only-tests)       NAMES_ONLY_TESTS="true"; shift ;;
         --strip-non-stubs)        STRIP_NON_STUBS="true"; shift ;;
         -h|--help)     print_usage ;;
+        --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         *)
             echo "Error: Unknown argument '$1'"
             echo ""
@@ -170,6 +173,12 @@ fi
 source "${BASE_DIR}/commit0/harness/resolve_model.sh"
 
 resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Claude Code OAuth bridge (optional --use-claude-code)
+# ============================================================
+source "${BASE_DIR}/scripts/_claude_code_pipeline_helper.sh"
+claude_code_maybe_start_bridge "$MODEL_NAME"
 
 # ============================================================
 # Bedrock Bearer Token Priority

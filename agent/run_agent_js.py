@@ -50,6 +50,7 @@ from commit0.harness.constants_js import JS_SPLIT, JS_STUB_MARKER
 from commit0.harness.get_ts_test_ids import main as get_js_tests
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.utils import load_dataset_from_config
+from agent.claude_code.recovery import run_with_recovery
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +324,7 @@ def _run_agent_for_repo_js_impl(
                         log_dir=test_log_dir,
                         model_short=agent_config.model_short,
                     ):
-                        _ = agent.run(
+                        _ = run_with_recovery(agent.run, 
                             "",
                             test_cmd,
                             lint_cmd,
@@ -337,7 +338,7 @@ def _run_agent_for_repo_js_impl(
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                             test_files_readonly=test_files,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        )
+                    _kaiju_log_dir=test_log_dir,)
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -409,7 +410,7 @@ def _run_agent_for_repo_js_impl(
                         log_dir=lint_log_dir,
                         model_short=agent_config.model_short,
                     ):
-                        _ = agent.run(
+                        _ = run_with_recovery(agent.run, 
                             "",
                             "",
                             lint_cmd,
@@ -421,7 +422,7 @@ def _run_agent_for_repo_js_impl(
                             test_files_readonly=test_files,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
                             current_module=lint_file_name,
-                        )
+                    _kaiju_log_dir=lint_log_dir,)
                     module_elapsed = time.time() - module_start
                     _mark_module_done(lint_log_dir)
 
@@ -488,7 +489,7 @@ def _run_agent_for_repo_js_impl(
                         log_dir=file_log_dir,
                         model_short=agent_config.model_short,
                     ):
-                        _ = agent.run(
+                        _ = run_with_recovery(agent.run, 
                             iter_message,
                             "",
                             lint_cmd,
@@ -499,7 +500,7 @@ def _run_agent_for_repo_js_impl(
                             current_module=file_name,
                             test_files_readonly=test_files,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        )
+                    _kaiju_log_dir=file_log_dir,)
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

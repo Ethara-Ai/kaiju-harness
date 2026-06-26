@@ -33,6 +33,7 @@ from commit0.harness.constants_java import (
     detect_build_system,
 )
 from commit0.harness.utils import _PROTECTED_TEST_PATHSPECS
+from agent.claude_code.recovery import run_with_recovery
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +404,7 @@ def run_java_agent(
                         module=test_log_name,
                         log_dir=test_log_dir,
                     ):
-                        agent_return = java_agent.run(
+                        agent_return = run_with_recovery(java_agent.run, 
                             message="",
                             test_cmd=test_cmd,
                             lint_cmd=compile_cmd,
@@ -417,7 +418,7 @@ def run_java_agent(
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                             test_files_readonly=test_files_readonly,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        )
+                    _kaiju_log_dir=test_log_dir,)
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -487,7 +488,7 @@ def run_java_agent(
                         module=file_log_name,
                         log_dir=file_log_dir,
                     ):
-                        agent_return = java_agent.run(
+                        agent_return = run_with_recovery(java_agent.run, 
                             message=message,
                             test_cmd="",
                             lint_cmd=compile_cmd,
@@ -500,7 +501,7 @@ def run_java_agent(
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                             test_files_readonly=test_files_readonly,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        )
+                    _kaiju_log_dir=file_log_dir,)
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

@@ -45,6 +45,7 @@ from commit0.harness.constants_c import (
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_c_test_ids import main as get_c_test_ids
 from commit0.harness.utils import load_dataset_from_config
+from agent.claude_code.recovery import run_with_recovery
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +280,7 @@ def run_agent_for_repo(
                     module=test_id_safe,
                     log_dir=test_log_dir,
                 ):
-                    agent_return = agent.run(
+                    agent_return = run_with_recovery(agent.run, 
                         message,
                         test_cmd,
                         lint_cmd,
@@ -293,7 +294,7 @@ def run_agent_for_repo(
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    )
+                    _kaiju_log_dir=test_log_dir,)
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -329,7 +330,7 @@ def run_agent_for_repo(
                     module=file_name,
                     log_dir=lint_log_dir,
                 ):
-                    agent_return = agent.run(
+                    agent_return = run_with_recovery(agent.run, 
                         "",
                         "",
                         lint_cmd,
@@ -343,7 +344,7 @@ def run_agent_for_repo(
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    )
+                    _kaiju_log_dir=lint_log_dir,)
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -390,7 +391,7 @@ def run_agent_for_repo(
                     module=file_name,
                     log_dir=file_log_dir,
                 ):
-                    agent_return = agent.run(
+                    agent_return = run_with_recovery(agent.run, 
                         message,
                         "",
                         lint_cmd,
@@ -403,7 +404,7 @@ def run_agent_for_repo(
                         spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    )
+                    _kaiju_log_dir=file_log_dir,)
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(

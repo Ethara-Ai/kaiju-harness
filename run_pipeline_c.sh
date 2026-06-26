@@ -37,6 +37,7 @@ BACKEND="local"
 MAX_ITERATION=3
 
 MODEL_ARG=""
+USE_CLAUDE_CODE="false"
 DATASET_ARG=""
 BRANCH_OVERRIDE=""
 REPO_SPLIT_OVERRIDE=""
@@ -83,6 +84,7 @@ Options:
   --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
   --no-test-files-readonly   Remove test source files from read-only agent context (default: injected)
   -h, --help                 Show this help
+  --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
 USAGE
     exit 1
 }
@@ -110,6 +112,7 @@ while [[ $# -gt 0 ]]; do
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         -h|--help) print_usage ;;
+        --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         *) echo "Unknown argument: $1"; print_usage ;;
     esac
 done
@@ -122,6 +125,12 @@ if [[ -f "${BASE_DIR}/commit0/harness/resolve_model.sh" ]]; then
     # shellcheck disable=SC1091
     source "${BASE_DIR}/commit0/harness/resolve_model.sh"
     resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Claude Code OAuth bridge (optional --use-claude-code)
+# ============================================================
+source "${BASE_DIR}/scripts/_claude_code_pipeline_helper.sh"
+claude_code_maybe_start_bridge "$MODEL_NAME"
 else
     MODEL_NAME="$MODEL_ARG"
     MODEL_SHORT="$MODEL_ARG"

@@ -40,6 +40,7 @@ USE_SPEC_INFO="false"
 # ============================================================
 
 MODEL_ARG=""
+USE_CLAUDE_CODE="false"
 DATASET_ARG=""
 BRANCH_OVERRIDE=""
 REPO_SPLIT_OVERRIDE=""
@@ -97,6 +98,7 @@ Options:
   --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
   --no-test-files-readonly   Remove test source files from read-only agent context (default: injected)
   -h, --help                 Show this help
+  --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
 USAGE
     exit 1
 }
@@ -124,6 +126,7 @@ while [[ $# -gt 0 ]]; do
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         -h|--help)     print_usage ;;
+        --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         *)
             echo "Error: Unknown argument '$1'"
             echo ""
@@ -249,6 +252,12 @@ resolve_model() {
 }
 
 resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Claude Code OAuth bridge (optional --use-claude-code)
+# ============================================================
+source "${BASE_DIR}/scripts/_claude_code_pipeline_helper.sh"
+claude_code_maybe_start_bridge "$MODEL_NAME"
 
 # ============================================================
 # Bedrock Bearer Token Priority

@@ -40,6 +40,7 @@ MAX_ITERATION=3
 # ============================================================
 
 MODEL_ARG=""
+USE_CLAUDE_CODE="false"
 DATASET_ARG=""
 BRANCH_OVERRIDE=""
 REPO_SPLIT_OVERRIDE=""
@@ -96,6 +97,7 @@ Options:
   --names-only-tests             Show only failed test names, not tracebacks (default: false)
   --strip-non-stubs              Only pass stub files to agent (default: false)
   -h, --help                 Show this help
+  --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
 USAGE
     exit 1
 }
@@ -123,6 +125,7 @@ while [[ $# -gt 0 ]]; do
         --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         -h|--help)     print_usage ;;
+        --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         *)
             echo "Error: Unknown argument '$1'"
             echo ""
@@ -159,6 +162,12 @@ fi
 source "${BASE_DIR}/commit0/harness/resolve_model.sh"
 
 resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Claude Code OAuth bridge (optional --use-claude-code)
+# ============================================================
+source "${BASE_DIR}/scripts/_claude_code_pipeline_helper.sh"
+claude_code_maybe_start_bridge "$MODEL_NAME"
 
 # ============================================================
 # Bedrock Bearer Token Priority

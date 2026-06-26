@@ -25,6 +25,7 @@ from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_cpp import CPP_SPLIT
 from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
+from agent.claude_code.recovery import run_with_recovery
 
 logging.basicConfig(
     level=logging.INFO,
@@ -295,7 +296,7 @@ def run_cpp_agent_for_repo(
                     log_dir=file_log_dir,
                 ):
                     with DirContext(repo_path):
-                        _ = agent.run(
+                        _ = run_with_recovery(agent.run, 
                             message,
                             test_cmd,
                             lint_cmd,
@@ -309,7 +310,7 @@ def run_cpp_agent_for_repo(
                             spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
                             test_files_readonly=_test_files_ro,
-                        )
+                    _kaiju_log_dir=file_log_dir,)
                 if agent_config.record_test_for_each_commit and commit0_config_file:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -327,7 +328,7 @@ def run_cpp_agent_for_repo(
                     log_dir=file_log_dir,
                 ):
                     with DirContext(repo_path):
-                        _ = agent.run(
+                        _ = run_with_recovery(agent.run, 
                             message,
                             "",
                             lint_cmd,
@@ -339,7 +340,7 @@ def run_cpp_agent_for_repo(
                             current_module=stem,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
                             test_files_readonly=_test_files_ro,
-                        )
+                    _kaiju_log_dir=file_log_dir,)
             except Exception as e:
                 logger.error(f"Agent failed for {repo_name}/{tf} (lint mode): {e}")
                 (file_log_dir / "error.log").write_text(str(e))
@@ -352,7 +353,7 @@ def run_cpp_agent_for_repo(
                     log_dir=file_log_dir,
                 ):
                     with DirContext(repo_path):
-                        _ = agent.run(
+                        _ = run_with_recovery(agent.run, 
                             message,
                             "",
                             "",
@@ -363,7 +364,7 @@ def run_cpp_agent_for_repo(
                             current_module=stem,
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
                             test_files_readonly=_test_files_ro,
-                        )
+                    _kaiju_log_dir=file_log_dir,)
             except Exception as e:
                 import traceback as _tb
                 tb_str = _tb.format_exc()

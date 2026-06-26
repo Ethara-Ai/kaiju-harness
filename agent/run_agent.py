@@ -16,6 +16,7 @@ import json
 import subprocess
 import sys
 from agent.agents import AiderAgents
+from agent.claude_code.recovery import run_with_recovery
 from typing import Optional, Tuple, Type, cast
 from types import TracebackType
 from agent.class_types import AgentConfig
@@ -213,12 +214,14 @@ def _run_agent_for_repo_impl(
                 )
 
                 # display the test file to terminal
-                agent_return = agent.run(
+                agent_return = run_with_recovery(
+                    agent.run,
                     "",
                     test_cmd,
                     lint_cmd,
                     target_edit_files,
                     test_log_dir,
+                    _kaiju_log_dir=test_log_dir,
                     test_first=True,
                     max_test_output_length=agent_config.max_test_output_length,
                     spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
@@ -255,12 +258,14 @@ def _run_agent_for_repo_impl(
                 )
 
                 # display the test file to terminal
-                agent_return = agent.run(
+                agent_return = run_with_recovery(
+                    agent.run,
                     "",
                     "",
                     lint_cmd,
                     [lint_file],
                     lint_log_dir,
+                    _kaiju_log_dir=lint_log_dir,
                     lint_first=True,
                 )
                 if agent_config.record_test_for_each_commit:
@@ -295,7 +300,7 @@ def _run_agent_for_repo_impl(
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
-                agent_return = agent.run(message, "", lint_cmd, [f], file_log_dir)
+                agent_return = run_with_recovery(agent.run, message, "", lint_cmd, [f], file_log_dir, _kaiju_log_dir=file_log_dir)
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(

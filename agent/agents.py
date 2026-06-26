@@ -510,6 +510,8 @@ def _apply_thinking_capture_patches(
                 _provider = "openai"
             elif _model_name.startswith("gemini/"):
                 _provider = "gemini"
+            elif _model_name.startswith("anthropic/"):
+                _provider = "anthropic"
             coder._thinking_capture.add_assistant_turn(
                 content=coder.partial_response_content,
                 thinking=coder._last_reasoning_content,

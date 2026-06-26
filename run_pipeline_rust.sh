@@ -48,6 +48,7 @@ NAMES_ONLY_TESTS="false"
 # ============================================================
 
 MODEL_ARG=""
+USE_CLAUDE_CODE="false"
 DATASET_ARG=""
 BRANCH_OVERRIDE=""
 REPO_SPLIT_OVERRIDE=""
@@ -104,6 +105,7 @@ Options:
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
   -h, --help                 Show this help
+  --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
 USAGE
     exit 1
 }
@@ -135,6 +137,7 @@ while [[ $# -gt 0 ]]; do
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
+        --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         *)
             echo "Error: Unknown argument '$1'"
             echo ""
@@ -174,6 +177,12 @@ fi
 source "${BASE_DIR}/commit0/harness/resolve_model.sh"
 
 resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Claude Code OAuth bridge (optional --use-claude-code)
+# ============================================================
+source "${BASE_DIR}/scripts/_claude_code_pipeline_helper.sh"
+claude_code_maybe_start_bridge "$MODEL_NAME"
 
 # ============================================================
 # Bedrock Bearer Token Priority
@@ -341,6 +350,17 @@ preflight() {
             errors=$((errors + 1))
         fi
     done
+
+    # Docker DAEMON liveness check. CLI presence alone is insufficient — on macOS the
+    # Docker socket is missing until Docker Desktop is actively running, and silent
+    # failure here causes pipelines to waste LLM budget on no-op eval cycles.
+    if command -v docker &>/dev/null; then
+        if ! docker info &>/dev/null; then
+            echo "Error: Docker daemon not reachable. Start Docker Desktop and retry."
+            echo "       (docker info returned non-zero; socket likely missing)"
+            errors=$((errors + 1))
+        fi
+    fi
 
     # Item 10: probe toolchain versions; surface mismatch before agent runs.
     if command -v cargo &>/dev/null && command -v rustc &>/dev/null; then
