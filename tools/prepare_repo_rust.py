@@ -495,6 +495,7 @@ def prepare_rust_repo(
             local_spec = specs_dir / spec_filename
             shutil.copy2(str(spec_path), str(local_spec))
             logger.info("Local spec copy: %s", local_spec)
+            base_commit = get_head_sha(repo_dir)  # include spec PDF in agent's branching point
         else:
             if not dry_run:
                 try:

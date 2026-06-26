@@ -194,6 +194,38 @@ def build(
     )
 
 
+def _find_reference_commit(repo_name: str) -> str:
+    """Look up reference_commit for repo_name from .commit0_rust*.yaml + dataset.
+
+    Returns the reference_commit SHA or empty string if not discoverable. Tries
+    the active .commit0_rust.yaml first, then any .commit0_rust*.yaml in cwd.
+    """
+    import json
+    import yaml
+    from pathlib import Path
+
+    candidates = sorted(Path.cwd().glob(".commit0_rust*.yaml"))
+    for cfg_path in candidates:
+        try:
+            cfg = yaml.safe_load(cfg_path.read_text())
+            dataset_name = cfg.get("dataset_name") if isinstance(cfg, dict) else None
+            if not dataset_name:
+                continue
+            dataset_path = Path(dataset_name)
+            if not dataset_path.is_absolute():
+                dataset_path = (cfg_path.parent / dataset_path).resolve()
+            if not dataset_path.exists():
+                continue
+            entries = json.loads(dataset_path.read_text())
+            for entry in entries:
+                repo_field = (entry.get("repo") or "").strip()
+                if repo_field.endswith(f"/{repo_name}") or repo_field == repo_name:
+                    return entry.get("reference_commit", "")
+        except (yaml.YAMLError, json.JSONDecodeError, OSError, KeyError, TypeError):
+            continue
+    return ""
+
+
 @commit0_rust_app.command()
 def get_tests(
     repo_name: str = typer.Argument(
@@ -213,6 +245,8 @@ def get_tests(
     re-running cargo.
     """
     import json
+    import subprocess
+    from pathlib import Path
     from agent.agent_utils_rust import get_rust_test_ids
     from commit0.harness.constants_rust import RUST_TEST_IDS_DIR
 
@@ -223,11 +257,50 @@ def get_tests(
         )
 
     ids = get_rust_test_ids(repo_path)
+
+    # Auto-fallback to reference_commit when the stubbed code fails to compile.
+    # The stubbing process can leave imports/params unused, triggering deny-level
+    # lints inherited from upstream (e.g. RGB-WG/rgb-core). Test names live in
+    # `#[test]` / `#[cfg(test)]` blocks that the stubber preserves, so the test
+    # IDs from reference_commit are identical to what the stubbed tree would
+    # produce if it compiled.
+    if not ids:
+        ref_commit = _find_reference_commit(repo_name)
+        if ref_commit:
+            typer.echo(
+                f"  cargo test --list failed on current HEAD; falling back to reference_commit {ref_commit[:12]} ...",
+                err=True,
+            )
+            try:
+                saved_ref = subprocess.run(
+                    ["git", "-C", repo_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+                if saved_ref == "HEAD":  # already detached
+                    saved_ref = subprocess.run(
+                        ["git", "-C", repo_path, "rev-parse", "HEAD"],
+                        check=True, capture_output=True, text=True,
+                    ).stdout.strip()
+                subprocess.run(
+                    ["git", "-C", repo_path, "checkout", "--quiet", ref_commit],
+                    check=True,
+                )
+                try:
+                    ids = get_rust_test_ids(repo_path)
+                finally:
+                    subprocess.run(
+                        ["git", "-C", repo_path, "checkout", "--quiet", saved_ref],
+                        check=True,
+                    )
+            except subprocess.CalledProcessError as exc:
+                typer.echo(f"  reference_commit fallback failed: {exc}", err=True)
+
     if not ids:
         typer.echo(
             f"WARNING: no test IDs collected for {repo_name!r}. "
             "Check that the Rust toolchain can build the repo (cargo --list "
-            "may have failed). Run 'commit0 health-check' to diagnose.",
+            "may have failed) and that the dataset's reference_commit exists. "
+            "Run 'commit0 health-check' to diagnose.",
             err=True,
         )
         raise typer.Exit(code=1)

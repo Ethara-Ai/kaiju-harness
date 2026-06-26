@@ -935,3 +935,194 @@ class TestMainDatasetSplitParam:
         base_patches["load"].return_value = []
         main(**_default_kwargs(dataset_split="train"))
         base_patches["load"].assert_called_once_with("ds", split="train")
+
+
+
+class TestClassifyEvalOutcome:
+    """Tests for the failure-attribution classifier added by Fix #4."""
+
+    def _write(self, tmp_path, exit_code: str | None, output: str) -> str:
+        if exit_code is not None:
+            (tmp_path / "cargo_test_exit_code.txt").write_text(exit_code)
+        (tmp_path / "test_output.txt").write_text(output)
+        return str(tmp_path)
+
+    def test_compile_failure_detected(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_COMPILE_FAILED,
+        )
+        content = (
+            "   Compiling virtio-drivers v0.13.0\n"
+            "error: unexpected end of macro invocation\n"
+            "  --> src/device/blk.rs:57:60\n"
+            "error[E0432]: unresolved imports\n"
+            "error: could not compile `virtio-drivers` (lib) due to 2 previous errors\n"
+        )
+        log_dir = self._write(tmp_path, "101", content)
+        outcome, detail = _classify_eval_outcome(log_dir, content)
+        assert outcome == OUTCOME_COMPILE_FAILED
+        assert "compile error" in detail
+
+    def test_patch_apply_failure_detected(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_PATCH_APPLY_FAILED,
+        )
+        content = "PATCH APPLY FAILED\nerror: patch failed: src/foo.rs:1\n"
+        log_dir = self._write(tmp_path, "1", content)
+        outcome, detail = _classify_eval_outcome(log_dir, content)
+        assert outcome == OUTCOME_PATCH_APPLY_FAILED
+        assert "git_apply_stderr.log" in detail
+
+    def test_patch_apply_takes_priority_over_compile(self, tmp_path):
+        # If both PATCH APPLY FAILED sentinel and error lines exist (eval.sh
+        # writes the sentinel first), patch failure wins — it's the upstream cause.
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_PATCH_APPLY_FAILED,
+        )
+        content = "PATCH APPLY FAILED\nerror: patch failed\n"
+        log_dir = self._write(tmp_path, "1", content)
+        outcome, _ = _classify_eval_outcome(log_dir, content)
+        assert outcome == OUTCOME_PATCH_APPLY_FAILED
+
+    def test_timeout_exit_124(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_TEST_SUITE_TIMEOUT,
+        )
+        content = (
+            "running 3 tests\n"
+            "test a ... ok\n"
+            "test b ... ok\n"
+            "test c has been running for over 60 seconds\n"
+        )
+        log_dir = self._write(tmp_path, "124", content)
+        outcome, detail = _classify_eval_outcome(log_dir, content)
+        assert outcome == OUTCOME_TEST_SUITE_TIMEOUT
+        assert "EVAL_TEST_TIMEOUT" in detail
+
+    def test_timeout_exit_137_sigkill(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_TEST_SUITE_TIMEOUT,
+        )
+        log_dir = self._write(tmp_path, "137", "some output\n")
+        outcome, _ = _classify_eval_outcome(log_dir, "some output\n")
+        assert outcome == OUTCOME_TEST_SUITE_TIMEOUT
+
+    def test_no_tests_defined(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_NO_TESTS_DEFINED,
+        )
+        content = (
+            "     Running unittests src/lib.rs\n"
+            "\n"
+            "running 0 tests\n"
+            "\n"
+            "test result: ok. 0 passed; 0 failed; 0 ignored\n"
+        )
+        log_dir = self._write(tmp_path, "0", content)
+        outcome, _ = _classify_eval_outcome(log_dir, content)
+        assert outcome == OUTCOME_NO_TESTS_DEFINED
+
+    def test_unknown_falls_back_to_parser_no_match(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_PARSER_NO_MATCH,
+        )
+        content = "some random unparseable output\n"
+        log_dir = self._write(tmp_path, "42", content)
+        outcome, _ = _classify_eval_outcome(log_dir, content)
+        assert outcome == OUTCOME_PARSER_NO_MATCH
+
+    def test_missing_exit_code_file_handled(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _classify_eval_outcome,
+            OUTCOME_COMPILE_FAILED,
+        )
+        # No cargo_test_exit_code.txt written.
+        content = "error[E0432]: unresolved import\nerror: aborting\n"
+        (tmp_path / "test_output.txt").write_text(content)
+        outcome, _ = _classify_eval_outcome(str(tmp_path), content)
+        # Compile error lines visible → classified as compile fail despite missing exit code.
+        assert outcome == OUTCOME_COMPILE_FAILED
+
+
+class TestAggregateStatusField:
+    """Verify _aggregate_rust_results emits the new `status` field per Fix #4."""
+
+    def test_compile_failure_status_surfaced(self, tmp_path, caplog):
+        from commit0.harness.evaluate_rust import (
+            _aggregate_rust_results,
+            OUTCOME_COMPILE_FAILED,
+        )
+        (tmp_path / "cargo_test_exit_code.txt").write_text("101")
+        (tmp_path / "test_output.txt").write_text(
+            "error[E0432]: unresolved import\nerror: could not compile\n"
+        )
+        out: list = []
+        with caplog.at_level(logging.WARNING, logger="commit0.harness.evaluate_rust"):
+            _aggregate_rust_results(str(tmp_path), "my-repo", out)
+        assert len(out) == 1
+        assert out[0]["status"] == OUTCOME_COMPILE_FAILED
+        assert out[0]["num_tests"] == 0
+        # The warning must NOT be the old uninformative 'no summary' message.
+        assert any("COMPILE_FAILED" in r.message for r in caplog.records)
+        assert not any("no 'test result:'" in r.message for r in caplog.records)
+
+    def test_tests_ran_status_surfaced(self, tmp_path):
+        from commit0.harness.evaluate_rust import (
+            _aggregate_rust_results,
+            OUTCOME_TESTS_RAN,
+        )
+        (tmp_path / "cargo_test_exit_code.txt").write_text("1")
+        (tmp_path / "test_output.txt").write_text(
+            "running 4 tests\n"
+            "test a ... ok\n"
+            "test b ... ok\n"
+            "test c ... FAILED\n"
+            "test d ... ok\n"
+            "test result: FAILED. 3 passed; 1 failed; 0 ignored\n"
+        )
+        out: list = []
+        _aggregate_rust_results(str(tmp_path), "my-repo", out)
+        assert out[0]["status"] == OUTCOME_TESTS_RAN
+        assert out[0]["num_passed"] == 3
+        assert out[0]["num_tests"] == 4
+        assert out[0]["passed"] == 0.75
+
+    def test_partial_results_with_timeout_warning(self, tmp_path, caplog):
+        # Tests recovered but cargo exited 124 → partial-results warning fires.
+        from commit0.harness.evaluate_rust import _aggregate_rust_results
+        (tmp_path / "cargo_test_exit_code.txt").write_text("124")
+        (tmp_path / "test_output.txt").write_text(
+            "running 4 tests\ntest a ... ok\ntest b ... ok\n"
+        )
+        out: list = []
+        with caplog.at_level(logging.WARNING, logger="commit0.harness.evaluate_rust"):
+            _aggregate_rust_results(str(tmp_path), "my-repo", out)
+        assert out[0]["num_passed"] == 2
+        # Status is TESTS_RAN (we recovered results) but a warning indicates partial.
+        assert any("killed by timeout" in r.message for r in caplog.records)
+
+    def test_missing_output_file_status_surfaced(self, tmp_path, caplog):
+        from commit0.harness.evaluate_rust import (
+            _aggregate_rust_results,
+            OUTCOME_OUTPUT_MISSING,
+        )
+        out: list = []
+        with caplog.at_level(logging.WARNING, logger="commit0.harness.evaluate_rust"):
+            _aggregate_rust_results(str(tmp_path), "my-repo", out)
+        assert out[0]["status"] == OUTCOME_OUTPUT_MISSING
+
+    def test_status_detail_present_on_all_outcomes(self, tmp_path):
+        """Every output entry must have a non-empty status_detail for debugging."""
+        from commit0.harness.evaluate_rust import _aggregate_rust_results
+        (tmp_path / "cargo_test_exit_code.txt").write_text("42")
+        (tmp_path / "test_output.txt").write_text("garbage that matches nothing\n")
+        out: list = []
+        _aggregate_rust_results(str(tmp_path), "x", out)
+        assert out[0]["status_detail"], "status_detail must not be empty"
