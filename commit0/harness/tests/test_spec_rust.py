@@ -229,8 +229,14 @@ class TestRustSpecMakeEvalScriptList:
     def test_default_test_cmd_cargo_test(self):
         spec = _make_spec(instance=_make_instance(test={}))
         scripts = spec.make_eval_script_list()
-        test_lines = [s for s in scripts if s.strip().startswith("cargo test")]
+        # `cargo test` is now wrapped with `timeout` for per-suite hard-cap, so the
+        # line no longer *starts* with `cargo test` — assert substring presence instead.
+        test_lines = [s for s in scripts if "cargo test" in s]
         assert len(test_lines) >= 1
+        assert any("timeout" in s and "cargo test" in s for s in test_lines), (
+            "Eval script must wrap `cargo test` with timeout to survive hung tests; "
+            f"saw: {test_lines}"
+        )
 
     def test_test_ids_placeholder(self):
         spec = _make_spec()

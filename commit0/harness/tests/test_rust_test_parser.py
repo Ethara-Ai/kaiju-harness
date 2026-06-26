@@ -9,8 +9,10 @@ import pytest
 from commit0.harness.constants import TestStatus
 from commit0.harness.rust_test_parser import (
     RustTestResult,
+    parse_libtest_text,
     parse_nextest_json,
     parse_nextest_report,
+    parse_test_output,
 )
 
 
@@ -573,6 +575,8 @@ class TestModuleExportsParser:
         assert set(mod.__all__) == {
             "RustTestResult",
             "parse_nextest_json",
+            "parse_libtest_text",
+            "parse_test_output",
             "parse_nextest_report",
         }
 
@@ -581,3 +585,162 @@ class TestModuleExportsParser:
 
         for name in mod.__all__:
             assert hasattr(mod, name)
+
+
+
+class TestParseLibtestText:
+    """Tests for parsing stable cargo/libtest plain-text output."""
+
+    def test_single_passed_line(self):
+        results = parse_libtest_text("test queue::tests::add_buffers ... ok")
+        assert len(results) == 1
+        assert results[0].name == "queue::tests::add_buffers"
+        assert results[0].status == TestStatus.PASSED
+
+    def test_single_failed_line(self):
+        results = parse_libtest_text("test transport::pci::tests::offset_device_ids ... FAILED")
+        assert len(results) == 1
+        assert results[0].status == TestStatus.FAILED
+
+    def test_ignored_line(self):
+        results = parse_libtest_text("test foo::bar ... ignored")
+        assert len(results) == 1
+        assert results[0].status == TestStatus.SKIPPED
+
+    def test_real_virtio_drivers_output(self):
+        """Regression test for the virtio-drivers Stage 3 eval output that was
+        previously silently dropped because the parser only accepted JSON."""
+        text = (
+            "running 57 tests\n"
+            "test device::blk::tests::config ... ok\n"
+            "test queue::tests::add_buffers ... ok\n"
+            "test device::socket::connectionmanager::tests::send_recv ... FAILED\n"
+            "test transport::pci::tests::offset_device_ids ... FAILED\n"
+            "test transport::pci::bus::tests::bar_info_32 ... ok\n"
+            "test device::socket::connectionmanager::tests::incoming_connection has been running for over 60 seconds\n"
+        )
+        results = parse_libtest_text(text)
+        assert len(results) == 5  # the 'has been running' line is not a result
+        passed = [r for r in results if r.status == TestStatus.PASSED]
+        failed = [r for r in results if r.status == TestStatus.FAILED]
+        assert len(passed) == 3
+        assert len(failed) == 2
+        assert "transport::pci::bus::tests::bar_info_32" in {r.name for r in passed}
+
+    def test_partial_output_killed_mid_run(self):
+        """When `timeout` kills cargo test mid-stream, the lines that DID complete
+        before the kill must still be recovered."""
+        text = (
+            "test a::test1 ... ok\n"
+            "test a::test2 ... ok\n"
+            "test a::test3 ... ok\n"
+            # SIGKILL hit here; no summary line, no further tests.
+        )
+        results = parse_libtest_text(text)
+        assert len(results) == 3
+        assert all(r.status == TestStatus.PASSED for r in results)
+
+    def test_report_time_duration_angle_brackets(self):
+        results = parse_libtest_text("test t ... ok <0.05s>")
+        assert len(results) == 1
+        assert abs(results[0].duration - 0.05) < 1e-9
+
+    def test_report_time_duration_parens(self):
+        results = parse_libtest_text("test t ... ok (1.234s)")
+        assert len(results) == 1
+        assert abs(results[0].duration - 1.234) < 1e-9
+
+    def test_empty_text(self):
+        assert parse_libtest_text("") == []
+
+    def test_none_input(self):
+        assert parse_libtest_text(None) == []  # type: ignore[arg-type]
+
+    def test_non_test_lines_skipped(self):
+        text = (
+            "   Compiling virtio-drivers v0.13.0\n"
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.23s\n"
+            "     Running unittests src/lib.rs\n"
+            "running 1 test\n"
+            "test foo ... ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        )
+        results = parse_libtest_text(text)
+        assert len(results) == 1
+        assert results[0].name == "foo"
+
+    def test_unknown_outcome_skipped(self):
+        # libtest may emit `test foo ... bench: ...` for benchmarks; we don't count those.
+        results = parse_libtest_text("test foo ... bench: 1,234 ns/iter (+/- 56)")
+        assert results == []
+
+
+class TestParseTestOutputDispatcher:
+    """Tests for the format-sniffing dispatcher."""
+
+    def test_dispatches_to_json_when_jsonl(self):
+        line = json.dumps({"type": "test", "event": "ok", "name": "json_test"})
+        results = parse_test_output(line)
+        assert len(results) == 1
+        assert results[0].name == "json_test"
+
+    def test_dispatches_to_libtest_when_text(self):
+        results = parse_test_output("test text_test ... ok")
+        assert len(results) == 1
+        assert results[0].name == "text_test"
+
+    def test_libtest_when_running_header(self):
+        text = "running 1 test\ntest foo ... ok\n"
+        results = parse_test_output(text)
+        assert len(results) == 1
+        assert results[0].name == "foo"
+
+    def test_empty_input(self):
+        assert parse_test_output("") == []
+
+    def test_unknown_format_tries_both(self):
+        # Pure noise — neither JSON nor recognizable libtest.
+        results = parse_test_output("some random log line\nanother line\n")
+        assert results == []
+
+    def test_json_with_compile_garbage_falls_back_to_libtest(self):
+        """If the first non-empty line is JSON-like garbage but the rest is libtest,
+        we should still recover the libtest results."""
+        # First line starts with `{` (cargo emits JSON for --message-format=json
+        # build steps), but the actual test results are libtest text.
+        text = (
+            '{"reason":"compiler-artifact","target":{"name":"x"}}\n'
+            "test foo::bar ... ok\n"
+        )
+        results = parse_test_output(text)
+        # JSON path tried first, found 0 test entries, falls back to libtest.
+        assert len(results) == 1
+        assert results[0].name == "foo::bar"
+
+
+class TestParseNextestReportWithLibtext:
+    """Integration: parse_nextest_report now reads either format from disk."""
+
+    def test_libtest_text_file(self, tmp_path):
+        report = tmp_path / "test_output.txt"
+        report.write_text(
+            "running 3 tests\n"
+            "test a ... ok\n"
+            "test b ... FAILED\n"
+            "test c ... ignored\n"
+            "test result: FAILED. 1 passed; 1 failed; 1 ignored\n"
+        )
+        result = parse_nextest_report(str(report))
+        assert result["summary"]["total"] == 3
+        assert result["summary"]["passed"] == 1
+        assert result["summary"]["failed"] == 1
+        assert result["summary"]["skipped"] == 1
+
+    def test_partial_libtest_no_summary(self, tmp_path):
+        """Killed mid-stream: per-test lines exist but no 'test result:' summary."""
+        report = tmp_path / "test_output.txt"
+        report.write_text("test a ... ok\ntest b ... ok\n")
+        result = parse_nextest_report(str(report))
+        # Even without a summary, per-test results are recovered.
+        assert result["summary"]["total"] == 2
+        assert result["summary"]["passed"] == 2

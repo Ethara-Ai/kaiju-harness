@@ -34,6 +34,7 @@ from commit0.harness.constants_rust import RUST_SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.patch_utils_rust import generate_rust_patch, InvalidRustPatchError
 from commit0.harness.utils import load_dataset_from_config
+from agent.claude_code.recovery import run_with_recovery
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +261,22 @@ _BLIND_LINT_SHELL = (
     'exit $_rc'
 )
 
+# Portable per-test-cmd timeout. Prefers GNU `timeout` (Linux native, macOS via
+# `brew install coreutils` provides `gtimeout`). Falls back to no timeout if
+# neither is available — the pipeline watchdog (inactivity=900s by default) is
+# the next safety net. KAIJU_TEST_TIMEOUT env var (seconds) overrides 240s.
+_TIMEOUT_PREAMBLE = (
+    'TO=""; '
+    'command -v timeout >/dev/null 2>&1 && TO="timeout"; '
+    '[ -z "$TO" ] && command -v gtimeout >/dev/null 2>&1 && TO="gtimeout"; '
+    'TS="${KAIJU_TEST_TIMEOUT:-240}"; '
+)
+
+
 _BLIND_TEST_SHELL = (
-    '_out=$(cargo test --all-features 2>&1); '
+    _TIMEOUT_PREAMBLE +
+    'if [ -n "$TO" ]; then _out=$($TO "$TS" cargo test --all-features 2>&1); '
+    'else _out=$(cargo test --all-features 2>&1); fi; '
     '_rc=$?; '
     '_summary=$(printf "%s" "$_out" | grep -E "^test result:" | tail -1); '
     'if [ -n "$_summary" ]; then printf "%s\\n" "$_summary"; '
@@ -282,7 +297,9 @@ def _make_blind_test_cmd() -> str:
     return f"bash -c '{_BLIND_TEST_SHELL}'"
 
 _NAMES_ONLY_TEST_SHELL = (
-    '_out=$(cargo test --all-features 2>&1); '
+    _TIMEOUT_PREAMBLE +
+    'if [ -n "$TO" ]; then _out=$($TO "$TS" cargo test --all-features 2>&1); '
+    'else _out=$(cargo test --all-features 2>&1); fi; '
     '_rc=$?; '
     'if [ $_rc -eq 0 ]; then printf "tests pass\\n"; '
     'else '
@@ -300,6 +317,26 @@ _NAMES_ONLY_TEST_SHELL = (
 def _make_names_only_test_cmd() -> str:
     """Wrap cargo test so agent sees only failed test names + counts, no tracebacks."""
     return f"bash -c '{_NAMES_ONLY_TEST_SHELL}'"
+
+
+# Default Stage 3 test command. Same timeout protection as blind/names-only,
+# but emits cargo test's raw output unchanged so aider sees the standard
+# per-test lines + summary. Without this wrapper a single hung test (e.g. a
+# fake-socket listener) blocks `coder.commands.cmd_test()` indefinitely;
+# the agent then makes zero LLM calls until the outer watchdog kills it.
+_DEFAULT_TEST_SHELL = (
+    _TIMEOUT_PREAMBLE +
+    'if [ -n "$TO" ]; then _out=$($TO "$TS" cargo test --all-features 2>&1); '
+    'else _out=$(cargo test --all-features 2>&1); fi; '
+    '_rc=$?; '
+    'printf "%s" "$_out"; '
+    'exit $_rc'
+)
+
+
+def _make_default_test_cmd() -> str:
+    """Wrap cargo test with a portable timeout, preserving full output for aider."""
+    return f"bash -c '{_DEFAULT_TEST_SHELL}'"
 
 
 def get_rust_lint_cmd(repo_path: str) -> str:
@@ -479,7 +516,7 @@ def run_rust_agent_for_repo(
                 elif agent_config.names_only_tests:
                     test_cmd = _make_names_only_test_cmd()
                 else:
-                    test_cmd = "cargo test --all-features"
+                    test_cmd = _make_default_test_cmd()
                 lint_cmd = get_rust_lint_cmd(repo_path) if agent_config.use_lint_info else ""
                 if agent_config.blind_lint and lint_cmd:
                     lint_cmd = _make_blind_lint_cmd()
@@ -500,7 +537,7 @@ def run_rust_agent_for_repo(
                     module=src_file_name,
                     log_dir=test_log_dir,
                 ):
-                    _ = agent.run(
+                    _ = run_with_recovery(agent.run, 
                         "",
                         test_cmd,
                         lint_cmd,
@@ -515,7 +552,7 @@ def run_rust_agent_for_repo(
                         repo_map_tokens=agent_config.repo_map_tokens,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         test_files_readonly=test_files_readonly,
-                    )
+                    _kaiju_log_dir=test_log_dir,)
                 module_elapsed = time.time() - module_start
                 _mark_module_done(test_log_dir)
 
@@ -594,7 +631,7 @@ def run_rust_agent_for_repo(
                     module=lint_file_name,
                     log_dir=lint_log_dir,
                 ):
-                    _ = agent.run(
+                    _ = run_with_recovery(agent.run, 
                         "",
                         "",
                         lint_cmd,
@@ -607,7 +644,7 @@ def run_rust_agent_for_repo(
                         repo_map_tokens=agent_config.repo_map_tokens,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         test_files_readonly=test_files_readonly,
-                    )
+                    _kaiju_log_dir=lint_log_dir,)
                 module_elapsed = time.time() - module_start
                 _mark_module_done(lint_log_dir)
 
@@ -684,7 +721,7 @@ def run_rust_agent_for_repo(
                     module=file_name,
                     log_dir=file_log_dir,
                 ):
-                    _ = agent.run(
+                    _ = run_with_recovery(agent.run, 
                         iter_message,
                         "",
                         lint_cmd,
@@ -696,7 +733,7 @@ def run_rust_agent_for_repo(
                         repo_map_tokens=agent_config.repo_map_tokens,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
                         test_files_readonly=test_files_readonly,
-                    )
+                    _kaiju_log_dir=file_log_dir,)
                 module_elapsed = time.time() - module_start
                 _mark_module_done(file_log_dir)
 

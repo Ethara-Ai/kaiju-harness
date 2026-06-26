@@ -94,7 +94,18 @@ class RustSpec(Spec):
             "fi",
             revert_test_paths,
             "git status",
-            f"{test_cmd} {{test_ids}} > test_output.txt 2>&1",
+            # Per-suite hard cap. Without this a single hung test (e.g. a fake-socket
+            # listener that never wakes) blocks until the outer Docker timeout fires,
+            # which kills the process before the partial test_output.txt is flushed.
+            # `timeout --kill-after` sends SIGTERM then SIGKILL, giving cargo a chance
+            # to write any buffered output. Configurable via EVAL_TEST_TIMEOUT env var.
+            # NOTE: the eval script is later passed to `.format(test_ids=...)` — escape the
+            # bash `${...}` so the format step doesn't try to interpret it as a
+            # Python field. `{{` and `}}` survive `.format()` as literal single braces,
+            # which is what bash needs to see for parameter expansion.
+            'timeout --kill-after=10 "${{EVAL_TEST_TIMEOUT:-240}}" '
+            + test_cmd
+            + " {test_ids} > test_output.txt 2>&1",
             "echo $? > cargo_test_exit_code.txt",
         ]
 
