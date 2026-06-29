@@ -83,6 +83,11 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 ECR_BASE = "426628337772.dkr.ecr.ap-south-1.amazonaws.com/kaiju-q1-coding-base"
+ECR_BASE_BY_LANG: dict[str, str] = {
+    "python": ECR_BASE,
+    "go":     "426628337772.dkr.ecr.ap-south-1.amazonaws.com/kaiju_q2",
+    "rust":   "426628337772.dkr.ecr.ap-south-1.amazonaws.com/kaiju_q2",
+}
 MAX_SPEC_LENGTH = 10_000   # chars; matches commit0 agent_utils max_spec_info_length
 SCHEMA_VERSION = "1.3"
 SOURCE = "commit0"
@@ -107,6 +112,7 @@ REQUIRED_TEST_FIELDS = ("test_cmd", "test_dir")
 REQUIRED_SETUP_FIELDS_BY_LANG: dict[str, tuple[str, ...]] = {
     "python": ("python",),
     "go": ("go_version",),
+    "rust": ("rust_version",),
 }
 
 
@@ -151,9 +157,15 @@ HARBOR_TEMPLATE_DEFAULTS_GO: dict[str, Any] = {
     "keywords": ["commit0", "code-generation", "go", "swe"],
 }
 
+HARBOR_TEMPLATE_DEFAULTS_RUST: dict[str, Any] = {
+    **HARBOR_TEMPLATE_DEFAULTS,
+    "keywords": ["commit0", "code-generation", "rust", "swe"],
+}
+
 HARBOR_TEMPLATE_DEFAULTS_BY_LANG: dict[str, dict[str, Any]] = {
     "python": HARBOR_TEMPLATE_DEFAULTS,
     "go": HARBOR_TEMPLATE_DEFAULTS_GO,
+    "rust": HARBOR_TEMPLATE_DEFAULTS_RUST,
 }
 
 # Per-task ECR tag overrides for the ~19/300 commit0 tasks where the simple
@@ -253,9 +265,33 @@ Implement only the library source under the source directory. Do not modify the 
 {spec_text}
 """
 
+INSTRUCTION_TEMPLATE_RUST = """\
+# Implement `{original_repo}`
+
+You are given a Rust repository at `/testbed`, reset to a skeleton commit: every function body has been replaced with a stub that calls `todo!()` (or `unimplemented!()`) on invocation.
+
+You need to complete the implementations for all functions and pass the unit tests.
+Do not change the names of existing functions, types, traits, or methods, as they may be referenced from other code like unit tests, etc.
+When you generate code, you must maintain the original formatting of the original function stubs (such as whitespaces), otherwise we will not be able to search/replace blocks for code modifications, and therefore you will receive a score of 0 for your generated code.
+
+## Repository details
+
+- Upstream project: `{original_repo}`
+- Source directory to implement: `{src_dir}/`
+- Test command: `{test_cmd}` (run against `{test_dir}`)
+- Specification / docs: {specification_url}
+
+Implement only the library source under the source directory. Do not modify the test files.
+
+>>> Here is the Specification Information:
+
+{spec_text}
+"""
+
 INSTRUCTION_TEMPLATE_BY_LANG: dict[str, str] = {
     "python": INSTRUCTION_TEMPLATE,
     "go": INSTRUCTION_TEMPLATE_GO,
+    "rust": INSTRUCTION_TEMPLATE_RUST,
 }
 
 # tests/test.sh — Harbor verifier (verbatim constant across all tasks).
@@ -361,9 +397,49 @@ pathlib.Path('/logs/verifier/reward.json').write_text(
 PY
 """
 
+TEST_SH_RUST = r"""#!/bin/bash
+# Harbor verifier for a commit0 Rust task (runs inside the pre-built image).
+# Scope: the official commit0 test-id set (line-separated cargo test names of
+# the form `<module_path>::<test_name>`). Writes reward.json (fraction of
+# expected IDs that passed). Run command uses libtest's JSON formatter, which
+# is unstable and requires `-Z unstable-options` under nightly. To stay on
+# stable, we use `--format=pretty` and parse the standard `test <name> ... ok/FAILED`
+# lines (cargo test's stable on-by-default format).
+set -uo pipefail
+mkdir -p /logs/verifier
+cd /testbed
+
+cargo test --no-fail-fast -- --format=pretty \
+  > /logs/verifier/cargo_test.log 2>&1 || true
+
+python3 - <<'PY'
+import json, pathlib, re
+log_path = pathlib.Path('/logs/verifier/cargo_test.log')
+expected = {l.strip() for l in pathlib.Path('/tests/test_ids.txt').read_text().splitlines() if l.strip()}
+results: dict[str, str] = {}
+if log_path.exists():
+    line_re = re.compile(r'^test (\S+) \.\.\. (ok|FAILED|ignored)\b')
+    for line in log_path.read_text(errors='replace').splitlines():
+        m = line_re.match(line)
+        if not m:
+            continue
+        name, status = m.group(1), m.group(2)
+        if name in expected:
+            results[name] = status
+total = len(expected)
+passed = sum(1 for tid in expected if results.get(tid) == 'ok')
+reward = (passed / total) if total else 0.0
+resolved = 1 if (total and passed == total) else 0
+pathlib.Path('/logs/verifier/reward.json').write_text(
+    json.dumps({"reward": reward, "resolved": resolved,
+                "passed": passed, "total": total}))
+PY
+"""
+
 TEST_SH_BY_LANG: dict[str, str] = {
     "python": TEST_SH,
     "go": TEST_SH_GO,
+    "rust": TEST_SH_RUST,
 }
 
 # solution/solve.sh — oracle: conditional fetch + reset to reference commit.
@@ -576,7 +652,6 @@ def extract_spec_text(specs_dir: pathlib.Path, repo_name: str) -> str:
             return ""
 
         parts: list[str] = []
-        total = 0
         for page in doc:
             try:
                 chunk = page.get_text()
@@ -584,12 +659,148 @@ def extract_spec_text(specs_dir: pathlib.Path, repo_name: str) -> str:
                 print(f"  [WARN] {repo_name}: failed to extract a page ({exc}); skipping")
                 continue
             parts.append(chunk)
-            total += len(chunk)
-            if total >= MAX_SPEC_LENGTH:
-                break
-        return "".join(parts)[:MAX_SPEC_LENGTH]
+        return _clean_spec_text("".join(parts), MAX_SPEC_LENGTH)
     finally:
         doc.close()
+
+
+_NAV_CRUFT_RES = (
+    re.compile(r"^\s*Search\s*$"),
+    re.compile(r"^\s*Summary\s*$"),
+    re.compile(r"^\s*Read more\s*$"),
+    re.compile(r"^\s*List of all items\s*$"),
+    re.compile(r"^\s*Auto Trait Implementations\s*$"),
+    re.compile(r"^\s*Blanket Implementations\s*$"),
+    re.compile(r"^\s*Trait Implementations\s*$"),
+    re.compile(r"^\s*Implementations\s*$"),
+    re.compile(r"^\s*Structs\s*$"),
+    re.compile(r"^\s*Enums\s*$"),
+    re.compile(r"^\s*Traits\s*$"),
+    re.compile(r"^\s*Modules\s*$"),
+    re.compile(r"^\s*Functions\s*$"),
+    re.compile(r"^\s*Type Aliases\s*$"),
+    re.compile(r"^\s*Macros\s*$"),
+    re.compile(r"^\s*Crate \S+\s*$"),
+    re.compile(r"^\s*Struct \S+\s*$"),
+    re.compile(r"^\s*Enum \S+\s*$"),
+    re.compile(r"^\s*Trait \S+\s*$"),
+    re.compile(r"^\s*Module \S+\s*$"),
+    re.compile(r"^\s*\d+(?:\.\d+){1,3}(?:\s*\([^)]+\))?\s*·?\s*$"),
+    re.compile(r"^\s*502 Bad Gateway\b.*$"),
+    re.compile(r"^\s*error sending request:.*$"),
+    re.compile(r"^[\s,;]+$"),
+)
+
+_CODE_LINE_RES = (
+    re.compile(r"^\s*(?:impl|pub|fn|let|use|struct|enum|trait|mod|where|type|const|static|async)\b"),
+    re.compile(r".*[{};]\s*$"),
+    re.compile(r"^\s*//.*$"),
+    re.compile(r"^\s*///.*$"),
+    re.compile(r"^\s*#\[.*\]\s*$"),
+    re.compile(r"^\s*\}\s*$"),
+    re.compile(r"^\s*\)[^a-zA-Z]*$"),
+    re.compile(r"^\s*[A-Za-z_]\w*:\s*[A-Z].*[,;]\s*$"),
+    re.compile(r"^\s*[&*]?(?:mut\s+)?self\b.*$"),
+    re.compile(r"^\s*->\s.*$"),
+    re.compile(r".*<[A-Z][A-Za-z0-9_]*(?:,\s*[A-Z][A-Za-z0-9_]*)*>.*$"),
+)
+
+_SENTENCE_END_RE = re.compile(r"[.!?][)\]\"'`]?\s*$")
+
+
+def _is_nav_cruft(line: str) -> bool:
+    return any(p.match(line) for p in _NAV_CRUFT_RES)
+
+
+def _is_code_like(line: str) -> bool:
+    return any(p.match(line) for p in _CODE_LINE_RES)
+
+
+_API_BOUNDARY_RES = (
+    re.compile(r"^\s*(?:Modules|Structs|Enums|Traits|Functions|Macros|Constants|Type Aliases|Re-exports|Trait Implementations|Auto Trait Implementations|Blanket Implementations|Implementations)\s*$"),
+    re.compile(r"^\s*impl(?:<.*>)?\s"),
+    re.compile(r"^\s*pub (?:fn|const|static|struct|enum|trait|mod)\s"),
+)
+
+_SECTION_HEADER_RE = re.compile(r"^[A-Z][A-Za-z0-9 ,/.&'’\-]{1,80}$")
+
+
+def _is_api_boundary(line: str) -> bool:
+    return any(p.match(line) for p in _API_BOUNDARY_RES)
+
+
+def _clean_spec_text(raw: str, budget: int) -> str:
+    """Extract the crate-level prose summary from a rustdoc PDF.
+
+    Rustdoc-rendered PDFs in this dataset follow a consistent layout: a prose
+    summary at the top, then API listings (Modules/Structs/Enums/...). The
+    summary is what we want; everything past the first API boundary is noise.
+
+    Steps:
+      1. Drop nav/error cruft.
+      2. Walk lines until the first API-boundary marker; collect everything
+         before it as the candidate region.
+      3. Within that region, reflow PDF column-wraps into sentences and join
+         short headers with their following prose body.
+      4. Drop any line/paragraph that is code-like (signatures, code fragments)
+         or a pure symbol/identifier dump.
+      5. Concatenate with paragraph breaks, truncate at last sentence boundary
+         within `budget`.
+    """
+    lines: list[str] = []
+    for line in raw.splitlines():
+        s = line.rstrip()
+        if _is_nav_cruft(s):
+            continue
+        if _is_api_boundary(s):
+            break
+        lines.append(s)
+
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                paragraphs.append(" ".join(current))
+                current = []
+            continue
+        current.append(stripped)
+        if _SENTENCE_END_RE.search(stripped):
+            paragraphs.append(" ".join(current))
+            current = []
+    if current:
+        paragraphs.append(" ".join(current))
+
+    prose: list[str] = []
+    for para in paragraphs:
+        text = re.sub(r"\s+", " ", para).strip()
+        if not text:
+            continue
+        if _is_code_like(text):
+            continue
+        words = text.split()
+        if len(words) < 3:
+            continue
+        symbol_words = sum(1 for w in words if "::" in w)
+        if symbol_words > len(words) // 3:
+            continue
+        non_alpha = sum(1 for w in words if not any(c.isalpha() for c in w))
+        if non_alpha > len(words) // 2:
+            continue
+        if not _SENTENCE_END_RE.search(text):
+            if _SECTION_HEADER_RE.match(text) and len(words) <= 6:
+                prose.append(text)
+            continue
+        prose.append(text)
+
+    text = "\n\n".join(prose)
+    if len(text) <= budget:
+        return text
+
+    truncated = text[:budget]
+    cut = max(truncated.rfind(c) for c in ".!?")
+    return truncated[: cut + 1].rstrip() if cut > 0 else ""
 
 
 def load_test_ids(test_ids_dir: pathlib.Path, repo_name: str) -> list[str]:
@@ -687,6 +898,9 @@ def build_task_package(
     if language == "go":
         runtime_version = data["setup"]["go_version"]
         version_line    = f'go_version = "{escape_toml_string(str(runtime_version))}"'
+    elif language == "rust":
+        runtime_version = data["setup"]["rust_version"]
+        version_line    = f'rust_version = "{escape_toml_string(str(runtime_version))}"'
     else:
         runtime_version = data["setup"]["python"]
         version_line    = f'python_version = "{escape_toml_string(str(runtime_version))}"'
@@ -700,17 +914,23 @@ def build_task_package(
 
     repo_name    = fork_repo.split("/")[-1]
     fork_url     = f"https://github.com/{fork_repo}"
-    if language == "go":
+    if language == "rust":
+        owner, repo = original_repo.split("/", 1)
+        tag = f"rust_{owner.lower().replace('-', '_').replace('.', '_')}_{repo.lower().replace('-', '_').replace('.', '_')}"
+    elif language == "go":
         tag = repo_name.lower()
     else:
         tag = ecr_tag(instance_id)
-    docker_image = f"{ECR_BASE}:{tag}"
+    docker_image = f"{ECR_BASE_BY_LANG.get(language, ECR_BASE)}:{tag}"
 
     # Tags with underscores or uppercase may be normalized differently in the live ECR
     # repository (~19/300 commit0 tasks). Without ECR_TAG_OVERRIDES populated, the derived
     # tag may be wrong — emitting it would violate source-traceability. By default we raise
     # a hard error; pass --allow-unverified-ecr-tags to proceed with unverified tags.
-    if instance_id not in ECR_TAG_OVERRIDES and (
+    # Rust tags follow a deterministic `rust_<owner>_<repo>` schema (always contain
+    # underscores by design) and were verified against ecr_push_audit.jsonl at the time
+    # this branch was added, so the gate is bypassed for the rust language path.
+    if language != "rust" and instance_id not in ECR_TAG_OVERRIDES and (
         "_" in tag or any(c.isupper() for c in tag)
     ):
         if not allow_unverified_ecr:
@@ -744,7 +964,6 @@ def build_task_package(
         tmp.mkdir(parents=True)
         (tmp / "tests").mkdir()
         (tmp / "solution").mkdir()
-        (tmp / "environment").mkdir()
 
         # 4a. task.toml — all string substitutions go through escape_toml_string
         description = f"commit0 from-scratch implementation task for {original_repo}."
