@@ -219,19 +219,21 @@ def _apply_classification_to_provider(
     provider we just ``force_reload`` on a token-invalid signal so the next
     request re-fetches from Keychain (in case the ``claude`` CLI rotated it).
     """
-    prefix = _token_prefix(token_used)
+    # Pass the FULL token so the provider can attribute the error to the exact
+    # slot that produced it (it matches on slot.last_token); a 20-char prefix is
+    # ambiguous because all OAuth tokens share the `sk-ant-oat01-` prefix.
     if isinstance(provider, MultiAccountCredentialProvider):
         if classified.kind == ErrorKind.SUBSCRIPTION_CAP:
             reset_at = classified.reset_at_unix or (
                 time.time() + (classified.retry_after_seconds or 300)
             )
-            provider.mark_account_exhausted(prefix, reset_at)
+            provider.mark_account_exhausted(token_used, reset_at)
         elif classified.kind in (
             ErrorKind.OAUTH_TOKEN_INVALID,
             ErrorKind.ACCOUNT_RESTRICTED,
             ErrorKind.BILLING_ERROR,
         ):
-            provider.mark_account_invalid(prefix)
+            provider.mark_account_invalid(token_used)
     else:
         if classified.kind == ErrorKind.OAUTH_TOKEN_INVALID:
             provider.force_reload()
@@ -276,7 +278,10 @@ async def _forward_non_streaming(
 
     while True:
         try:
-            access_token = provider.get_access_token()
+            # get_access_token() may block: Keychain subprocess, sync httpx
+            # refresh with time.sleep backoff, and a blocking flock. Run it off
+            # the event loop so one refresh can't freeze every concurrent request.
+            access_token = await asyncio.to_thread(provider.get_access_token)
         except CredentialsError as e:
             return JSONResponse(
                 {
@@ -404,7 +409,10 @@ async def _stream_with_failover(
 
     while True:
         try:
-            access_token = provider.get_access_token()
+            # get_access_token() may block: Keychain subprocess, sync httpx
+            # refresh with time.sleep backoff, and a blocking flock. Run it off
+            # the event loop so one refresh can't freeze every concurrent request.
+            access_token = await asyncio.to_thread(provider.get_access_token)
         except CredentialsError as e:
             return JSONResponse(
                 {
@@ -455,9 +463,19 @@ async def _stream_with_failover(
                     await upstream_cm.__aexit__(None, None, None)
                     await client.aclose()
 
+            # Forward the upstream status and headers (request-id,
+            # anthropic-ratelimit-*) instead of hardcoding 200 / dropping them,
+            # so clients keep rate-limit visibility and debugging IDs.
+            passthrough_headers = {
+                k: v
+                for k, v in upstream.headers.items()
+                if k.lower() not in STRIP_HEADERS_OUT
+            }
             return StreamingResponse(
                 event_stream(),
-                media_type="text/event-stream",
+                status_code=upstream.status_code,
+                headers=passthrough_headers,
+                media_type=upstream.headers.get("content-type", "text/event-stream"),
             )
 
         # Non-2xx: drain body for classification and unwind the stream.

@@ -23,7 +23,7 @@ def _example(repo="Rust-commit0/taffy", base_commit="aaa111", ref_commit="bbb222
 
 def _spec():
     s = MagicMock()
-    s.eval_script = "#!/bin/bash\ncargo test {test_ids}"
+    s.eval_script = "#!/bin/bash\ncargo test __TEST_IDS__"
     return s
 
 
@@ -205,13 +205,15 @@ def test_match_first_entry_in_multiple(tmp_path):
         assert exc.value.code == 0
 
 
-def test_basename_contains_repo_name(tmp_path):
+def test_basename_must_exactly_match_repo_name(tmp_path):
+    # Repo selection now requires an EXACT basename match. A substring/endswith
+    # match (the old behaviour) mis-resolved e.g. `serde` vs `serde_json`, so a
+    # fork dir whose basename isn't exactly the repo name must NOT match.
     _prep_log_dir(tmp_path)
     with ExitStack() as s:
         _apply_patches(s, tmp_path)
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(ValueError, match="No matching Rust repo found"):
             _call_main(repo_or_repo_dir="my-taffy-fork")
-        assert exc.value.code == 0
 
 
 def test_log_dir_created(tmp_path):
@@ -924,13 +926,16 @@ def test_load_dataset_called_with_args(tmp_path):
         load_mock.assert_called_once_with("ds", split="test")
 
 
-def test_multiple_trailing_slash_only_one_stripped(tmp_path):
+def test_multiple_trailing_slashes_stripped(tmp_path):
+    # All trailing slashes are stripped (rstrip), so `taffy//` correctly
+    # resolves to repo `taffy` and matches rather than silently failing.
     _prep_log_dir(tmp_path)
     ex = _example(repo="Rust-commit0/taffy")
     with ExitStack() as s:
         _apply_patches(s, tmp_path, dataset=[ex])
-        with pytest.raises(ValueError, match="No matching Rust repo found"):
+        with pytest.raises(SystemExit) as exc:
             _call_main(repo_or_repo_dir="taffy//")
+        assert exc.value.code == 0
 
 
 def test_context_manager_entered(tmp_path):
@@ -995,7 +1000,7 @@ def test_spec_none_after_iteration(tmp_path):
 def test_eval_script_format_called(tmp_path):
     _prep_log_dir(tmp_path)
     spec_val = MagicMock()
-    spec_val.eval_script = "run {test_ids} please"
+    spec_val.eval_script = "run __TEST_IDS__ please"
     with ExitStack() as s:
         _apply_patches(s, tmp_path, spec_val=spec_val)
         with pytest.raises(SystemExit):
@@ -1003,7 +1008,7 @@ def test_eval_script_format_called(tmp_path):
         eval_file = tmp_path / "taffy" / "reference" / "hashval123" / "eval.sh"
         content = eval_file.read_text()
         assert "test_xyz" in content
-        assert "{test_ids}" not in content
+        assert "__TEST_IDS__" not in content
 
 
 def test_git_repo_loaded_log_message(tmp_path):

@@ -136,10 +136,23 @@ def get_rust_repo_configs_to_build(
                         )
                         image_exists = False
                 except (ValueError, TypeError):
-                    _logger.debug(
-                        "Could not parse timestamps for stale check on %s",
-                        spec.repo_image_key,
+                    # Fail SAFE: if we can't parse the timestamps we can't prove
+                    # the repo image is newer than the base, so rebuild rather
+                    # than silently serving a possibly-stale image.
+                    _logger.warning(
+                        "Unparseable timestamps for stale check on %s "
+                        "(base=%r repo=%r) — scheduling rebuild to be safe",
+                        spec.repo_image_key, base_ts, repo_ts,
                     )
+                    image_exists = False
+            else:
+                # Missing base or repo timestamp — same fail-safe rationale.
+                _logger.warning(
+                    "Missing timestamp for stale check on %s (base_ts=%r, repo_ts=%r) "
+                    "— scheduling rebuild to be safe",
+                    spec.repo_image_key, base_ts, repo_ts,
+                )
+                image_exists = False
 
         if not image_exists:
             image_scripts[spec.repo_image_key] = {

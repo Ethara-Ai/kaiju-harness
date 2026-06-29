@@ -829,20 +829,48 @@ def _extract_files_with_errors(cargo_output: str, repo_path: str) -> set[str]:
     spans where the file appears on a `--> path:line:col` line.
     """
     broken: set[str] = set()
-    repo_path_abs = os.path.abspath(repo_path)
+    # realpath (not just abspath) so symlinked repo dirs — e.g. macOS
+    # /var -> /private/var — canonicalize the same way cargo's cwd-relative
+    # diagnostics and git's paths do, otherwise the gate's set intersection
+    # misses real regressions.
+    repo_path_abs = os.path.realpath(repo_path)
     for line in cargo_output.splitlines():
         # short format: `src/foo.rs:LINE:COL: error...`
         m = re.match(r"^([^\s:]+?\.rs):\d+:\d+:\s*error", line)
         if m:
             rel = m.group(1)
-            broken.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+            broken.add(os.path.realpath(os.path.join(repo_path_abs, rel)))
             continue
         # long format span line
         m2 = re.match(r"^\s*-->\s+([^\s:]+?\.rs):\d+:\d+", line)
         if m2:
             rel = m2.group(1)
-            broken.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+            broken.add(os.path.realpath(os.path.join(repo_path_abs, rel)))
     return broken
+
+
+def _extract_file_error_counts(cargo_output: str, repo_path: str) -> dict[str, int]:
+    """Map each file to its number of error diagnostics.
+
+    Unlike :func:`_extract_files_with_errors` (presence only), this lets the
+    compile gate detect when a file that was ALREADY broken at baseline got
+    *worse* — comparing per-file error counts, not just the file set. Without
+    it, a pre-broken edited file gets a free pass no matter how badly the agent
+    breaks it further (it stays in both baseline and post sets).
+    """
+    counts: dict[str, int] = {}
+    # realpath (not just abspath) so symlinked repo dirs — e.g. macOS
+    # /var -> /private/var — canonicalize the same way cargo's cwd-relative
+    # diagnostics and git's paths do, otherwise the gate's set intersection
+    # misses real regressions.
+    repo_path_abs = os.path.realpath(repo_path)
+    for line in cargo_output.splitlines():
+        # short format: `src/foo.rs:LINE:COL: error...`
+        m = re.match(r"^([^\s:]+?\.rs):\d+:\d+:\s*error", line)
+        if m:
+            f = os.path.realpath(os.path.join(repo_path_abs, m.group(1)))
+            counts[f] = counts.get(f, 0) + 1
+    return counts
 
 
 def _format_errors_for_prompt(cargo_output: str, max_chars: int = 4000) -> str:
@@ -876,7 +904,11 @@ def _files_edited_since(repo_path: str, pre_sha: str) -> set[str]:
     """Return absolute paths of `.rs` files changed since ``pre_sha`` (uncommitted included)."""
     import subprocess
     files: set[str] = set()
-    repo_path_abs = os.path.abspath(repo_path)
+    # realpath (not just abspath) so symlinked repo dirs — e.g. macOS
+    # /var -> /private/var — canonicalize the same way cargo's cwd-relative
+    # diagnostics and git's paths do, otherwise the gate's set intersection
+    # misses real regressions.
+    repo_path_abs = os.path.realpath(repo_path)
     # Committed changes since pre_sha
     try:
         r = subprocess.run(
@@ -885,7 +917,7 @@ def _files_edited_since(repo_path: str, pre_sha: str) -> set[str]:
         )
         for rel in r.stdout.splitlines():
             if rel.endswith(".rs"):
-                files.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+                files.add(os.path.realpath(os.path.join(repo_path_abs, rel)))
     except (subprocess.SubprocessError, OSError):
         pass
     # Uncommitted working-tree changes (aider sometimes leaves these)
@@ -896,7 +928,7 @@ def _files_edited_since(repo_path: str, pre_sha: str) -> set[str]:
         )
         for rel in r.stdout.splitlines():
             if rel.endswith(".rs"):
-                files.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+                files.add(os.path.realpath(os.path.join(repo_path_abs, rel)))
     except (subprocess.SubprocessError, OSError):
         pass
     return files
@@ -934,10 +966,22 @@ def run_with_compile_gate(
     """
     # Baseline: errors that already exist BEFORE this module touches anything.
     baseline_rc, baseline_out = _run_cargo_check(repo_path, timeout=cargo_timeout)
+    # rc 124 (timeout) / -1 (failed to invoke) mean the check didn't actually
+    # run — retry once so we don't proceed with a phantom-empty baseline that
+    # would later mis-attribute inherited errors as regressions.
+    if baseline_rc in (124, -1):
+        logger.warning(
+            "CompileGate: baseline cargo check unavailable (rc=%d); retrying once",
+            baseline_rc,
+        )
+        baseline_rc, baseline_out = _run_cargo_check(repo_path, timeout=cargo_timeout)
+    baseline_unavailable = baseline_rc in (124, -1)
     baseline_broken = _extract_files_with_errors(baseline_out, repo_path)
+    baseline_counts = _extract_file_error_counts(baseline_out, repo_path)
     logger.info(
-        "CompileGate: baseline cargo check rc=%d, %d files with errors",
+        "CompileGate: baseline cargo check rc=%d, %d files with errors%s",
         baseline_rc, len(baseline_broken),
+        " (baseline UNAVAILABLE — verification degraded)" if baseline_unavailable else "",
     )
 
     # Step 1: initial aider call
@@ -954,10 +998,34 @@ def run_with_compile_gate(
                 "regressions": [],
             }
 
+        # rc 124/-1 means cargo check didn't actually run (timeout / launch
+        # failure). The error text contains no `file:line:col: error`, so naively
+        # we'd compute zero regressions and report "kept" as if verified clean.
+        # Surface it as "unverified" instead and keep the edits (reverting on a
+        # flaky timeout would destroy good work).
+        if rc in (124, -1):
+            logger.warning(
+                "CompileGate: post-edit cargo check unavailable (rc=%d); "
+                "keeping edits UNVERIFIED", rc,
+            )
+            return {
+                "status": "unverified",
+                "retries_used": attempt,
+                "baseline_broken_files": sorted(baseline_broken),
+                "final_broken_files": [],
+                "regressions": [],
+            }
+
         broken_now = _extract_files_with_errors(out, repo_path)
+        now_counts = _extract_file_error_counts(out, repo_path)
         edited = _files_edited_since(repo_path, pre_sha)
-        # "Regressions" = files newly broken (not in baseline) AND touched by us.
-        regressions = sorted((broken_now - baseline_broken) & edited)
+        # "Regressions" = files we edited that have MORE errors than at baseline.
+        # Counting (not set membership) catches files that were already broken
+        # and got worse — a per-file-presence check would give those a free pass.
+        regressions = sorted(
+            f for f in edited
+            if now_counts.get(f, 0) > baseline_counts.get(f, 0)
+        )
 
         if not regressions:
             # cargo unhappy, but not from anything we touched. Keep the edits.

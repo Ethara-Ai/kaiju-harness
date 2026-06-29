@@ -25,11 +25,13 @@ __all__ = [
     "TestStatus",
 ]
 
-# Rust toolchain version. Pinned for reproducibility across runs.
-# Override via the RUST_VERSION environment variable when needed (e.g. for a
-# bisect, MSRV check, or nightly-only feature). The default below should match
-# the version installed in the Rust base Dockerfile to avoid silent drift.
-RUST_VERSION = os.environ.get("RUST_VERSION", "1.84.0")
+# Rust toolchain version. Pinned for reproducibility across runs and used as
+# the SINGLE source of truth for the base image tag — get_dockerfile_base_rust()
+# substitutes this into `FROM rust:<RUST_VERSION>-bookworm`, so there is no
+# drift between the constant and the image. Must be a valid Docker tag component
+# for the official `rust` image (e.g. "1.96" or "1.96.0"). Override via the
+# RUST_VERSION env var for a bisect / MSRV check.
+RUST_VERSION = os.environ.get("RUST_VERSION", "1.96")
 
 # Marker used to identify stub functions in Rust source
 RUST_STUB_MARKER = 'panic!("STUB: not implemented")'

@@ -29,8 +29,11 @@ _EVENT_STATUS_MAP: Dict[str, TestStatus] = {
 #   test transport::pci::tests::offset_device_ids ... FAILED
 #   test some_ignored_test ... ignored
 # We tolerate `--report-time` durations: `... ok <0.05s>` or `... ok (0.05s)`.
+# `name` is non-greedy (`.+?`) so it also matches doctest lines whose name
+# contains spaces, e.g. `test src/lib.rs - foo (line 12) ... ok`. The mandatory
+# ` ... <outcome>` anchor keeps it from matching the `test result:` summary.
 _LIBTEST_LINE_RE = re.compile(
-    r"^test\s+(?P<name>\S+)\s+\.\.\.\s+(?P<outcome>ok|FAILED|ignored)"
+    r"^test\s+(?P<name>.+?)\s+\.\.\.\s+(?P<outcome>ok|FAILED|ignored)"
     r"(?:\s+[<\(]\s*(?P<duration>[0-9]+(?:\.[0-9]+)?)s\s*[>\)])?\s*$"
 )
 # Final summary line:
@@ -177,10 +180,13 @@ def parse_nextest_report(report_path: str) -> Dict:
         "summary": {"total": 0, "passed": 0, "failed": 0, "skipped": 0, "error": 0},
     }
     try:
-        with open(report_path, "r") as f:
+        # cargo/test output frequently contains non-UTF8 bytes (panic payloads,
+        # locale text, terminal escapes); replace rather than raise so one bad
+        # byte can't abort aggregation of every remaining repo.
+        with open(report_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
-    except FileNotFoundError:
-        logger.error("Report file not found: %s", report_path)
+    except OSError:
+        logger.error("Report file not readable: %s", report_path)
         return empty
 
     results = parse_test_output(content)

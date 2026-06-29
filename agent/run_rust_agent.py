@@ -266,18 +266,29 @@ _BLIND_LINT_SHELL = (
 # `brew install coreutils` provides `gtimeout`). Falls back to no timeout if
 # neither is available — the pipeline watchdog (inactivity=900s by default) is
 # the next safety net. KAIJU_TEST_TIMEOUT env var (seconds) overrides 240s.
+# Defines a portable `_run_to <secs> <cmd...>` that ALWAYS bounds the command:
+# timeout -> gtimeout -> perl alarm -> background-kill fallback. The previous
+# preamble fell back to running cargo test with NO timeout when neither
+# timeout/gtimeout existed (the macOS-without-coreutils default), so one hung
+# test could block aider's cmd_test() indefinitely with zero LLM activity.
+# (No single quotes — these strings are wrapped in bash -c '...'.)
 _TIMEOUT_PREAMBLE = (
-    'TO=""; '
-    'command -v timeout >/dev/null 2>&1 && TO="timeout"; '
-    '[ -z "$TO" ] && command -v gtimeout >/dev/null 2>&1 && TO="gtimeout"; '
+    '_run_to() { '
+    'local s="$1"; shift; '
+    'if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?; fi; '
+    'if command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi; '
+    'if command -v perl >/dev/null 2>&1; then perl -e "alarm shift; exec @ARGV" "$s" "$@"; return $?; fi; '
+    '"$@" & local p=$!; '
+    '( sleep "$s"; kill -TERM "$p" 2>/dev/null; sleep 3; kill -KILL "$p" 2>/dev/null ) >/dev/null 2>&1 & '
+    'local k=$!; wait "$p" 2>/dev/null; local r=$?; kill "$k" 2>/dev/null; return $r; '
+    '}; '
     'TS="${KAIJU_TEST_TIMEOUT:-240}"; '
 )
 
 
 _BLIND_TEST_SHELL = (
     _TIMEOUT_PREAMBLE +
-    'if [ -n "$TO" ]; then _out=$($TO "$TS" cargo test --all-features 2>&1); '
-    'else _out=$(cargo test --all-features 2>&1); fi; '
+    '_out=$(_run_to "$TS" cargo test --all-features 2>&1); '
     '_rc=$?; '
     '_summary=$(printf "%s" "$_out" | grep -E "^test result:" | tail -1); '
     'if [ -n "$_summary" ]; then printf "%s\\n" "$_summary"; '
@@ -299,8 +310,7 @@ def _make_blind_test_cmd() -> str:
 
 _NAMES_ONLY_TEST_SHELL = (
     _TIMEOUT_PREAMBLE +
-    'if [ -n "$TO" ]; then _out=$($TO "$TS" cargo test --all-features 2>&1); '
-    'else _out=$(cargo test --all-features 2>&1); fi; '
+    '_out=$(_run_to "$TS" cargo test --all-features 2>&1); '
     '_rc=$?; '
     'if [ $_rc -eq 0 ]; then printf "tests pass\\n"; '
     'else '
@@ -327,8 +337,7 @@ def _make_names_only_test_cmd() -> str:
 # the agent then makes zero LLM calls until the outer watchdog kills it.
 _DEFAULT_TEST_SHELL = (
     _TIMEOUT_PREAMBLE +
-    'if [ -n "$TO" ]; then _out=$($TO "$TS" cargo test --all-features 2>&1); '
-    'else _out=$(cargo test --all-features 2>&1); fi; '
+    '_out=$(_run_to "$TS" cargo test --all-features 2>&1); '
     '_rc=$?; '
     'printf "%s" "$_out"; '
     'exit $_rc'
@@ -410,10 +419,14 @@ def run_rust_agent_for_repo(
         ThinkingCapture() if getattr(agent_config, "capture_thinking", False) else None
     )
 
-    if local_repo.is_dirty():
-        logger.warning("Auto-committing uncommitted changes in %s", repo_path)
-        local_repo.git.add(A=True)
-        local_repo.index.commit("left from last change")
+    if local_repo.is_dirty(untracked_files=True):
+        # Discard stale leftovers so create_branch's checkout succeeds. The old
+        # code committed them with `git add -A` onto whatever branch happened to
+        # be checked out, polluting an unexpected ref. In an automated agent run
+        # the tree should start clean from base, so reset+clean is correct.
+        logger.warning("Discarding uncommitted changes in %s before branching", repo_path)
+        local_repo.git.reset("--hard")
+        local_repo.git.clean("-fd")
 
     create_branch(local_repo, branch, example["base_commit"])
 
@@ -538,7 +551,11 @@ def run_rust_agent_for_repo(
                         "",
                         test_cmd,
                         lint_cmd,
-                        all_source_files,
+                        # Scope aider's editable fnames to THIS module (matches the
+                        # per-file prompt and the draft/lint stages). Passing
+                        # all_source_files loaded every file into the chat and blew
+                        # the context window on large crates (e.g. tokio).
+                        [src_file],
                         test_log_dir,
                         test_first=True,
                         thinking_capture=thinking_capture,
@@ -562,7 +579,7 @@ def run_rust_agent_for_repo(
                                 f"cargo check failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
                                 test_cmd,
                                 lint_cmd,
-                                all_source_files,
+                                [src_file],
                                 test_log_dir,
                                 test_first=False,
                                 thinking_capture=thinking_capture,
@@ -986,6 +1003,17 @@ def run_rust_agent(
                 )
                 results.append(result)
 
+            _n_failed = 0
             for result in results:
-                result.get()
-            logger.info("All %d Rust agent workers completed", len(results))
+                # Collect every worker. The old `result.get()` re-raised the
+                # FIRST failing worker and abandoned the rest, losing their
+                # outcomes; isolate failures so one bad repo can't sink the batch.
+                try:
+                    result.get()
+                except Exception as _werr:  # noqa: BLE001
+                    _n_failed += 1
+                    logger.error("Rust agent worker failed: %s", _werr, exc_info=True)
+            logger.info(
+                "All %d Rust agent workers completed (%d failed)",
+                len(results), _n_failed,
+            )

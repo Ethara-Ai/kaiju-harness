@@ -121,7 +121,11 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     if _RATE_LIMIT_EXC_CLASSES and isinstance(exc, _RATE_LIMIT_EXC_CLASSES):
         return True
     for cls in type(exc).__mro__:
-        if cls.__name__ in ("RateLimitError", "APIError") and "litellm" in cls.__module__:
+        # Only the concrete RateLimitError — NOT litellm's base `APIError`, which
+        # is the parent of auth/bad-request/etc. Treating APIError as rate-limit
+        # would pause-and-resume (up to KAIJU_CC_MAX_PAUSE_SEC, default 6h) on
+        # errors a retry can never fix.
+        if cls.__name__ == "RateLimitError" and "litellm" in cls.__module__:
             return True
         if cls.__name__ == "RateLimitError" and cls.__module__.startswith("openai"):
             return True
@@ -290,7 +294,9 @@ def run_with_recovery(
     while True:
         try:
             return fn(*args, **kwargs)
-        except BaseException as exc:
+        except Exception as exc:
+            # Catch Exception (NOT BaseException) so KeyboardInterrupt/SystemExit
+            # propagate immediately instead of being swallowed/retried.
             # Branch 1: transient network error (timeout / connection drop / mid-stream)
             if _is_transient_network_error(exc):
                 if transient_attempt >= len(transient_backoff):

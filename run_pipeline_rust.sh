@@ -190,6 +190,23 @@ if ! [[ "$NUM_SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
+# Validate the remaining numeric args up front so a non-numeric value fails with
+# a clear message instead of a confusing `[[: integer expression expected` or a
+# jq parse error deep inside a stage.
+for _nv in \
+    "--max-iteration:$MAX_ITERATION" \
+    "--stage-timeout:$STAGE_TIMEOUT" \
+    "--eval-timeout:$EVAL_TIMEOUT" \
+    "--inactivity-timeout:$INACTIVITY_TIMEOUT" \
+    "--max-wall-time:$MAX_WALL_TIME" \
+    "--compile-gate-max-retries:$COMPILE_GATE_MAX_RETRIES"; do
+    _flag="${_nv%%:*}"; _val="${_nv#*:}"
+    if ! [[ "$_val" =~ ^[0-9]+$ ]]; then
+        echo "Error: ${_flag} must be a non-negative integer (got: '${_val}')"
+        exit 1
+    fi
+done
+
 if [[ "$NUM_SAMPLES" -gt 1 ]] && [[ -n "$SKIP_TO_STAGE" ]]; then
     echo "Error: --skip-to-stage and --num-samples > 1 cannot be used together."
     echo "  Each sample writes its own results file, so --skip-to-stage"
@@ -204,6 +221,11 @@ fi
 source "${BASE_DIR}/commit0/harness/resolve_model.sh"
 
 resolve_model "$MODEL_ARG"
+
+# resolve_model is expected to export CACHE_PROMPTS; guard with a default so a
+# future change there can't abort the run with an unbound-variable error under
+# `set -u` far from the cause.
+: "${CACHE_PROMPTS:=true}"
 
 # ============================================================
 # Claude Code OAuth bridge (optional --use-claude-code)
@@ -819,8 +841,30 @@ EOF
 # ============================================================
 
 AGENT_PID=""
+QW_PID=""
 AGENT_ELAPSED=0
 AGENT_RC=0
+
+# Signal a whole process group, falling back to the single PID. The agent is
+# launched under `set -m` (monitor mode) so it leads its own process group;
+# signalling the group (negative PID) reaps the cargo/docker/aider children it
+# forked, instead of orphaning them to keep burning CPU/API budget after a kill.
+_kill_tree() {
+    local pid="$1" sig="${2:-TERM}"
+    [[ -z "$pid" ]] && return 0
+    kill "-${sig}" "-${pid}" 2>/dev/null \
+        || kill "-${sig}" "${pid}" 2>/dev/null \
+        || true
+}
+
+# Evaluate a bc expression and emit a JSON-safe number. bc drops the leading
+# zero on values < 1 (".3000", "-.08"), which jq <= 1.6 rejects via --argjson.
+# Re-add it so the result is always valid JSON. Propagates bc's exit status.
+bc_json() {
+    local _out
+    _out=$(echo "$1" | bc) || return 1
+    printf '%s\n' "$_out" | sed -E 's/^(-?)\./\10./'
+}
 
 # Return code contract for watchdog_run:
 #   0       = agent exited successfully
@@ -840,11 +884,16 @@ watchdog_run() {
     local hard_timeout_warned="false"
     local mtime_functional="true"
 
-    # Validate get_mtime works before relying on it
+    # Validate get_mtime works before relying on it. Probe a path that exists on
+    # BOTH Linux and macOS — the agent's log_dir (created before launch) — not
+    # /proc/self/status, which is absent on macOS and made the inactivity
+    # watchdog falsely self-disable there even though `stat -f` works fine.
+    local _probe_target="$log_dir"
+    [[ -e "$_probe_target" ]] || _probe_target="${BASH_SOURCE[0]}"
     local _probe_mtime
-    _probe_mtime=$(get_mtime "/proc/self/status")
+    _probe_mtime=$(get_mtime "$_probe_target")
     if [[ "$_probe_mtime" -eq 0 ]] 2>/dev/null; then
-        log "  WATCHDOG: WARNING — get_mtime returned 0 for /proc/self/status. File-activity detection may be non-functional."
+        log "  WATCHDOG: WARNING — get_mtime returned 0 for ${_probe_target}. File-activity detection may be non-functional."
         mtime_functional="false"
         log "  WATCHDOG: Inactivity-timeout disabled; relying only on absolute wall-time cap."
     fi
@@ -911,9 +960,9 @@ watchdog_run() {
             local wall_elapsed=$(( now_epoch - start_time ))
             if [[ $wall_elapsed -ge $absolute_max ]]; then
                 log "  WATCHDOG: Absolute wall-time cap ${absolute_max}s reached. Force-killing agent."
-                kill "$agent_pid" 2>/dev/null || true
+                _kill_tree "$agent_pid" TERM
                 sleep 2
-                kill -9 "$agent_pid" 2>/dev/null || true
+                _kill_tree "$agent_pid" KILL
                 wait "$agent_pid" 2>/dev/null || true
                 return 124
             fi
@@ -930,9 +979,9 @@ watchdog_run() {
                     fi
                 else
                     log "  WATCHDOG: Hard timeout ${hard_timeout}s reached and agent inactive (${idle}s). Killing agent."
-                    kill "$agent_pid" 2>/dev/null || true
+                    _kill_tree "$agent_pid" TERM
                     sleep 2
-                    kill -9 "$agent_pid" 2>/dev/null || true
+                    _kill_tree "$agent_pid" KILL
                     wait "$agent_pid" 2>/dev/null || true
                     return 124
                 fi
@@ -946,9 +995,9 @@ watchdog_run() {
                 log "  WATCHDOG: Last aider log: $(basename "$(dirname "$latest_log")")"
             fi
             log "  WATCHDOG: Killing agent (PID ${agent_pid})."
-            kill "$agent_pid" 2>/dev/null || true
+            _kill_tree "$agent_pid" TERM
             sleep 2
-            kill -9 "$agent_pid" 2>/dev/null || true
+            _kill_tree "$agent_pid" KILL
             wait "$agent_pid" 2>/dev/null || true
             return 124
         fi
@@ -989,8 +1038,13 @@ run_agent() {
     start_time=$(date +%s)
 
     set +e
+    # Launch under monitor mode so the agent leads its own process group; this
+    # lets the watchdog/cleanup signal the whole group and reap forked
+    # cargo/docker/aider children instead of orphaning them.
+    set -m
     "${cmd[@]}" >>"$agent_log" 2>&1 &
     local agent_pid=$!
+    set +m
     AGENT_PID=$agent_pid
 
     # ---- Fix #4: Quality-aware watchdog (opt-in) ----
@@ -1015,6 +1069,7 @@ for e in d: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null | head 
                 --min-delta "$QUALITY_WATCHDOG_MIN_DELTA" \
                 --log "$qw_log" >/dev/null 2>&1 &
             _qw_pid=$!
+            QW_PID=$_qw_pid  # expose to cleanup() so a SIGTERM to the script reaps it too
             log "  QUALITY-WATCHDOG: started (pid=${_qw_pid}, interval=${QUALITY_WATCHDOG_INTERVAL}s, rising=${QUALITY_WATCHDOG_RISING}, delta=${QUALITY_WATCHDOG_MIN_DELTA})"
         else
             log "  QUALITY-WATCHDOG: skipped — repo dir not found ($qw_repo_dir)"
@@ -1030,6 +1085,7 @@ for e in d: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null | head 
         kill "$_qw_pid" 2>/dev/null || true
         wait "$_qw_pid" 2>/dev/null || true
     fi
+    QW_PID=""
     set -e
 
     local end_time
@@ -1175,7 +1231,7 @@ parse_eval_output() {
                     total_passed=$((total_passed + passed))
                     total_tests=$((total_tests + total))
                     if [[ "$runtime" =~ ^[0-9]*\.?[0-9]+$ ]]; then
-                        total_runtime=$(echo "scale=4; $total_runtime + $runtime" | bc)
+                        total_runtime=$(bc_json "scale=4; $total_runtime + $runtime")
                     fi
                     found_any="true"
                 fi
@@ -1188,7 +1244,7 @@ parse_eval_output() {
         EVAL_NUM_TESTS="$total_tests"
         EVAL_RUNTIME="$total_runtime"
         if [[ "$total_tests" -gt 0 ]]; then
-            EVAL_PASS_RATE=$(echo "scale=6; $total_passed / $total_tests" | bc)
+            EVAL_PASS_RATE=$(bc_json "scale=6; $total_passed / $total_tests")
         fi
     fi
 
@@ -1346,8 +1402,11 @@ check_tree_compiles() {
     fi
     # Count compile errors. `cargo check --message-format=short` emits one
     # `path:line:col: error[...]` per problem.
+    # `grep -c` already prints `0` and exits 1 on no match, so `|| echo 0` would
+    # append a SECOND line, yielding the two-line value "0\n0" that later breaks
+    # `jq --argjson nerr`. Assign-on-failure keeps it a single integer.
     local n_errors
-    n_errors=$(grep -cE '^[^[:space:]]+:[0-9]+:[0-9]+: error' "$out_file" 2>/dev/null || echo 0)
+    n_errors=$(grep -cE '^[^[:space:]]+:[0-9]+:[0-9]+: error' "$out_file" 2>/dev/null) || n_errors=0
     echo "$n_errors" > "${LOG_BASE}/.stage_gate_errors"
     log "  GATE: tree FAILS to compile ($n_errors error(s), rc=$rc); see $out_file"
     return 1
@@ -1426,7 +1485,7 @@ stage_2_lint_refine() {
     local s2_incremental
     s2_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
     local total_cost
-    total_cost=$(echo "scale=4; $s1_cost + $s2_incremental" | bc) || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
+    total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental") || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
     log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost})"
 
@@ -1487,7 +1546,7 @@ stage_3_test_refine() {
     local s3_incremental
     s3_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
     local total_cost
-    total_cost=$(echo "scale=4; $s2_cumulative + $s3_incremental" | bc) || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
+    total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental") || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
     log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost})"
 
@@ -1645,9 +1704,14 @@ for item in data:
 
 cleanup() {
     if [[ -n "$AGENT_PID" ]] && kill -0 "$AGENT_PID" 2>/dev/null; then
-        kill -- -"$AGENT_PID" 2>/dev/null || true
+        _kill_tree "$AGENT_PID" TERM
         sleep 2
-        kill -9 -- -"$AGENT_PID" 2>/dev/null || true
+        _kill_tree "$AGENT_PID" KILL
+    fi
+    # Reap the quality-watchdog sidecar too — a SIGTERM to the script bypasses
+    # the local stop in run_agent(), so without this it would be orphaned.
+    if [[ -n "$QW_PID" ]] && kill -0 "$QW_PID" 2>/dev/null; then
+        kill "$QW_PID" 2>/dev/null || true
     fi
 
     restore_aux_docs_in_repos

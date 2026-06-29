@@ -24,15 +24,52 @@ def _find_cargo_toml(repo_dir: str) -> Optional[str]:
     return None
 
 
+def _bust_clippy_cache(cargo_dir: str, cargo_bin: str) -> None:
+    """Force clippy to re-lint local crates by cleaning just the workspace
+    packages (deps stay cached).
+
+    clippy shares the `cargo check` cache: on a warm cache nothing recompiles
+    and clippy emits ZERO diagnostics, so real warnings silently vanish and the
+    lint stage falsely passes. Cleaning only the local packages (via
+    `cargo metadata --no-deps`) keeps dependency build artefacts so this is
+    cheap, while guaranteeing the local code is actually re-linted.
+    """
+    try:
+        meta = subprocess.run(
+            [cargo_bin, "metadata", "--no-deps", "--format-version", "1"],
+            capture_output=True, text=True, cwd=cargo_dir, timeout=60,
+        )
+        if meta.returncode != 0:
+            logger.warning("clippy cache-bust: cargo metadata failed; lint may be stale")
+            return
+        names = [p.get("name") for p in json.loads(meta.stdout).get("packages", [])]
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        logger.warning("clippy cache-bust: metadata error (%s); lint may be stale", exc)
+        return
+    for name in filter(None, names):
+        try:
+            subprocess.run(
+                [cargo_bin, "clean", "-p", name],
+                capture_output=True, text=True, cwd=cargo_dir, timeout=60,
+            )
+        except (subprocess.SubprocessError, OSError):
+            logger.debug("clippy cache-bust: clean -p %s failed", name)
+
+
 def _run_cargo_clippy(cargo_dir: str) -> Dict[str, Any]:
     """Run cargo clippy and parse JSON diagnostics.
 
-    Returns dict with keys: warnings, errors, messages (list of parsed diagnostics).
+    Returns dict with keys: warnings, errors, messages, returncode, raw_stderr.
+    `returncode` is ALWAYS present so callers can distinguish "0 warnings" from
+    "clippy never ran" (timeout / missing binary / launch failure).
     """
     clippy_bin = shutil.which("cargo")
     if not clippy_bin:
         logger.error("cargo not found in PATH")
-        return {"warnings": 0, "errors": 0, "messages": [], "raw_stderr": "cargo not found"}
+        return {"warnings": 0, "errors": 0, "messages": [], "returncode": -1,
+                "raw_stderr": "cargo not found"}
+
+    _bust_clippy_cache(cargo_dir, clippy_bin)
 
     cmd = [
         clippy_bin,
@@ -55,10 +92,12 @@ def _run_cargo_clippy(cargo_dir: str) -> Dict[str, Any]:
         )
     except subprocess.TimeoutExpired:
         logger.error("cargo clippy timed out after 300s")
-        return {"warnings": 0, "errors": 0, "messages": [], "raw_stderr": "timeout"}
+        return {"warnings": 0, "errors": 0, "messages": [], "returncode": 124,
+                "raw_stderr": "timeout"}
     except FileNotFoundError as exc:
         logger.error("cargo binary not found: %s", exc)
-        return {"warnings": 0, "errors": 0, "messages": [], "raw_stderr": str(exc)}
+        return {"warnings": 0, "errors": 0, "messages": [], "returncode": -1,
+                "raw_stderr": str(exc)}
 
     warnings = 0
     errors = 0
@@ -151,10 +190,17 @@ def _run_cargo_fmt(cargo_dir: str) -> Dict[str, Any]:
     }
 
 
+_SKIP_WALK_DIRS = {"target", ".git", "node_modules", "vendor"}
+
+
 def _collect_rs_files(repo_dir: str) -> List[str]:
-    """Walk the directory and collect all .rs files."""
+    """Walk the directory and collect all .rs files, skipping build artefacts
+    and vendored deps (target/, .git/, ...) which would otherwise list thousands
+    of irrelevant generated files."""
     rs_files: List[str] = []
-    for root, _dirs, files in os.walk(repo_dir):
+    for root, dirs, files in os.walk(repo_dir):
+        # Prune in-place so os.walk doesn't descend into them.
+        dirs[:] = [d for d in dirs if d not in _SKIP_WALK_DIRS]
         for f in files:
             if f.endswith(".rs"):
                 rs_files.append(os.path.join(root, f))
@@ -223,11 +269,21 @@ def main(
     else:
         logger.warning("Formatting: needs changes")
 
+    # Require clippy to have actually completed cleanly (returncode 0). Without
+    # this, a timeout / missing-binary / manifest-parse failure (which emits no
+    # `compiler-message` JSON) yields warnings==errors==0 and would falsely PASS.
+    clippy_rc = clippy_result.get("returncode")
     passed = (
-        clippy_result["warnings"] == 0
+        clippy_rc == 0
+        and clippy_result["warnings"] == 0
         and clippy_result["errors"] == 0
         and fmt_result["formatted"]
     )
+    if clippy_rc != 0 and clippy_result["warnings"] == 0 and clippy_result["errors"] == 0:
+        logger.warning(
+            "Clippy exited rc=%s with no parsed diagnostics — treating as FAILED "
+            "(build/manifest/timeout failure, not a clean pass)", clippy_rc,
+        )
 
     result = {
         "clippy": clippy_result,

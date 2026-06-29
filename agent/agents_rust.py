@@ -24,7 +24,7 @@ from agent.guarded_io import GuardedInputOutput
 
 from agent.agents import AiderAgents, AiderReturn, AgentReturn, handle_logging, _apply_thinking_capture_patches
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
-from agent.agent_utils import summarize_test_output
+from agent.agent_utils_rust import summarize_rust_test_output
 
 _logger = logging.getLogger(__name__)
 
@@ -71,15 +71,23 @@ class RustAiderAgents(AiderAgents):
 
         log_file = log_dir / "aider.log"
 
-        # Redirect print statements to the log file
+        # Redirect print statements to the log file. Open BOTH handles before
+        # swapping: if the second open fails, swapping the first would leak its
+        # handle and leave stdout permanently redirected (the restoring finally
+        # below hasn't been entered yet).
         _saved_stdout = sys.stdout
         _saved_stderr = sys.stderr
+        _new_out = None
         try:
-            sys.stdout = open(log_file, "a")
-            sys.stderr = open(log_file, "a")
+            _new_out = open(log_file, "a")
+            _new_err = open(log_file, "a")
         except OSError as e:
+            if _new_out is not None:
+                _new_out.close()
             _logger.error("Failed to redirect stdout/stderr to %s: %s", log_file, e)
             raise
+        sys.stdout = _new_out
+        sys.stderr = _new_err
 
         try:
             # Configure httpx and backoff logging
@@ -131,7 +139,7 @@ class RustAiderAgents(AiderAgents):
                     "\n\nTest files are UNAVAILABLE. NEVER ask to see them. NEVER request paths under tests/. "
                     "If aider prompts you to add a test file, the request will be REFUSED \u2014 do not retry."
                     "\n\nYour job is SPEC-DRIVEN implementation:"
-                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`panic!(\"STUB: not implemented\")`).",
+                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`panic!(\"STUB: not implemented\")`)."
                     "\n  2. Infer expected behavior from function signatures, doc comments, trait bounds, and the library specification."
                     "\n  3. Implement from first principles \u2014 do NOT reverse-engineer from test outputs."
                     "\n  4. Test feedback is intentionally minimal (counts only). Use it as a yes/no signal, not as a debugging aid."
@@ -150,7 +158,12 @@ class RustAiderAgents(AiderAgents):
                 def _wrapped_cmd_test(test_cmd_arg: str) -> str:
                     raw = _original_cmd_test(test_cmd_arg)
                     if raw and len(raw) > _max_len:
-                        result, costs = summarize_test_output(
+                        # Rust-specific summarizer: its Tier-1 deterministic
+                        # parser understands cargo/libtest output (`running N
+                        # tests`, `test result:`, `error[E####]`). The generic
+                        # summarize_test_output is pytest-shaped and would fall
+                        # through to a costed LLM call on cargo output.
+                        result, costs = summarize_rust_test_output(
                             raw,
                             max_length=_max_len,
                             model=_model,

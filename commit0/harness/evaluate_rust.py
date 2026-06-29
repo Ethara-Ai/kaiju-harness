@@ -53,6 +53,13 @@ OUTCOME_PARSER_NO_MATCH = "PARSER_NO_MATCH"        # content present but doesn't
 
 # Sniffing patterns for outcome classification.
 _COMPILE_ERR_RE = re.compile(r"^error(?:\[E\d+\])?:", re.MULTILINE)
+# cargo emits these AFTER the test phase completes; they are NOT rustc compile
+# diagnostics and must not be misattributed as COMPILE_FAILED. `error: could
+# not compile` is intentionally NOT excluded — that one IS a build failure.
+_RUNTIME_ERR_RE = re.compile(
+    r"^error:\s*(?:test failed|bench failed|build failed|\d+\s+tests?\s+failed)",
+    re.MULTILINE,
+)
 _RUNNING_ZERO_RE = re.compile(r"^running\s+0\s+tests\s*$", re.MULTILINE)
 _PATCH_FAIL_SENTINEL = "PATCH APPLY FAILED"
 
@@ -61,7 +68,7 @@ def _read_exit_code(log_dir: str) -> int | None:
     """Return cargo exit code if `cargo_test_exit_code.txt` is readable, else None."""
     p = os.path.join(log_dir, "cargo_test_exit_code.txt")
     try:
-        with open(p, "r") as f:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
             raw = f.read().strip()
         return int(raw) if raw else None
     except (OSError, ValueError):
@@ -69,8 +76,12 @@ def _read_exit_code(log_dir: str) -> int | None:
 
 
 def _count_compile_errors(content: str) -> int:
-    """Count rustc `error[E....]:` lines (compile-error count)."""
-    return len(_COMPILE_ERR_RE.findall(content))
+    """Count rustc compile-error lines, excluding cargo's post-test runtime
+    `error:` summary lines (e.g. `error: test failed`) which would otherwise be
+    misattributed as a build failure."""
+    total = len(_COMPILE_ERR_RE.findall(content))
+    runtime = len(_RUNTIME_ERR_RE.findall(content))
+    return max(0, total - runtime)
 
 def _load_rust_test_ids(repo_name: str) -> list[str] | None:
     """Load the authoritative test inventory for *repo_name* from .bz2.
@@ -171,6 +182,12 @@ def _aggregate_rust_results(
         num_passed = summary.get("passed", 0)
         observed_total = summary.get("total", 0)
         num_tests = canonical_total if canonical_total is not None else observed_total
+        # Guard against a stale/short canonical inventory: the total can never be
+        # below what we actually observed, and passes can never exceed the total.
+        # Without this, a smaller bz2 than the live run yields passed_rate > 1.0
+        # and a negative "failed_or_missing" in status_detail.
+        num_tests = max(num_tests, observed_total)
+        num_passed = min(num_passed, num_tests)
         num_failed = summary.get("failed", 0)
         total_runtime = sum(t.get("duration", 0) for t in tests)
         passed_rate = num_passed / num_tests if num_tests > 0 else 0.0
@@ -209,7 +226,7 @@ def _aggregate_rust_results(
         return
 
     try:
-        with open(test_output_file, "r") as f:
+        with open(test_output_file, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except OSError as exc:
         logger.warning("%s: failed to read %s: %s", name, test_output_file, exc)
@@ -334,7 +351,10 @@ def main(
             / repo_branch
             / hashed_test_ids
         )
-        log_dirs.append(str(log_dir))
+        # Carry repo_name explicitly. Reconstructing it from the path via
+        # basename(dirname(dirname(...))) breaks for branches containing '/'
+        # (e.g. 'fix/bug' adds a path component and yields 'fix').
+        log_dirs.append((str(log_dir), repo_name))
         triples.append(
             (example["repo"], "", repo_branch)
         )
@@ -391,10 +411,7 @@ def main(
                     )
 
     out = []
-    for log_path in tqdm(log_dirs):
-        log_name = os.path.basename(os.path.dirname(os.path.dirname(log_path)))
-        if not log_name:
-            log_name = log_path.split("/")[2] if len(log_path.split("/")) > 2 else "unknown"
+    for log_path, log_name in tqdm(log_dirs):
         expected_tests = _load_rust_test_ids(log_name)
         _aggregate_rust_results(log_path, log_name, out, expected_tests=expected_tests)
 

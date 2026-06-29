@@ -241,7 +241,9 @@ class TestRustSpecMakeEvalScriptList:
     def test_test_ids_placeholder(self):
         spec = _make_spec()
         scripts = spec.make_eval_script_list()
-        assert any("{test_ids}" in s for s in scripts)
+        # The runner substitutes this sentinel via a plain str.replace (not
+        # str.format), so literal braces in test_cmd can't crash the build.
+        assert any("__TEST_IDS__" in s for s in scripts)
 
     def test_captures_exit_code(self):
         spec = _make_spec()
@@ -406,7 +408,7 @@ class TestRustSpecEvalScriptEdge:
     def test_eval_script_contains_test_ids_placeholder(self):
         spec = _make_spec()
         scripts = spec.make_eval_script_list()
-        assert any("{test_ids}" in s for s in scripts)
+        assert any("__TEST_IDS__" in s for s in scripts)
 
     def test_eval_script_starts_with_cd(self):
         spec = _make_spec()

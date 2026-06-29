@@ -1,4 +1,18 @@
-FROM rust:1.96-bookworm
+# NOTE: __RUST_VERSION__ / __CARGO_NEXTEST_VERSION__ are substituted by
+# get_dockerfile_base_rust() from constants_rust.py so the toolchain versions
+# have a SINGLE source of truth (no silent drift between the constant and the
+# image).
+#
+# SECURITY/REPRODUCIBILITY (tracked, not yet applied — requires a Docker build
+# env to verify):
+#   * Pin the base by digest for byte-reproducible builds. To obtain it:
+#       docker pull rust:__RUST_VERSION__-bookworm
+#       docker inspect --format='{{index .RepoDigests 0}}' rust:__RUST_VERSION__-bookworm
+#     then set RUST_BASE_DIGEST in constants_rust.py and append `@${digest}`.
+#   * This image compiles+runs arbitrary repo code (build.rs/proc-macros) as
+#     root. A non-root USER is desirable but the harness setup currently assumes
+#     root (chmod 777, /root paths); switching needs an end-to-end build test.
+FROM rust:__RUST_VERSION__-bookworm
 
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
@@ -10,12 +24,13 @@ ARG no_proxy="localhost,127.0.0.1,::1"
 ARG NO_PROXY="localhost,127.0.0.1,::1"
 ARG CA_CERT_PATH="/etc/ssl/certs/ca-certificates.crt"
 
+# Proxy values are intentionally NOT promoted to ENV: proxy URLs often embed
+# credentials (http://user:pass@host) and ENV persists them into every image
+# layer (visible via `docker history`/`docker inspect`). Docker passes the
+# predefined proxy ARGs to RUN steps during build automatically, so apt/curl
+# still use them without baking them into the shipped image.
 ENV TZ=Etc/UTC \
     LANG=C.UTF-8 \
-    http_proxy=${http_proxy} \
-    https_proxy=${https_proxy} \
-    HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY} \
     SSL_CERT_FILE=${CA_CERT_PATH} \
     REQUESTS_CA_BUNDLE=${CA_CERT_PATH} \
     CURL_CA_BUNDLE=${CA_CERT_PATH} \
@@ -48,13 +63,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   - cargo-nextest:    used by the Rust test runner (JSON output parsing)
 # Install nextest from its prebuilt per-arch binary instead of `cargo install`
 # (source compile), which fails under QEMU emulation during multi-arch builds.
+# Pin to __CARGO_NEXTEST_VERSION__ (NOT `latest`) so the JSON event schema the
+# test runner parses can't change underneath us, and assert the install matches.
 RUN rustup component add rustfmt clippy && \
     case "${TARGETARCH}" in \
       arm64) NEXTEST_PLATFORM=linux-arm ;; \
       *)     NEXTEST_PLATFORM=linux ;; \
     esac && \
-    curl -LsSf "https://get.nexte.st/latest/${NEXTEST_PLATFORM}" | tar zxf - -C ${CARGO_HOME}/bin && \
-    cargo --version && cargo nextest --version
+    curl -LsSf "https://get.nexte.st/__CARGO_NEXTEST_VERSION__/${NEXTEST_PLATFORM}" | tar zxf - -C ${CARGO_HOME}/bin && \
+    cargo --version && \
+    cargo nextest --version && \
+    { cargo nextest --version | grep -q "__CARGO_NEXTEST_VERSION__" \
+        || { echo "FATAL: cargo-nextest version mismatch (expected __CARGO_NEXTEST_VERSION__)" >&2; exit 1; }; }
 # rustc/rustfmt/clippy --version checks are omitted on purpose: those binaries
 # SIGSEGV under qemu-user during the emulated amd64 multi-arch build (cargo and
 # nextest run fine). The components are installed above and work natively when
@@ -66,7 +86,6 @@ RUN mkdir -p /etc/pki/tls/certs /etc/pki/tls /etc/pki/ca-trust/extracted/pem /et
     ln -sf /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem 2>/dev/null; \
     ln -sf /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/cert.pem 2>/dev/null; \
     ln -sf /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem 2>/dev/null; \
-    ln -sf /etc/ssl/certs /etc/pki/tls/certs 2>/dev/null; \
     true
 
 # MITM CA cert injection via BuildKit secret (only applied if secret is provided)

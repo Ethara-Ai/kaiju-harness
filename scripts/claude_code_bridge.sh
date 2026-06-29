@@ -41,7 +41,7 @@ _start_bridge_process() {
 _wait_for_healthz() {
   local ok=0
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -fsS "http://${HOST}:${PORT}/healthz" >/dev/null 2>&1; then
+    if curl -fsS --max-time 10 "http://${HOST}:${PORT}/healthz" >/dev/null 2>&1; then
       ok=1
       break
     fi
@@ -74,12 +74,26 @@ case "$action" in
     exec "$PY" -m agent.claude_code --check
     ;;
   start)
+    # Serialize concurrent `start` invocations so two callers can't both pass
+    # the liveness check and race to bind the port (the loser would crash and
+    # leave PID_FILE pointing at a dead process). flock is best-effort: if it's
+    # unavailable we still proceed (single-user dev tool).
+    _lock_fd=""
+    if command -v flock >/dev/null 2>&1; then
+      exec 9>"${PID_FILE}.lock"
+      flock 9 || true
+      _lock_fd=9
+    fi
     if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
       echo "[bridge] already running (PID $(cat "$PID_FILE"))" >&2
     else
       _start_bridge_process
     fi
-    _wait_for_healthz || exit 1
+    if ! _wait_for_healthz; then
+      [[ -n "$_lock_fd" ]] && flock -u 9 2>/dev/null || true
+      exit 1
+    fi
+    [[ -n "$_lock_fd" ]] && flock -u 9 2>/dev/null || true
     if [[ "${KAIJU_CC_DISABLE_MONITOR:-0}" != "1" ]]; then
       _start_monitor_process
       echo "[bridge] monitor up (PID $(cat "$MONITOR_PID_FILE"))" >&2
@@ -116,7 +130,7 @@ case "$action" in
   status)
     if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
       echo "[bridge] running (PID $(cat "$PID_FILE")) on http://${HOST}:${PORT}"
-      curl -fsS "http://${HOST}:${PORT}/healthz" || true
+      curl -fsS --max-time 10 "http://${HOST}:${PORT}/healthz" || true
       echo
       if [[ -f "$MONITOR_PID_FILE" ]] && kill -0 "$(cat "$MONITOR_PID_FILE")" 2>/dev/null; then
         echo "[monitor] running (PID $(cat "$MONITOR_PID_FILE"))"

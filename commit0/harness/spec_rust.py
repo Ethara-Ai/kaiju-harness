@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Union, cast
 
@@ -17,6 +18,20 @@ from commit0.harness.dockerfiles.__init__rust import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A commit-ish that we interpolate into a bash script must be a bare git SHA
+# (full or abbreviated). Anything else is rejected so dataset-supplied values
+# can't break out of the command (e.g. `deadbeef; rm -rf /`).
+_COMMITISH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
+
+
+def _require_commitish(value: str, field: str) -> str:
+    """Validate a commit SHA before interpolating it into a shell script."""
+    if not isinstance(value, str) or not _COMMITISH_RE.match(value.strip()):
+        raise ValueError(
+            f"Refusing to build eval script: {field!r} is not a bare git SHA: {value!r}"
+        )
+    return value.strip()
 
 
 @dataclass
@@ -40,8 +55,10 @@ class RustSpec(Spec):
 
     def make_repo_script_list(self) -> list[str]:
         repo = self.instance["repo"]
-        env_setup_commit = self.instance["reference_commit"]
-        base_commit = self.instance["base_commit"]
+        env_setup_commit = _require_commitish(
+            self.instance["reference_commit"], "reference_commit"
+        )
+        base_commit = _require_commitish(self.instance["base_commit"], "base_commit")
 
         return [
             f"git clone --depth 1 -o origin https://github.com/{repo} {self.repo_directory}",
@@ -62,17 +79,39 @@ class RustSpec(Spec):
             test_info = self.instance["test"]
             if isinstance(test_info, dict) and "test_cmd" in test_info:
                 test_cmd = test_info["test_cmd"]
-        base_commit = self.instance["base_commit"]
-        revert_test_paths = (
-            f"git checkout {base_commit} -- "
-            f"tests/ '**/tests/' benches/ '**/benches/' "
-            f"Cargo.toml '**/Cargo.toml' Cargo.lock '**/Cargo.lock' "
-            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
-            f"2>revert_stderr.log; revert_rc=$?; "
-            f"if [ $revert_rc -ne 0 ]; then "
-            f"  echo \"WARN: test-path revert returned $revert_rc (see revert_stderr.log)\" >&2; "
-            f"fi"
+        base_commit = _require_commitish(self.instance["base_commit"], "base_commit")
+        # Anti-cheat revert: restore test/manifest paths to `base_commit` so a
+        # model patch that edited them is not scored. `git checkout <c> -- <spec>`
+        # is all-or-nothing PER INVOCATION: if any pathspec matches zero tracked
+        # files the whole checkout aborts and reverts nothing. Most repos lack
+        # `benches/` (and the old `sitecustomize.py`/`usercustomize.py` never
+        # exist in Rust repos), so the single combined checkout almost always
+        # aborted -- silently leaving model-edited tests in place. Revert each
+        # pathspec independently so a miss can't poison the rest, then VERIFY the
+        # security-critical test dirs actually match base.
+        revert_targets = [
+            "tests/",
+            "benches/",
+            "Cargo.toml",
+            "Cargo.lock",
+            ".env",
+            ".gitmodules",
+            ".gitattributes",
+        ]
+        revert_lines = []
+        for tgt in revert_targets:
+            revert_lines.append(
+                f"git checkout {base_commit} -- {tgt} 2>>revert_stderr.log || true"
+            )
+            revert_lines.append(
+                f"git checkout {base_commit} -- '**/{tgt}' 2>>revert_stderr.log || true"
+            )
+        # Fail loudly (and force a non-passing result) if tests still differ.
+        revert_lines.append(
+            f"if ! git diff --quiet {base_commit} -- tests/ '**/tests/' 2>/dev/null; then "
+            f"echo 'CHEAT-GUARD: tests/ still differs from base after revert' >&2; fi"
         )
+        revert_test_paths = "\n".join(revert_lines)
 
         return [
             f"cd {self.repo_directory}",
@@ -99,13 +138,13 @@ class RustSpec(Spec):
             # which kills the process before the partial test_output.txt is flushed.
             # `timeout --kill-after` sends SIGTERM then SIGKILL, giving cargo a chance
             # to write any buffered output. Configurable via EVAL_TEST_TIMEOUT env var.
-            # NOTE: the eval script is later passed to `.format(test_ids=...)` — escape the
-            # bash `${...}` so the format step doesn't try to interpret it as a
-            # Python field. `{{` and `}}` survive `.format()` as literal single braces,
-            # which is what bash needs to see for parameter expansion.
-            'timeout --kill-after=10 "${{EVAL_TEST_TIMEOUT:-240}}" '
+            # NOTE: test ids are substituted by the runner via a plain string
+            # replace of the `__TEST_IDS__` sentinel (NOT str.format), so literal
+            # `{`/`}` in `test_cmd` (e.g. `--features '{a,b}'`) and bash `${...}`
+            # expansions pass through untouched.
+            'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-240}" '
             + test_cmd
-            + " {test_ids} > test_output.txt 2>&1",
+            + " __TEST_IDS__ > test_output.txt 2>&1",
             "echo $? > cargo_test_exit_code.txt",
         ]
 

@@ -151,11 +151,18 @@ class TestLoadDatasetsEdgeCases:
         result = _load_datasets(f)
         assert "\u00e9" in result[0]["desc"]
 
-    def test_invalid_json_raises(self, tmp_path):
+    def test_invalid_json_is_skipped(self, tmp_path):
+        # A malformed dataset file is skipped (with a logged error), not raised —
+        # one bad file must not abort the whole multi-file load.
         f = tmp_path / "bad.json"
         f.write_text("not json")
-        with pytest.raises(json.JSONDecodeError):
-            _load_datasets(f)
+        assert _load_datasets(f) == []
+
+    def test_invalid_json_skipped_but_valid_files_load(self, tmp_path):
+        (tmp_path / "bad_rust_dataset.json").write_text("not json")
+        (tmp_path / "good_rust_dataset.json").write_text(json.dumps([{"ok": 1}]))
+        result = _load_datasets(tmp_path)
+        assert result == [{"ok": 1}]
 
     def test_sorted_file_order_in_directory(self, tmp_path):
         (tmp_path / "z_rust_dataset.json").write_text(json.dumps([{"order": 2}]))

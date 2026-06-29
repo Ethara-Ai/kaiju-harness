@@ -176,8 +176,12 @@ def _read_gha_matrix(repo_root: Path) -> tuple[list[str], str | None]:
         except OSError:
             continue
         # Match `rust:` or `toolchain:` matrix entries
+        # NB: the list-block branch matches whole lines as `[^\n]+` with NO
+        # optional quotes wrapped around it — the previous `['\"]?[^\n]+['\"]?`
+        # created a nested-quantifier ambiguity that backtracks pathologically
+        # (ReDoS) on crafted/malformed workflow YAML, which is repo-controlled.
         for m in re.finditer(
-            r"(?:rust|toolchain)\s*:\s*(\[[^\]]+\]|(?:\n[ \t]+-[ \t]+['\"]?[^\n]+['\"]?)+|['\"]?[\w.\-]+['\"]?)",
+            r"(?:rust|toolchain)\s*:\s*(\[[^\]]+\]|(?:\n[ \t]+-[ \t]+[^\n]+)+|['\"]?[\w.\-]+['\"]?)",
             content,
         ):
             block = m.group(1)

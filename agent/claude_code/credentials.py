@@ -20,10 +20,15 @@ Sources are tried in this priority order:
   4. ``~/.claude/.credentials.json`` (Linux fallback).
   5. ``~/.cache/kaiju-harness/claude_creds.json`` (bridge refresh cache, last).
 
-When a refresh happens, we write to (5) only -- never back to Keychain --
-because the ``claude`` CLI also manages Keychain and we don't want write
-races. Next bridge start re-reads Keychain (canonical source) and falls back
-to the cache if Keychain has somehow gone stale.
+When a refresh happens, we write the rotated token to the bridge cache (5) by
+default. IMPORTANT: Anthropic rotates the *refresh* token on every grant, so a
+bridge self-refresh invalidates the refresh token still stored in Keychain and
+used by the real ``claude`` CLI -- the next ``claude`` invocation would 401 and
+log the user out. To avoid that, set ``KAIJU_CC_WRITE_BACK_KEYCHAIN=1`` so the
+bridge pushes the rotated credential back into Keychain (best-effort, macOS
+only); otherwise the bridge logs a loud warning on each self-refresh. The most
+robust setup is to give the bridge its own dedicated account so it never shares
+a rotating grant with the interactive CLI.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import threading
 import time
@@ -249,16 +255,105 @@ def refresh_credentials(
     )
 
 
-def write_cache(creds: OAuthCredentials) -> None:
-    _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CACHE_PATH.write_text(
-        json.dumps(creds.to_claude_payload()),
-        encoding="utf-8",
-    )
+def _atomic_write_creds(path: Path, creds: OAuthCredentials) -> None:
+    """Write credentials JSON to *path* with 0600 perms and no TOCTOU window.
+
+    Creates the file 0600 from the start via os.open (rather than write_text
+    then chmod, which briefly exposes the token at the umask default), writes to
+    a temp sibling, then atomically renames into place."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.chmod(_CACHE_PATH, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(creds.to_claude_payload()))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+
+
+def write_cache(creds: OAuthCredentials) -> None:
+    _atomic_write_creds(_CACHE_PATH, creds)
+
+
+def _service_cache_path(service: str) -> Path:
+    """Per-Keychain-service cache path so pooled accounts don't clobber each
+    other in the single shared cache file."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", service)
+    return _CACHE_PATH.parent / f"claude_creds_kc_{safe}.json"
+
+
+def _keychain_write_back_enabled() -> bool:
+    """Whether to push rotated tokens back into Keychain (opt-in, default off)."""
+    return os.environ.get("KAIJU_CC_WRITE_BACK_KEYCHAIN", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _keychain_account_for_service(service: str) -> Optional[str]:
+    """Read the ``acct`` attribute of a Keychain item so we can update it."""
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-g"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    # `security ... -g` prints attributes on stderr: `"acct"<blob>="user@x"`.
+    m = re.search(r'"acct"<blob>="([^"]*)"', r.stderr or "")
+    return m.group(1) if m else None
+
+
+def _keychain_write_back(service: str, creds: OAuthCredentials) -> bool:
+    """Best-effort: update the Keychain item for *service* with rotated creds.
+
+    Anthropic rotates the refresh token on every grant. If the bridge refreshes
+    a Keychain-sourced token and does NOT write the new one back, the refresh
+    token still stored in Keychain (and used by the real ``claude`` CLI) is now
+    dead — the next ``claude`` invocation 401s and the user is logged out. This
+    keeps the canonical store in sync. Opt-in via KAIJU_CC_WRITE_BACK_KEYCHAIN.
+    """
+    if platform.system() != "Darwin":
+        return False
+    account = _keychain_account_for_service(service)
+    if account is None:
+        return False
+    payload = json.dumps(creds.to_claude_payload())
+    try:
+        r = subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-a", account, "-s", service, "-w", payload],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        _LOG.warning("keychain write-back failed for %s: %s", service, e)
+        return False
+    return r.returncode == 0
+
+
+def _warn_refresh_rotation(source: str, wrote_back: bool) -> None:
+    """Warn that a self-refresh may have invalidated the claude CLI's login."""
+    if wrote_back:
+        _LOG.info("Refreshed token written back to %s; claude CLI stays in sync", source)
+        return
+    _LOG.warning(
+        "Bridge refreshed the OAuth token from %s but did NOT write the rotated "
+        "refresh token back. The `claude` CLI sharing this credential may now be "
+        "logged out (refresh tokens rotate on every use). Set "
+        "KAIJU_CC_WRITE_BACK_KEYCHAIN=1 to keep Keychain in sync, or give the "
+        "bridge its own dedicated account.",
+        source,
+    )
 
 
 class CredentialProvider:
@@ -285,6 +380,14 @@ class CredentialProvider:
                     write_cache(self._creds)
                 except OSError as e:
                     _LOG.warning("Could not persist refreshed creds to cache: %s", e)
+                # The default provider's canonical source is the Keychain item;
+                # keep it in sync (or warn) so the claude CLI isn't logged out.
+                wrote_back = (
+                    _keychain_write_back(_KEYCHAIN_SERVICE, self._creds)
+                    if _keychain_write_back_enabled()
+                    else False
+                )
+                _warn_refresh_rotation(f"keychain {_KEYCHAIN_SERVICE!r}", wrote_back)
             return self._creds.access_token
 
     def force_reload(self) -> None:
@@ -347,11 +450,7 @@ class _FileCredentialProvider(CredentialProvider):
                 _LOG.info("Refreshing OAuth token from %s", self._path)
                 self._creds = refresh_credentials(self._creds)
                 try:
-                    self._path.write_text(
-                        json.dumps(self._creds.to_claude_payload()),
-                        encoding="utf-8",
-                    )
-                    os.chmod(self._path, 0o600)
+                    _atomic_write_creds(self._path, self._creds)
                 except OSError as e:
                     _LOG.warning("Could not persist refreshed creds to %s: %s", self._path, e)
             return self._creds.access_token
@@ -398,9 +497,21 @@ class _KeychainCredentialProvider(CredentialProvider):
                 _LOG.info("Refreshing OAuth token from keychain %s", self._service)
                 self._creds = refresh_credentials(self._creds)
                 try:
-                    write_cache(self._creds)
+                    # Per-service cache, NOT the shared write_cache() — otherwise
+                    # multiple pooled keychain accounts clobber one another (and
+                    # a `default` slot reading the shared cache could load the
+                    # wrong account's token).
+                    _atomic_write_creds(
+                        _service_cache_path(self._service), self._creds
+                    )
                 except OSError as e:
                     _LOG.warning("Could not persist refreshed creds to cache: %s", e)
+                wrote_back = (
+                    _keychain_write_back(self._service, self._creds)
+                    if _keychain_write_back_enabled()
+                    else False
+                )
+                _warn_refresh_rotation(f"keychain {self._service!r}", wrote_back)
             return self._creds.access_token
 
     def token_prefix(self) -> Optional[str]:
@@ -414,6 +525,10 @@ class _AccountSlot:
     label: str
     exhausted_until: float = 0.0
     invalid: bool = False
+    # The exact access token most recently handed out from this slot. Used to
+    # attribute upstream errors back to the right account without relying on a
+    # low-entropy 20-char prefix (all OAuth tokens share `sk-ant-oat01-`).
+    last_token: Optional[str] = None
 
     def is_available(self, now: Optional[float] = None) -> bool:
         if self.invalid:
@@ -446,11 +561,14 @@ class MultiAccountCredentialProvider:
             slot, idx = self._select_slot_locked()
             self._last_used_index = idx
         try:
-            return slot.provider.get_access_token()
+            token = slot.provider.get_access_token()
         except CredentialsError:
             with self._lock:
                 slot.invalid = True
             return self.get_access_token()
+        with self._lock:
+            slot.last_token = token
+        return token
 
     def _select_slot_locked(self) -> tuple[_AccountSlot, int]:
         now = time.time()
@@ -535,12 +653,20 @@ class MultiAccountCredentialProvider:
                 for s in self._slots
             ]
 
-    def _find_slot_by_prefix_locked(self, token_prefix: str) -> Optional[_AccountSlot]:
+    def _find_slot_by_prefix_locked(self, token: str) -> Optional[_AccountSlot]:
+        # Prefer an exact match against the token actually handed out (set in
+        # get_access_token). This is reliable even after a refresh changed the
+        # token, where prefix matching would silently fail and drop the state.
+        if token:
+            for slot in self._slots:
+                if slot.last_token and slot.last_token == token:
+                    return slot
+        # Fallback: low-entropy prefix match (legacy callers passing a prefix).
         for slot in self._slots:
             if not hasattr(slot.provider, "token_prefix"):
                 continue
             sp = getattr(slot.provider, "token_prefix", lambda: None)()
-            if sp and (sp.startswith(token_prefix) or token_prefix.startswith(sp)):
+            if sp and token and (sp.startswith(token) or token.startswith(sp)):
                 return slot
         return None
 

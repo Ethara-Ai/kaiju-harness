@@ -197,10 +197,17 @@ def classify_anthropic_error(
     message = message or err_type or f"HTTP {status_code}"
 
     if status_code == 429:
-        tokens_remaining = (
-            _parse_int_header(headers, "anthropic-ratelimit-unified-tokens-remaining")
-            or _parse_int_header(headers, "anthropic-ratelimit-tokens-remaining")
+        # NB: must be `is not None`, not `or` — a genuine cap reports
+        # tokens-remaining: 0, and `0 or <legacy>` would discard that 0 and fall
+        # through to the (usually absent) legacy header, misclassifying the cap
+        # as a transient throttle.
+        tokens_remaining = _parse_int_header(
+            headers, "anthropic-ratelimit-unified-tokens-remaining"
         )
+        if tokens_remaining is None:
+            tokens_remaining = _parse_int_header(
+                headers, "anthropic-ratelimit-tokens-remaining"
+            )
         is_cap = False
         if retry_after is not None and retry_after >= TRANSIENT_RETRY_AFTER_THRESHOLD:
             is_cap = True

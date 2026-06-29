@@ -378,13 +378,16 @@ class TestParseNextestReportExpanded:
         assert t["duration"] == 2.5
 
     def test_report_permission_error(self, tmp_path):
+        # An unreadable report must NOT crash aggregation — it degrades to the
+        # empty result so the remaining repos still get aggregated.
         report = tmp_path / "noperm.json"
         report.write_text("data")
         report.chmod(0o000)
 
         try:
-            with pytest.raises(PermissionError):
-                parse_nextest_report(str(report))
+            result = parse_nextest_report(str(report))
+            assert result["tests"] == []
+            assert result["summary"]["total"] == 0
         finally:
             report.chmod(0o644)
 

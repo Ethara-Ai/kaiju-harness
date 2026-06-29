@@ -30,8 +30,12 @@ class TestRustVersion:
     def test_is_string(self):
         assert isinstance(RUST_VERSION, str)
 
-    def test_value(self):
-        assert RUST_VERSION == "stable"
+    def test_value_is_valid_docker_tag_component(self):
+        # RUST_VERSION feeds `FROM rust:<RUST_VERSION>-bookworm`, so it must be a
+        # concrete version tag component (e.g. "1.96" / "1.96.0"), not "stable".
+        import re
+
+        assert re.match(r"^\d+\.\d+(?:\.\d+)?$", RUST_VERSION), RUST_VERSION
 
     def test_not_empty(self):
         assert len(RUST_VERSION) > 0

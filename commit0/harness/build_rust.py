@@ -36,8 +36,15 @@ def _load_datasets(path: Path) -> list[dict]:
     instances: list[dict] = []
     for f in files:
         logger.info("Loading dataset: %s", f)
-        with open(f) as fh:
-            data = json.load(fh)
+        # Per-file error handling so one malformed/unreadable dataset file is
+        # skipped (with a clear log) instead of aborting the whole multi-file
+        # load with an unhandled JSONDecodeError/OSError.
+        try:
+            with open(f, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error("Skipping dataset file %s: %s", f, exc)
+            continue
         if isinstance(data, dict):
             data = list(data.values())
         instances.extend(data)

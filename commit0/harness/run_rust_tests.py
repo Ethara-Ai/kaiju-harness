@@ -3,10 +3,16 @@ from __future__ import annotations
 import git
 import logging
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
 from typing import Iterator, Union
+
+# Characters allowed in `test_ids` (cargo/nextest filter args). Alphanumerics,
+# whitespace, and the punctuation that appears in test paths / filter exprs.
+# Deliberately excludes shell metacharacters: ; | & $ ` ( ) < > newline " ' \
+_TEST_IDS_RE = re.compile(r"^[\w\s:./@#=+*\-\[\],~^!]*$")
 
 from commit0.harness.constants import (
     EVAL_BACKENDS,
@@ -18,6 +24,7 @@ from commit0.harness.constants_rust import (
     RustRepoInstance,
 )
 from commit0.harness.spec_rust import make_rust_spec
+from commit0.harness.patch_utils_rust import filter_rust_patch
 from commit0.harness.utils import (
     EvaluationError,
     get_hash_string,
@@ -57,13 +64,13 @@ def main(
     example = None
     repo_name = None
 
+    target_base = os.path.basename(repo_or_repo_dir.rstrip("/"))
     for example in dataset:
-        if repo_or_repo_dir.endswith("/"):
-            repo_or_repo_dir = repo_or_repo_dir[:-1]
         repo_name = example["repo"].split("/")[-1]
-        if repo_name in os.path.basename(repo_or_repo_dir) or repo_or_repo_dir.endswith(
-            repo_name
-        ):
+        # Exact basename match only. A substring/endswith test mis-resolves any
+        # repo whose name is a substring of another (`serde` vs `serde_json`,
+        # `time` vs `runtime`), silently running the wrong base commit/test cmd.
+        if repo_name == target_base:
             spec = make_rust_spec(example, absolute)
             break
 
@@ -118,13 +125,24 @@ def main(
     patch = generate_patch_between_commits(
         local_repo, example["base_commit"], commit_id
     )
+    # Strip target/ build artefacts so they aren't applied into the eval tree.
+    patch = filter_rust_patch(patch)
 
-    eval_script = spec.eval_script.format(test_ids=test_ids)
+    # `test_ids` is appended verbatim as cargo CLI args. Reject shell
+    # metacharacters so a dataset/CLI value can't break out of the eval script.
+    # (`::`, paths, globs and filter expressions remain allowed.)
+    if not _TEST_IDS_RE.match(test_ids):
+        raise ValueError(f"Unsafe characters in test_ids: {test_ids!r}")
+    # Plain string replace (NOT str.format) so literal braces / `${...}` in the
+    # script and test_cmd survive untouched.
+    eval_script = spec.eval_script.replace("__TEST_IDS__", test_ids)
 
     patch_file = Path(log_dir / "patch.diff")
-    patch_file.write_text(patch, encoding="utf-8", errors="ignore")
+    # surrogateescape round-trips any non-UTF8 bytes git smuggled into the diff
+    # rather than silently dropping them (errors="ignore") and corrupting it.
+    patch_file.write_text(patch, encoding="utf-8", errors="surrogateescape")
     eval_file = Path(log_dir / "eval.sh")
-    eval_file.write_text(eval_script)
+    eval_file.write_text(eval_script, encoding="utf-8")
 
     backend = backend.upper()
     if ExecutionBackend(backend) == ExecutionBackend.MODAL:
@@ -184,13 +202,16 @@ def main(
                     logger,
                     log_file=str(log_file),
                 )
-        close_logger(logger)
         if verbose > 0:
             test_output = Path(log_dir / "test_output.txt")
-            print(test_output.read_text())
+            # cargo output can contain non-UTF8 bytes (panic payloads, locale
+            # text); replace rather than raise UnicodeDecodeError.
+            print(test_output.read_text(encoding="utf-8", errors="replace"))
         exit_code_file = Path(log_dir / "cargo_test_exit_code.txt")
         _module_logger.debug("Reading cargo test exit code from %s", exit_code_file)
-        exit_code = int(exit_code_file.read_text().strip())
+        exit_code = int(
+            exit_code_file.read_text(encoding="utf-8", errors="replace").strip()
+        )
         sys.exit(exit_code)
     except EvaluationError as e:
         error_msg = (
@@ -208,6 +229,16 @@ def main(
             f"Check ({log_file}) for more information."
         )
         raise RuntimeError(error_msg) from e
+    finally:
+        # Always release the per-repo log handle and git repo, even on the
+        # timeout/error paths -- otherwise FDs leak under the evaluate_rust
+        # ThreadPoolExecutor across a large dataset. (SystemExit from the
+        # success path passes through finally unharmed.)
+        close_logger(logger)
+        try:
+            local_repo.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
 
 
 __all__ = ["main"]

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import logging
 
-from commit0.harness.constants_rust import DOCKERFILES_RUST_DIR
+from commit0.harness.constants_rust import (
+    CARGO_NEXTEST_VERSION,
+    DOCKERFILES_RUST_DIR,
+    RUST_VERSION,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -13,7 +17,13 @@ def get_dockerfile_base_rust() -> str:
         raise FileNotFoundError(
             f"Rust base Dockerfile template not found: {template_path}"
         )
-    return template_path.read_text()
+    # Single source of truth: substitute the pinned toolchain versions from
+    # constants_rust.py so the FROM tag and nextest install can't drift.
+    return (
+        template_path.read_text()
+        .replace("__RUST_VERSION__", RUST_VERSION)
+        .replace("__CARGO_NEXTEST_VERSION__", CARGO_NEXTEST_VERSION)
+    )
 
 
 def get_dockerfile_repo_rust(
