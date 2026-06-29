@@ -164,7 +164,7 @@ for env_var, cfg in ARN_CONFIGS.items():
 # or any time the user runs --model anthropic/<id>). Always emit -- harmless if not used.
 _ANTHROPIC_DIRECT = {
     "anthropic/claude-opus-4-7": {
-        "max_input_tokens": 200000, "max_output_tokens": 128000, "max_tokens": 128000,
+        "max_input_tokens": 1000000, "max_output_tokens": 128000, "max_tokens": 128000,
         "mode": "chat", "edit_format": "diff",
         "input_cost_per_token": 5e-6, "output_cost_per_token": 2.5e-5,
         "cache_creation_input_token_cost": 6.25e-6, "cache_read_input_token_cost": 5e-7,
@@ -174,7 +174,7 @@ _ANTHROPIC_DIRECT = {
         "supports_prompt_caching": True, "supports_assistant_prefill": True,
     },
     "anthropic/claude-opus-4-8": {
-        "max_input_tokens": 200000, "max_output_tokens": 128000, "max_tokens": 128000,
+        "max_input_tokens": 1000000, "max_output_tokens": 128000, "max_tokens": 128000,
         "mode": "chat", "edit_format": "diff",
         "input_cost_per_token": 5e-6, "output_cost_per_token": 2.5e-5,
         "cache_creation_input_token_cost": 6.25e-6, "cache_read_input_token_cost": 5e-7,
@@ -490,19 +490,45 @@ for env_var, cfg in ARN_SETTINGS.items():
         out.append(entry)
 
 # Anthropic-direct settings (always emitted; bridge users get cache_control + thinking).
-for _name in (
-    "anthropic/claude-opus-4-7",
-    "anthropic/claude-opus-4-8",
-    "anthropic/claude-sonnet-4-6",
-    "anthropic/claude-haiku-4-5-20251001",
-    "anthropic/claude-haiku-4-5",
-):
-    out.append(f"""\
-- name: {_name}
-  edit_format: diff
-  use_repo_map: true
-  examples_as_sys_msg: false
-  use_temperature: false
+# IMPORTANT: Opus 4.7/4.8 REMOVED `thinking: {type: enabled, budget_tokens: N}` — sending it
+# returns HTTP 400. Adaptive thinking is the only valid on-mode; reasoning depth is controlled
+# by output_config.effort (max = deepest). We also use the model's FULL 128K output budget
+# rather than an arbitrary 32K cap, so the model isn't cut off mid-response.
+#   - Opus 4.7/4.8 -> adaptive thinking + effort:max + max_tokens:128000 (full output)
+#   - Sonnet 4.6   -> adaptive thinking + effort:high + max_tokens:64000 (Sonnet's output cap)
+#   - Haiku 4.5    -> legacy enabled+budget (Haiku does not support adaptive/effort)
+# Do NOT advertise `thinking_tokens` for adaptive models — it would let a budget be injected
+# and re-trigger the 400.
+# NOTE on effort: the installed litellm build only permits effort='max' for Opus 4.6
+# (anthropic/chat/transformation.py) and rejects 'xhigh' as an invalid value, so for
+# Opus 4.7/4.8 the accepted ceiling is 'high'. Adaptive thinking remains unbounded
+# (no fixed budget_tokens), so reasoning depth is still high. Using 'max' here makes
+# litellm raise before the request is sent (0 tokens, $0 cost, empty trajectory).
+_ANTHROPIC_OPUS_BLOCK = """\
+  extra_params:
+    max_tokens: 128000
+    thinking:
+      type: adaptive
+      display: summarized
+    output_config:
+      effort: high
+  cache_control: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking"""
+
+_ANTHROPIC_SONNET_BLOCK = """\
+  extra_params:
+    max_tokens: 64000
+    thinking:
+      type: adaptive
+      display: summarized
+    output_config:
+      effort: high
+  cache_control: true
+  reasoning_tag: thinking
+  remove_reasoning: thinking"""
+
+_ANTHROPIC_HAIKU_BLOCK = """\
   extra_params:
     max_tokens: 32000
     thinking:
@@ -512,7 +538,23 @@ for _name in (
   reasoning_tag: thinking
   remove_reasoning: thinking
   accepts_settings:
-    - thinking_tokens""")
+    - thinking_tokens"""
+
+_ANTHROPIC_DIRECT_SETTINGS = {
+    "anthropic/claude-opus-4-7": _ANTHROPIC_OPUS_BLOCK,
+    "anthropic/claude-opus-4-8": _ANTHROPIC_OPUS_BLOCK,
+    "anthropic/claude-sonnet-4-6": _ANTHROPIC_SONNET_BLOCK,
+    "anthropic/claude-haiku-4-5-20251001": _ANTHROPIC_HAIKU_BLOCK,
+    "anthropic/claude-haiku-4-5": _ANTHROPIC_HAIKU_BLOCK,
+}
+for _name, _block in _ANTHROPIC_DIRECT_SETTINGS.items():
+    out.append(f"""\
+- name: {_name}
+  edit_format: diff
+  use_repo_map: true
+  examples_as_sys_msg: false
+  use_temperature: false
+{_block}""")
 
 if os.environ.get("VERTEX_AI_API_KEY", "").strip() or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
     out.append("""\
