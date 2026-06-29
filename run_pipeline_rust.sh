@@ -42,6 +42,19 @@ BLIND_TESTS="false"
 STRIP_NON_STUBS="false"
 INJECT_TEST_FILES_READONLY="true"
 NAMES_ONLY_TESTS="false"
+PER_EDIT_COMPILE_GATE="false"
+COMPILE_GATE_MAX_RETRIES=2
+# Fix #3: Stage 2 -> Stage 3 gate (default ON per user instruction).
+# After Stage 2 ends, run `cargo check` on the agent's branch tree. If it does
+# NOT compile, skip Stage 3 entirely (running `cargo test` on a broken tree is
+# wasted budget) and record STAGE_2_BROKE_TREE in the result.
+STAGE3_SKIP_IF_BROKEN="true"
+# Fix #4: Quality-aware watchdog (kill if compile-error count is rising).
+# Default OFF to preserve existing run semantics; enable via --quality-watchdog.
+QUALITY_WATCHDOG="false"
+QUALITY_WATCHDOG_INTERVAL=90       # seconds between cargo check samples
+QUALITY_WATCHDOG_RISING=3          # consecutive rising samples before kill
+QUALITY_WATCHDOG_MIN_DELTA=5       # minimum error increase per sample to count as 'rising'
 
 # ============================================================
 # Argument Parsing
@@ -102,6 +115,13 @@ Options:
   --names-only-tests         Stage 3 shows only failed test names, not tracebacks (default: full output)
   --no-test-files-readonly   Do not inject test files as read-only reference (default: inject)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
+  --per-edit-compile-gate    Run `cargo check` after each aider edit; revert + retry on regression (default: off)
+  --compile-gate-max-retries <n>  Retries before reverting a module (default: 2)
+  --no-stage3-skip-if-broken Always run Stage 3 even if tree doesn't compile (default: skip Stage 3 if broken)
+  --quality-watchdog         Kill agent if `cargo check` errors are trending up (default: off)
+  --quality-watchdog-interval <s>  Seconds between samples (default: 90)
+  --quality-watchdog-rising <n>    Consecutive rising samples to trigger kill (default: 3)
+  --quality-watchdog-min-delta <n> Minimum error increase per sample to count as rising (default: 5)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
   -h, --help                 Show this help
@@ -130,6 +150,13 @@ while [[ $# -gt 0 ]]; do
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --per-edit-compile-gate) PER_EDIT_COMPILE_GATE="true"; shift ;;
+        --compile-gate-max-retries) [[ $# -lt 2 ]] && { echo "Error: --compile-gate-max-retries requires a value"; exit 1; }; COMPILE_GATE_MAX_RETRIES="$2"; shift 2 ;;
+        --no-stage3-skip-if-broken) STAGE3_SKIP_IF_BROKEN="false"; shift ;;
+        --quality-watchdog) QUALITY_WATCHDOG="true"; shift ;;
+        --quality-watchdog-interval) [[ $# -lt 2 ]] && { echo "Error: --quality-watchdog-interval requires a value"; exit 1; }; QUALITY_WATCHDOG_INTERVAL="$2"; shift 2 ;;
+        --quality-watchdog-rising) [[ $# -lt 2 ]] && { echo "Error: --quality-watchdog-rising requires a value"; exit 1; }; QUALITY_WATCHDOG_RISING="$2"; shift 2 ;;
+        --quality-watchdog-min-delta) [[ $# -lt 2 ]] && { echo "Error: --quality-watchdog-min-delta requires a value"; exit 1; }; QUALITY_WATCHDOG_MIN_DELTA="$2"; shift 2 ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -780,6 +807,8 @@ blind_tests: ${BLIND_TESTS}
 strip_non_stubs: ${STRIP_NON_STUBS}
 names_only_tests: ${NAMES_ONLY_TESTS}
 inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
+per_edit_compile_gate: ${PER_EDIT_COMPILE_GATE}
+compile_gate_max_retries: ${COMPILE_GATE_MAX_RETRIES}
 language: rust
 EOF
     log "  Wrote agent config: ${AGENT_CONFIG}"
@@ -964,9 +993,43 @@ run_agent() {
     local agent_pid=$!
     AGENT_PID=$agent_pid
 
+    # ---- Fix #4: Quality-aware watchdog (opt-in) ----
+    # Sidecar process that runs `cargo check` periodically and kills the agent
+    # if compile-error count is monotonically rising. SIGTERMs the agent_pid;
+    # the existing watchdog_run catches that as a normal kill (rc=124).
+    local _qw_pid=""
+    if [[ "$QUALITY_WATCHDOG" == "true" ]]; then
+        local qw_log="${log_dir}/quality_watchdog.log"
+        local repos_in_dataset
+        repos_in_dataset=$("$VENV_PYTHON" -c "
+import json,sys
+with open(sys.argv[1]) as f: d = json.load(f)
+for e in d: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null | head -1)
+        local qw_repo_dir="${REPO_BASE}/${repos_in_dataset}"
+        if [[ -d "$qw_repo_dir" ]]; then
+            "$VENV_PYTHON" -m agent.claude_code.quality_watchdog \
+                --agent-pid "$agent_pid" \
+                --repo-dir "$qw_repo_dir" \
+                --interval "$QUALITY_WATCHDOG_INTERVAL" \
+                --consecutive-rising "$QUALITY_WATCHDOG_RISING" \
+                --min-delta "$QUALITY_WATCHDOG_MIN_DELTA" \
+                --log "$qw_log" >/dev/null 2>&1 &
+            _qw_pid=$!
+            log "  QUALITY-WATCHDOG: started (pid=${_qw_pid}, interval=${QUALITY_WATCHDOG_INTERVAL}s, rising=${QUALITY_WATCHDOG_RISING}, delta=${QUALITY_WATCHDOG_MIN_DELTA})"
+        else
+            log "  QUALITY-WATCHDOG: skipped — repo dir not found ($qw_repo_dir)"
+        fi
+    fi
+
     watchdog_run "$agent_pid" "$log_dir" "$INACTIVITY_TIMEOUT" "$STAGE_TIMEOUT" "$MAX_WALL_TIME"
     AGENT_RC=$?
     AGENT_PID=""
+
+    # Stop the quality watchdog if it's still alive (it exits naturally when agent_pid disappears).
+    if [[ -n "$_qw_pid" ]] && kill -0 "$_qw_pid" 2>/dev/null; then
+        kill "$_qw_pid" 2>/dev/null || true
+        wait "$_qw_pid" 2>/dev/null || true
+    fi
     set -e
 
     local end_time
@@ -1258,6 +1321,37 @@ save_results() {
 # ============================================================
 # Pipeline Stages
 # ============================================================
+
+# ----------------------------------------------------------------------------
+# Fix #3: Stage 2 -> Stage 3 gate.
+# Returns 0 if the tree compiles (cargo check --tests succeeds), nonzero otherwise.
+# Side effects: writes count of compile errors to ${LOG_BASE}/.stage_gate_errors
+# Used by run_single_sample to decide whether to enter Stage 3.
+# ----------------------------------------------------------------------------
+check_tree_compiles() {
+    local repo_dir="$1"
+    local out_file="$2"  # path to write cargo output for debugging
+    if [[ ! -d "$repo_dir" ]]; then
+        log "  GATE: repo dir not found: $repo_dir; assuming broken"
+        echo 999 > "${LOG_BASE}/.stage_gate_errors"
+        return 1
+    fi
+    log "  GATE: running cargo check --tests on $(basename "$repo_dir")"
+    local rc=0
+    ( cd "$repo_dir" && cargo check --tests --all-features --message-format=short ) > "$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        echo 0 > "${LOG_BASE}/.stage_gate_errors"
+        log "  GATE: tree compiles cleanly"
+        return 0
+    fi
+    # Count compile errors. `cargo check --message-format=short` emits one
+    # `path:line:col: error[...]` per problem.
+    local n_errors
+    n_errors=$(grep -cE '^[^[:space:]]+:[0-9]+:[0-9]+: error' "$out_file" 2>/dev/null || echo 0)
+    echo "$n_errors" > "${LOG_BASE}/.stage_gate_errors"
+    log "  GATE: tree FAILS to compile ($n_errors error(s), rc=$rc); see $out_file"
+    return 1
+}
 
 stage_1_draft() {
     log "======================================================================"
@@ -1702,7 +1796,45 @@ run_single_sample() {
         log "Stage 2: SKIPPED"
     fi
 
-    if [[ -z "$pipeline_error" ]]; then
+    # ---- Fix #3: Stage 2 -> Stage 3 gate ----
+    # Skip Stage 3 if the tree doesn't compile after Stage 2. Running cargo test
+    # against a broken tree just produces the same compile errors at much higher
+    # cost. Default ON; bypass with --no-stage3-skip-if-broken.
+    if [[ -z "$pipeline_error" ]] && [[ "$STAGE3_SKIP_IF_BROKEN" == "true" ]]; then
+        local gate_log="${LOG_BASE}/stage_gate_cargo_check.log"
+        local repos_in_dataset
+        repos_in_dataset=$("$VENV_PYTHON" -c "
+import json,sys
+with open(sys.argv[1]) as f: d = json.load(f)
+for e in d: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null | head -1)
+        local repo_dir="${REPO_BASE}/${repos_in_dataset}"
+        if ! check_tree_compiles "$repo_dir" "$gate_log"; then
+            local n_errs
+            n_errs=$(cat "${LOG_BASE}/.stage_gate_errors" 2>/dev/null || echo 0)
+            log "Stage 3: SKIPPED — tree does not compile after Stage 2 ($n_errs error(s))"
+            log "  See: $gate_log"
+            RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --argjson nerr "$n_errs" '.stage3 = {
+                name: "Test refine",
+                status: "SKIPPED_STAGE_2_BROKE_TREE",
+                compile_errors_after_stage2: $nerr,
+                elapsed_s: 0,
+                eval_time_s: 0,
+                cost_usd_incremental: 0.0,
+                cost_usd_cumulative: (.stage2.cost_usd_cumulative // .stage1.cost_usd // 0.0),
+                returncode: 0,
+                runtime: 0,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0.0
+            }')
+            save_results
+        else
+            if ! stage_3_test_refine; then
+                pipeline_error="Stage 3 failed"
+                log "PIPELINE ERROR: ${pipeline_error}"
+            fi
+        fi
+    elif [[ -z "$pipeline_error" ]]; then
         if ! stage_3_test_refine; then
             pipeline_error="Stage 3 failed"
             log "PIPELINE ERROR: ${pipeline_error}"

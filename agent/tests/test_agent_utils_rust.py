@@ -1404,3 +1404,259 @@ class TestGetChangedFilesEdgeCases:
         result = get_changed_files_rust(mock_repo, "a", "b")
         assert len(result) == 3
         assert all(f.endswith(".rs") for f in result)
+
+
+# ---------------------------------------------------------------------------
+# Per-edit compile gate tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFilesWithErrors:
+    def test_short_format_single_error(self, tmp_path):
+        from agent.agent_utils_rust import _extract_files_with_errors
+
+        output = (
+            "src/foo.rs:42:5: error[E0308]: mismatched types\n"
+            "    expected `u32`, found `u64`\n"
+        )
+        broken = _extract_files_with_errors(output, str(tmp_path))
+        assert broken == {str(tmp_path.resolve() / "src" / "foo.rs")}
+
+    def test_short_format_multiple_errors_same_file(self, tmp_path):
+        from agent.agent_utils_rust import _extract_files_with_errors
+
+        output = (
+            "src/foo.rs:42:5: error[E0308]: mismatched types\n"
+            "src/foo.rs:99:3: error[E0277]: trait bound not satisfied\n"
+        )
+        broken = _extract_files_with_errors(output, str(tmp_path))
+        assert broken == {str(tmp_path.resolve() / "src" / "foo.rs")}
+
+    def test_short_format_multiple_files(self, tmp_path):
+        from agent.agent_utils_rust import _extract_files_with_errors
+
+        output = (
+            "src/foo.rs:42:5: error[E0308]: mismatched types\n"
+            "src/bar/baz.rs:7:1: error[E0432]: unresolved import\n"
+        )
+        broken = _extract_files_with_errors(output, str(tmp_path))
+        assert broken == {
+            str(tmp_path.resolve() / "src" / "foo.rs"),
+            str(tmp_path.resolve() / "src" / "bar" / "baz.rs"),
+        }
+
+    def test_long_format_span_line(self, tmp_path):
+        """Old-format spans are recognised: --> path:line:col"""
+        from agent.agent_utils_rust import _extract_files_with_errors
+
+        output = (
+            "error[E0308]: mismatched types\n"
+            "  --> src/foo.rs:42:5\n"
+            "   |\n"
+            "42 |     x: u32,\n"
+        )
+        broken = _extract_files_with_errors(output, str(tmp_path))
+        assert broken == {str(tmp_path.resolve() / "src" / "foo.rs")}
+
+    def test_empty_output_returns_empty_set(self, tmp_path):
+        from agent.agent_utils_rust import _extract_files_with_errors
+
+        assert _extract_files_with_errors("", str(tmp_path)) == set()
+
+    def test_only_warnings_ignored(self, tmp_path):
+        """Warnings (no `error:` prefix) should not be counted as broken files."""
+        from agent.agent_utils_rust import _extract_files_with_errors
+
+        output = (
+            "src/foo.rs:42:5: warning: unused variable\n"
+            "warning: unused import\n"
+        )
+        broken = _extract_files_with_errors(output, str(tmp_path))
+        assert broken == set()
+
+
+class TestFormatErrorsForPrompt:
+    def test_includes_error_lines(self):
+        from agent.agent_utils_rust import _format_errors_for_prompt
+
+        out = (
+            "warning: noise\n"
+            "error[E0308]: mismatched types\n"
+            "  --> src/foo.rs:42:5\n"
+            "   |\n"
+            "42 |     x: u32,\n"
+            "   |     ^^^\n"
+        )
+        s = _format_errors_for_prompt(out)
+        assert "error[E0308]: mismatched types" in s
+        # context lines kept (3 after the error line)
+        assert "src/foo.rs:42" in s
+
+    def test_truncates_long_output(self):
+        from agent.agent_utils_rust import _format_errors_for_prompt
+
+        # 200 error lines
+        out = "\n".join(f"error: e{i}" for i in range(200))
+        s = _format_errors_for_prompt(out, max_chars=500)
+        assert len(s) <= 500 + len("\n... [truncated]")
+        assert "[truncated]" in s
+
+
+class TestRunWithCompileGate:
+    """Integration-style tests for run_with_compile_gate.
+
+    We mock _run_cargo_check / _files_edited_since at module level so we can
+    exercise every code path without needing a real cargo install.
+    """
+
+    def _stub_local_repo(self):
+        repo = MagicMock()
+        repo.git.reset = MagicMock()
+        return repo
+
+    def test_clean_first_try_keeps_edit(self, tmp_path):
+        from agent.agent_utils_rust import run_with_compile_gate
+
+        run_aider = MagicMock()
+        with (
+            patch(f"{MODULE}._run_cargo_check", side_effect=[(0, ""), (0, "")]),
+            patch(f"{MODULE}._files_edited_since", return_value=set()),
+        ):
+            result = run_with_compile_gate(
+                run_aider,
+                repo_path=str(tmp_path),
+                local_repo=self._stub_local_repo(),
+                pre_sha="abc123",
+                max_retries=2,
+            )
+        assert result["status"] == "kept"
+        assert result["retries_used"] == 0
+        run_aider.assert_called_once()
+
+    def test_baseline_errors_not_attributed_to_edit(self, tmp_path):
+        """If cargo was already broken before the edit, and the edit didn't
+        introduce *new* breakage, we should KEEP the edit."""
+        from agent.agent_utils_rust import run_with_compile_gate
+
+        baseline_out = "src/old.rs:1:1: error[E0001]: pre-existing\n"
+        # Same error appears after the edit; nothing new from us.
+        with (
+            patch(
+                f"{MODULE}._run_cargo_check",
+                side_effect=[(101, baseline_out), (101, baseline_out)],
+            ),
+            patch(
+                f"{MODULE}._files_edited_since",
+                return_value={str(tmp_path.resolve() / "src" / "new.rs")},
+            ),
+        ):
+            run_aider = MagicMock()
+            result = run_with_compile_gate(
+                run_aider,
+                repo_path=str(tmp_path),
+                local_repo=self._stub_local_repo(),
+                pre_sha="abc",
+                max_retries=2,
+            )
+        assert result["status"] == "kept"
+        assert result["regressions"] == []
+
+    def test_regression_triggers_revert_after_retries(self, tmp_path):
+        """Edit broke a file we touched, AND retries also break it -> revert."""
+        from agent.agent_utils_rust import run_with_compile_gate
+
+        broken_out = "src/blk.rs:42:5: error[E0308]: mismatched types\n"
+        repo = self._stub_local_repo()
+        re_prompt = MagicMock()
+
+        with (
+            # baseline clean, all subsequent checks broken on src/blk.rs
+            patch(
+                f"{MODULE}._run_cargo_check",
+                side_effect=[(0, ""), (101, broken_out), (101, broken_out), (101, broken_out)],
+            ),
+            patch(
+                f"{MODULE}._files_edited_since",
+                return_value={str(tmp_path.resolve() / "src" / "blk.rs")},
+            ),
+        ):
+            result = run_with_compile_gate(
+                MagicMock(),
+                repo_path=str(tmp_path),
+                local_repo=repo,
+                pre_sha="abc",
+                max_retries=2,
+                re_prompt_callback=re_prompt,
+            )
+        assert result["status"] == "reverted"
+        assert result["retries_used"] == 2
+        assert len(result["regressions"]) == 1
+        # re-prompt callback should have been invoked twice (max_retries)
+        assert re_prompt.call_count == 2
+        # git reset --hard was called with the pre_sha
+        repo.git.reset.assert_called_once_with("--hard", "abc")
+
+    def test_retry_succeeds_on_second_attempt(self, tmp_path):
+        from agent.agent_utils_rust import run_with_compile_gate
+
+        broken_out = "src/blk.rs:42:5: error[E0308]: mismatched types\n"
+        repo = self._stub_local_repo()
+        re_prompt = MagicMock()
+
+        with (
+            patch(
+                f"{MODULE}._run_cargo_check",
+                # baseline clean, first attempt broken, retry clean
+                side_effect=[(0, ""), (101, broken_out), (0, "")],
+            ),
+            patch(
+                f"{MODULE}._files_edited_since",
+                return_value={str(tmp_path.resolve() / "src" / "blk.rs")},
+            ),
+        ):
+            result = run_with_compile_gate(
+                MagicMock(),
+                repo_path=str(tmp_path),
+                local_repo=repo,
+                pre_sha="abc",
+                max_retries=2,
+                re_prompt_callback=re_prompt,
+            )
+        assert result["status"] == "kept"
+        assert result["retries_used"] == 1
+        re_prompt.assert_called_once()
+        # No revert when the retry recovers
+        repo.git.reset.assert_not_called()
+
+    def test_callback_exception_does_not_crash_gate(self, tmp_path):
+        """re_prompt_callback raising should not abort the gate; gate logs and
+        proceeds to revert when retries exhaust."""
+        from agent.agent_utils_rust import run_with_compile_gate
+
+        broken_out = "src/blk.rs:42:5: error[E0308]: mismatched types\n"
+        repo = self._stub_local_repo()
+
+        def _raising(_err):
+            raise RuntimeError("simulated callback failure")
+
+        with (
+            patch(
+                f"{MODULE}._run_cargo_check",
+                side_effect=[(0, ""), (101, broken_out), (101, broken_out), (101, broken_out)],
+            ),
+            patch(
+                f"{MODULE}._files_edited_since",
+                return_value={str(tmp_path.resolve() / "src" / "blk.rs")},
+            ),
+        ):
+            result = run_with_compile_gate(
+                MagicMock(),
+                repo_path=str(tmp_path),
+                local_repo=repo,
+                pre_sha="abc",
+                max_retries=2,
+                re_prompt_callback=_raising,
+            )
+        # callback raised twice (each retry); gate ultimately reverts
+        assert result["status"] == "reverted"
+        repo.git.reset.assert_called_once_with("--hard", "abc")

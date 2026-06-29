@@ -43,6 +43,15 @@ class AgentConfig:
     strip_non_stubs: bool = False  # If True, hide non-stubbed source from agent context
     inject_test_files_readonly: bool = True  # If False, test source bodies are NOT injected as aider read-only context; removes oracle access to test assertions during generation
 
+    # --- Per-edit compile gate (Rust-specific; opt-in via --per-edit-compile-gate)
+    # When True, agent.run() is wrapped: after each aider edit we run `cargo check`,
+    # and if the edit broke a file that previously compiled we feed the errors back
+    # and let the agent retry. After `compile_gate_max_retries` failed retries we
+    # `git reset --hard` to the pre-edit SHA. Prevents regression cascades like the
+    # 4 -> 43 compile-error storm observed on virtio-drivers Stage 2.
+    per_edit_compile_gate: bool = False
+    compile_gate_max_retries: int = 2
+
     def __post_init__(self):
         if not isinstance(self.model_name, str) or not self.model_name.strip():
             raise ValueError(

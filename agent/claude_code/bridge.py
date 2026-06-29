@@ -61,6 +61,33 @@ SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
 DEFAULT_MAX_INLINE_RETRIES = 3
 DEFAULT_MAX_INLINE_WAIT_SECONDS = 30
 DEFAULT_REQUEST_TIMEOUT = 600.0
+# Per-chunk read timeout: how long httpx waits for the NEXT byte of an in-flight
+# response. With Opus 4.8 + extended thinking + ~96k context, single-turn
+# reasoning can pause for 90-150s between streamed chunks. The previous httpx
+# default (5s on read) caused MidStreamFallbackError storms. 180s gives the
+# model headroom while still flagging genuine stalls. Configurable via
+# KAIJU_BRIDGE_READ_TIMEOUT (seconds, integer or float).
+DEFAULT_READ_TIMEOUT = 180.0
+DEFAULT_CONNECT_TIMEOUT = 30.0
+
+
+def _bridge_timeout() -> "httpx.Timeout":
+    """Build the httpx.Timeout for upstream calls, honoring env overrides.
+
+    Env vars (all optional, all in seconds):
+      - KAIJU_BRIDGE_REQUEST_TIMEOUT  (overall, default 600)
+      - KAIJU_BRIDGE_READ_TIMEOUT     (per-chunk read, default 180)
+      - KAIJU_BRIDGE_CONNECT_TIMEOUT  (TCP connect, default 30)"""
+    def _f(env, default):
+        try:
+            return float(os.environ.get(env, "").strip() or default)
+        except (ValueError, TypeError):
+            return default
+    total = _f("KAIJU_BRIDGE_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+    read = _f("KAIJU_BRIDGE_READ_TIMEOUT", DEFAULT_READ_TIMEOUT)
+    connect = _f("KAIJU_BRIDGE_CONNECT_TIMEOUT", DEFAULT_CONNECT_TIMEOUT)
+    # httpx.Timeout takes a default (total) + named pool params.
+    return httpx.Timeout(total, connect=connect, read=read)
 
 # Headers that must never propagate inbound -> upstream.
 STRIP_HEADERS_IN = frozenset(
@@ -265,7 +292,7 @@ async def _forward_non_streaming(
             fwd_headers.setdefault("content-type", "application/json")
 
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(DEFAULT_REQUEST_TIMEOUT, connect=30.0)
+            timeout=_bridge_timeout()
         ) as client:
             try:
                 upstream = await client.request(
@@ -392,7 +419,7 @@ async def _stream_with_failover(
         fwd_headers.setdefault("content-type", "application/json")
 
         client = httpx.AsyncClient(
-            timeout=httpx.Timeout(DEFAULT_REQUEST_TIMEOUT, connect=30.0)
+            timeout=_bridge_timeout()
         )
         try:
             upstream_cm = client.stream(

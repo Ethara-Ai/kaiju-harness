@@ -131,6 +131,62 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
             or "ratelimiterror" in msg)
 
 
+# --------------------------------------------------------------------------
+# Transient network-error detection (Fix #5: connectivity hardening)
+#
+# Distinct from rate-limit errors: these are timeouts, connection resets,
+# and mid-stream aborts where Anthropic's edge layer dropped or stalled the
+# response. They retry FAST with bounded exponential backoff (5s/10s/20s)
+# rather than waiting for a rate-limit reset.
+#
+# We catch by name (not isinstance) so we don't take a hard dependency on
+# every possible httpx/httpcore version installed alongside litellm.
+# --------------------------------------------------------------------------
+_TRANSIENT_EXC_NAMES = (
+    "ReadTimeout", "WriteTimeout", "ConnectTimeout", "PoolTimeout",
+    "ReadError", "WriteError", "RemoteProtocolError", "ConnectError",
+    "NetworkError", "MidStreamFallbackError", "APIConnectionError",
+    "APITimeoutError",
+)
+
+_TRANSIENT_MSG_SIGNALS = (
+    "timed out", "timeout", "connection reset", "connection aborted",
+    "remote end closed", "server disconnected", "midstream",
+    "read timeout", "connection error",
+)
+
+# Default backoff schedule (seconds). Configurable via
+# KAIJU_CC_TRANSIENT_BACKOFF="5,10,20" env var.
+_DEFAULT_TRANSIENT_BACKOFF = (5, 10, 20)
+
+
+def _transient_backoff_schedule() -> tuple[int, ...]:
+    raw = os.environ.get("KAIJU_CC_TRANSIENT_BACKOFF", "").strip()
+    if not raw:
+        return _DEFAULT_TRANSIENT_BACKOFF
+    try:
+        out = tuple(int(x.strip()) for x in raw.split(",") if x.strip())
+        return out or _DEFAULT_TRANSIENT_BACKOFF
+    except ValueError:
+        return _DEFAULT_TRANSIENT_BACKOFF
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """Detect transient network errors (timeouts, connection drops, mid-stream aborts).
+
+    NOT the same as rate-limit errors (those use the dedicated rate-limit
+    detection path and pause-and-resume on /quota reset)."""
+    # Don't double-classify: a rate-limit error is also a network event but
+    # belongs on its own slower retry track.
+    if _is_rate_limit_error(exc):
+        return False
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _TRANSIENT_EXC_NAMES:
+            return True
+    msg = str(exc).lower()
+    return any(sig in msg for sig in _TRANSIENT_MSG_SIGNALS)
+
+
 def _extract_retry_after_from_error(exc: BaseException) -> Optional[int]:
     """Best-effort: pull a Retry-After hint from a litellm RateLimitError."""
     resp = getattr(exc, "response", None) or getattr(exc, "_response", None)
@@ -228,11 +284,33 @@ def run_with_recovery(
 
     effective_max_retries = _effective_max_retries(base_url, max_retries)
     max_pause = _max_pause_seconds()
-    attempt = 0
+    transient_backoff = _transient_backoff_schedule()
+    attempt = 0          # rate-limit retry counter
+    transient_attempt = 0  # transient-network retry counter (separate budget)
     while True:
         try:
             return fn(*args, **kwargs)
         except BaseException as exc:
+            # Branch 1: transient network error (timeout / connection drop / mid-stream)
+            if _is_transient_network_error(exc):
+                if transient_attempt >= len(transient_backoff):
+                    _LOG.error(
+                        "transient-error recovery exhausted after %d retries: %s",
+                        transient_attempt, exc,
+                    )
+                    raise
+                wait_s = transient_backoff[transient_attempt]
+                _LOG.warning(
+                    "transient network error (%s); retrying in %ds (attempt %d/%d). "
+                    "Heartbeating dir=%s to keep the inactivity watchdog quiet.",
+                    type(exc).__name__, wait_s, transient_attempt + 1, len(transient_backoff),
+                    _kaiju_log_dir,
+                )
+                _sleep_with_heartbeat(wait_s, _kaiju_log_dir)
+                transient_attempt += 1
+                continue
+
+            # Branch 2: rate-limit error
             if not _is_rate_limit_error(exc):
                 raise
             if attempt >= effective_max_retries:

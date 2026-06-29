@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import git
 
@@ -763,3 +763,265 @@ def summarize_rust_test_output(
         )
         return truncated, all_costs
     return parsed[:max_length], all_costs
+
+
+# ---------------------------------------------------------------------------
+# Per-edit compile gate (opt-in via AgentConfig.per_edit_compile_gate)
+# ---------------------------------------------------------------------------
+#
+# Wrap an aider.run() call so that AFTER each edit, we run `cargo check` and
+# REVERT the edit if it broke a file that compiled before. Without this gate,
+# bad edits accumulate (4 -> 43 errors observed on virtio-drivers Stage 2).
+#
+# Design choices (locked-in after user review, see compressed block b1):
+#   - Per-file detection: any rustc `error[Exxxx]: ... --> path/to/file.rs:LINE`
+#     spans are extracted; we intersect with files edited by this run.
+#   - Whole-module revert when retries exhaust: cleaner than cherry-picking
+#     individual file reverts, which would risk dangling references.
+#   - 2 retries by default: first retry feeds errors back to the LLM; second
+#     retry is the agent's last shot before we revert. Configurable via
+#     AgentConfig.compile_gate_max_retries.
+#   - cargo check on already-broken trees: we record the baseline error set
+#     at start; only NEW errors trigger revert. The agent isn't penalised for
+#     errors it inherited from a previous module.
+#   - Standalone helper (not a class) keeps the import surface flat and the
+#     unit tests trivial to write.
+
+
+_CARGO_ERROR_SPAN_RE = re.compile(
+    r"^\s*-->\s+([^\s:]+?\.rs):(?P<line>\d+):(?P<col>\d+)\s*$",
+    re.MULTILINE,
+    )
+_CARGO_ERROR_LINE_RE = re.compile(
+    r"^error(?:\[[A-Z]\d+\])?:\s", re.MULTILINE
+    )
+
+
+def _run_cargo_check(repo_path: str, timeout: int = 180) -> tuple[int, str]:
+    """Run ``cargo check --tests --message-format=short`` and return (rc, stderr).
+
+    Uses ``--message-format=short`` so error locations include the file:line
+    we want without the full multi-line span output (which can be huge).
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["cargo", "check", "--tests", "--all-features", "--message-format=short"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"cargo check timed out after {timeout}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return -1, f"cargo check failed to invoke: {exc}"
+    # cargo emits errors on stderr; combine with stdout in case any leaked.
+    return result.returncode, (result.stderr or "") + (result.stdout or "")
+
+
+def _extract_files_with_errors(cargo_output: str, repo_path: str) -> set[str]:
+    """Parse cargo's --message-format=short output into a set of absolute file paths.
+
+    Short format emits one line per diagnostic:
+        src/foo.rs:42:5: error[E0308]: mismatched types
+    Long format (which we may still see on some toolchains) emits multi-line
+    spans where the file appears on a `--> path:line:col` line.
+    """
+    broken: set[str] = set()
+    repo_path_abs = os.path.abspath(repo_path)
+    for line in cargo_output.splitlines():
+        # short format: `src/foo.rs:LINE:COL: error...`
+        m = re.match(r"^([^\s:]+?\.rs):\d+:\d+:\s*error", line)
+        if m:
+            rel = m.group(1)
+            broken.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+            continue
+        # long format span line
+        m2 = re.match(r"^\s*-->\s+([^\s:]+?\.rs):\d+:\d+", line)
+        if m2:
+            rel = m2.group(1)
+            broken.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+    return broken
+
+
+def _format_errors_for_prompt(cargo_output: str, max_chars: int = 4000) -> str:
+    """Trim cargo output to the most useful slice for re-prompting the LLM.
+
+    Keeps `error[...]:` lines + their immediately following context lines.
+    Caps at ``max_chars`` to keep prompt budget reasonable.
+    """
+    keep_lines: list[str] = []
+    in_error = False
+    error_context_remaining = 0
+    for line in cargo_output.splitlines():
+        if _CARGO_ERROR_LINE_RE.match(line):
+            keep_lines.append(line)
+            in_error = True
+            error_context_remaining = 3
+            continue
+        if in_error:
+            if error_context_remaining > 0:
+                keep_lines.append(line)
+                error_context_remaining -= 1
+            else:
+                in_error = False
+    out = "\n".join(keep_lines)
+    if len(out) > max_chars:
+        out = out[:max_chars] + "\n... [truncated]"
+    return out
+
+
+def _files_edited_since(repo_path: str, pre_sha: str) -> set[str]:
+    """Return absolute paths of `.rs` files changed since ``pre_sha`` (uncommitted included)."""
+    import subprocess
+    files: set[str] = set()
+    repo_path_abs = os.path.abspath(repo_path)
+    # Committed changes since pre_sha
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--name-only", pre_sha, "HEAD"],
+            cwd=repo_path, capture_output=True, text=True, timeout=30,
+        )
+        for rel in r.stdout.splitlines():
+            if rel.endswith(".rs"):
+                files.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+    except (subprocess.SubprocessError, OSError):
+        pass
+    # Uncommitted working-tree changes (aider sometimes leaves these)
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True, timeout=30,
+        )
+        for rel in r.stdout.splitlines():
+            if rel.endswith(".rs"):
+                files.add(os.path.normpath(os.path.join(repo_path_abs, rel)))
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return files
+
+
+def run_with_compile_gate(
+    run_aider_call: "Callable[[], Any]",
+    *,
+    repo_path: str,
+    local_repo: "Any",
+    pre_sha: str,
+    max_retries: int = 2,
+    cargo_timeout: int = 180,
+    on_revert: "Optional[Callable[[list, str], None]]" = None,
+    on_retry: "Optional[Callable[[int, list, str], None]]" = None,
+    re_prompt_callback: "Optional[Callable[[str], Any]]" = None,
+) -> dict:
+    """Invoke ``run_aider_call()`` then verify with cargo check; revert on regression.
+
+    Behaviour:
+      1. Capture baseline cargo error file-set BEFORE invoking aider.
+      2. Invoke ``run_aider_call()`` (caller wires the actual aider.run with args).
+      3. cargo check: if (new broken files - baseline) is empty, KEEP.
+      4. Otherwise, retry up to ``max_retries`` by calling
+         ``re_prompt_callback(error_text)`` which is expected to call aider again.
+      5. If still broken after retries, ``git reset --hard pre_sha`` to revert
+         the entire module's edits.
+
+    Returns a dict with keys:
+      - ``status``: "kept" | "reverted" | "clean_no_op"
+      - ``retries_used``: int
+      - ``baseline_broken_files``: list[str]
+      - ``final_broken_files``: list[str]
+      - ``regressions``: list[str]   # files the agent broke
+    """
+    # Baseline: errors that already exist BEFORE this module touches anything.
+    baseline_rc, baseline_out = _run_cargo_check(repo_path, timeout=cargo_timeout)
+    baseline_broken = _extract_files_with_errors(baseline_out, repo_path)
+    logger.info(
+        "CompileGate: baseline cargo check rc=%d, %d files with errors",
+        baseline_rc, len(baseline_broken),
+    )
+
+    # Step 1: initial aider call
+    run_aider_call()
+
+    for attempt in range(max_retries + 1):
+        rc, out = _run_cargo_check(repo_path, timeout=cargo_timeout)
+        if rc == 0:
+            return {
+                "status": "kept",
+                "retries_used": attempt,
+                "baseline_broken_files": sorted(baseline_broken),
+                "final_broken_files": [],
+                "regressions": [],
+            }
+
+        broken_now = _extract_files_with_errors(out, repo_path)
+        edited = _files_edited_since(repo_path, pre_sha)
+        # "Regressions" = files newly broken (not in baseline) AND touched by us.
+        regressions = sorted((broken_now - baseline_broken) & edited)
+
+        if not regressions:
+            # cargo unhappy, but not from anything we touched. Keep the edits.
+            logger.info(
+                "CompileGate: %d broken files but none are our edits; keeping. "
+                "(broken=%d, baseline=%d, edited=%d)",
+                len(broken_now), len(broken_now), len(baseline_broken), len(edited),
+            )
+            return {
+                "status": "kept",
+                "retries_used": attempt,
+                "baseline_broken_files": sorted(baseline_broken),
+                "final_broken_files": sorted(broken_now),
+                "regressions": [],
+            }
+
+        # We have regressions. If retries remain, re-prompt; else revert.
+        if attempt < max_retries and re_prompt_callback is not None:
+            err_text = _format_errors_for_prompt(out)
+            logger.warning(
+                "CompileGate: %d regressions from our edits (%s); retrying %d/%d",
+                len(regressions),
+                ", ".join(os.path.relpath(p, repo_path) for p in regressions[:3]),
+                attempt + 1, max_retries,
+            )
+            if on_retry is not None:
+                try:
+                    on_retry(attempt + 1, regressions, err_text)
+                except Exception:  # noqa: BLE001
+                    logger.exception("CompileGate on_retry callback raised")
+            try:
+                re_prompt_callback(err_text)
+            except Exception:  # noqa: BLE001
+                logger.exception("CompileGate re_prompt_callback raised; treating as failed retry")
+            continue
+
+        # No retries left -> revert entire module's edits.
+        logger.error(
+            "CompileGate: %d regressions remain after %d retries; reverting to %s",
+            len(regressions), max_retries, pre_sha[:8],
+        )
+        if on_revert is not None:
+            try:
+                on_revert(regressions, _format_errors_for_prompt(out))
+            except Exception:  # noqa: BLE001
+                logger.exception("CompileGate on_revert callback raised")
+        try:
+            local_repo.git.reset("--hard", pre_sha)
+        except Exception:  # noqa: BLE001
+            logger.exception("CompileGate: failed to git reset; module left in broken state")
+        return {
+            "status": "reverted",
+            "retries_used": attempt,
+            "baseline_broken_files": sorted(baseline_broken),
+            "final_broken_files": sorted(broken_now),
+            "regressions": regressions,
+        }
+
+    # Loop fell through (shouldn't happen)
+    return {
+        "status": "clean_no_op",
+        "retries_used": max_retries,
+        "baseline_broken_files": sorted(baseline_broken),
+        "final_broken_files": [],
+        "regressions": [],
+    }
+

@@ -274,3 +274,68 @@ def test_is_rate_limit_error_uses_real_litellm_class_when_available():
         import pytest as _pt
         _pt.skip("could not instantiate canonical RateLimitError in test")
     assert recovery._is_rate_limit_error(err)
+
+# ---------------------------------------------------------------------------
+# Fix #5: Transient network-error retry
+# ---------------------------------------------------------------------------
+
+
+class TestTransientNetworkErrorDetection:
+    def test_httpx_read_timeout_is_transient(self):
+        import httpx
+        from agent.claude_code.recovery import _is_transient_network_error
+
+        assert _is_transient_network_error(httpx.ReadTimeout("x")) is True
+
+    def test_httpx_connect_error_is_transient(self):
+        import httpx
+        from agent.claude_code.recovery import _is_transient_network_error
+
+        assert _is_transient_network_error(httpx.ConnectError("x")) is True
+
+    def test_rate_limit_is_NOT_transient(self):
+        """Rate-limit errors should go down the rate-limit branch, not the
+        transient branch. Otherwise we'd retry them on a 5s/10s/20s schedule
+        instead of waiting for the actual reset window."""
+        from agent.claude_code.recovery import _is_transient_network_error
+
+        assert _is_transient_network_error(Exception("rate_limit_error: cap reached")) is False
+
+    def test_message_based_transient_detection(self):
+        from agent.claude_code.recovery import _is_transient_network_error
+
+        assert _is_transient_network_error(Exception("Connection reset by peer")) is True
+        assert _is_transient_network_error(Exception("server disconnected")) is True
+        assert _is_transient_network_error(Exception("midstream error")) is True
+
+    def test_unknown_exception_is_not_transient(self):
+        from agent.claude_code.recovery import _is_transient_network_error
+
+        assert _is_transient_network_error(ValueError("bad value")) is False
+        assert _is_transient_network_error(KeyError("missing")) is False
+
+
+class TestTransientBackoffSchedule:
+    def test_default_schedule(self, monkeypatch):
+        monkeypatch.delenv("KAIJU_CC_TRANSIENT_BACKOFF", raising=False)
+        from agent.claude_code.recovery import _transient_backoff_schedule
+
+        assert _transient_backoff_schedule() == (5, 10, 20)
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("KAIJU_CC_TRANSIENT_BACKOFF", "2,4,8,16")
+        from agent.claude_code.recovery import _transient_backoff_schedule
+
+        assert _transient_backoff_schedule() == (2, 4, 8, 16)
+
+    def test_invalid_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("KAIJU_CC_TRANSIENT_BACKOFF", "not,a,number")
+        from agent.claude_code.recovery import _transient_backoff_schedule
+
+        assert _transient_backoff_schedule() == (5, 10, 20)
+
+    def test_empty_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("KAIJU_CC_TRANSIENT_BACKOFF", "")
+        from agent.claude_code.recovery import _transient_backoff_schedule
+
+        assert _transient_backoff_schedule() == (5, 10, 20)
