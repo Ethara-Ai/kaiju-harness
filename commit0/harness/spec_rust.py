@@ -52,7 +52,7 @@ class RustSpec(Spec):
             "git submodule update --init --recursive 2>/dev/null || true",
             "git remote remove origin",
             f"git reset --hard {base_commit}",
-            "cargo fetch 2>/dev/null || true",
+            "timeout 600 cargo fetch 2>/dev/null || true",
         ]
 
     def make_eval_script_list(self) -> list[str]:

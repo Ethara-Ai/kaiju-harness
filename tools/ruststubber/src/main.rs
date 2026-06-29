@@ -427,8 +427,15 @@ fn main() {
         };
 
         let options = StubOptions { strip_docs: !cli.keep_docs };
-        match stub_source_with_options(&source, options) {
-            Ok(output) => {
+        // Re-emitting via `prettyplease` PANICS on a few constructs it can't
+        // format (e.g. `#[rustfmt::skip] use {...}` groups in edition-2024
+        // crates). Catch the unwind so one unsupported file is skipped (left
+        // as-is in --in-place mode) instead of aborting the entire run.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stub_source_with_options(&source, options)
+        }));
+        match result {
+            Ok(Ok(output)) => {
                 if let Err(e) = fs::write(&dest_path, output) {
                     eprintln!("Error writing {}: {e}", dest_path.display());
                     errors += 1;
@@ -436,8 +443,18 @@ fn main() {
                     stubbed += 1;
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("Error parsing {}: {e}", src_path.display());
+                errors += 1;
+            }
+            Err(_) => {
+                eprintln!(
+                    "Skipping {} (stubber panicked on unsupported syntax; left unstubbed)",
+                    src_path.display()
+                );
+                if !cli.in_place {
+                    let _ = fs::copy(src_path, &dest_path);
+                }
                 errors += 1;
             }
         }

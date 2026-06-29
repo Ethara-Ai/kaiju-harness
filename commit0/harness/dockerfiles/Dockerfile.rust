@@ -46,11 +46,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Add the components and binaries the harness relies on:
 #   - rustfmt + clippy: required for Stage 2 (lint refine)
 #   - cargo-nextest:    used by the Rust test runner (JSON output parsing)
-# Pin nextest with --locked so the image is reproducible across builds.
+# Install nextest from its prebuilt per-arch binary instead of `cargo install`
+# (source compile), which fails under QEMU emulation during multi-arch builds.
 RUN rustup component add rustfmt clippy && \
-    cargo install cargo-nextest --locked --version ^0.9 && \
-    rustc --version && cargo --version && rustfmt --version && \
-    cargo clippy --version && cargo nextest --version
+    case "${TARGETARCH}" in \
+      arm64) NEXTEST_PLATFORM=linux-arm ;; \
+      *)     NEXTEST_PLATFORM=linux ;; \
+    esac && \
+    curl -LsSf "https://get.nexte.st/latest/${NEXTEST_PLATFORM}" | tar zxf - -C ${CARGO_HOME}/bin && \
+    cargo --version && cargo nextest --version
+# rustc/rustfmt/clippy --version checks are omitted on purpose: those binaries
+# SIGSEGV under qemu-user during the emulated amd64 multi-arch build (cargo and
+# nextest run fine). The components are installed above and work natively when
+# the amd64 image runs on real amd64 hardware.
 
 # Cross-distro SSL cert symlinks for libraries that look in RHEL/Fedora paths
 RUN mkdir -p /etc/pki/tls/certs /etc/pki/tls /etc/pki/ca-trust/extracted/pem /etc/ssl/certs && \
