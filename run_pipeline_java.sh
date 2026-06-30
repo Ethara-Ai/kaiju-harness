@@ -1224,6 +1224,7 @@ cleanup() {
         sleep 2
         kill_tree "$AGENT_PID" 9
     fi
+    _claude_code_bridge_cleanup
 }
 trap cleanup EXIT
 trap 'exit' INT TERM
