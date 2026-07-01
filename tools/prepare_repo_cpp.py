@@ -126,14 +126,21 @@ def detect_build_system(repo_dir: Path) -> str:
     )
 
 
-def generate_compile_commands(repo_dir: Path, build_system: str) -> bool:
+def generate_compile_commands(
+    repo_dir: Path,
+    build_system: str,
+    cmake_options: list[str] | None = None,
+) -> bool:
     logger.info("Generating compile_commands.json (build_system=%s)...", build_system)
 
     if build_system == "cmake":
         build_dir = repo_dir / "build"
         build_dir.mkdir(exist_ok=True)
+        cmake_cfg_cmd: list[str] = ["cmake", "-B", "build", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+        if cmake_options:
+            cmake_cfg_cmd.extend(cmake_options)
         result = subprocess.run(
-            ["cmake", "-B", "build", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+            cmake_cfg_cmd,
             cwd=repo_dir, capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
@@ -303,8 +310,23 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
     return ok, fail
 
 
-def verify_compiles(repo_dir: Path, build_system: str) -> bool:
+def verify_compiles(
+    repo_dir: Path,
+    build_system: str,
+    cmake_options: list[str] | None = None,
+) -> bool:
     logger.info("Verifying compilation (build_system=%s)...", build_system)
+
+    if build_system == "cmake" and cmake_options:
+        reconfigure = subprocess.run(
+            ["cmake", "-B", "build", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", *cmake_options],
+            cwd=repo_dir, capture_output=True, text=True, timeout=300,
+        )
+        if reconfigure.returncode != 0:
+            logger.warning(
+                "cmake reconfigure with %s failed: %s",
+                cmake_options, reconfigure.stderr[:500],
+            )
 
     if build_system == "cmake":
         cmd = ["cmake", "--build", "build", "-j4"]
@@ -407,9 +429,16 @@ def create_dataset_entry(
     spec_url: str = "",
     version_source: str = "default",
     version_conflicts: list[str] | None = None,
+    cmake_options: list[str] | None = None,
 ) -> dict:
     primary_src = src_dirs[0] if src_dirs else "."
     test_dir = primary_src.rsplit("/src", 1)[0] if "/src" in primary_src else "."
+
+    cmake_opts_str = (" " + " ".join(cmake_options)) if cmake_options else ""
+    install_cmake = (
+        f"cmake -B build{cmake_opts_str} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+        " && cmake --build build -j$(nproc)"
+    )
 
     return {
         "instance_id": f"commit-0/{repo_name}",
@@ -423,7 +452,7 @@ def create_dataset_entry(
             "packages": packages,
             "specification": spec_url,
             "pre_install": [],
-            "install": "cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && cmake --build build -j$(nproc)"
+            "install": install_cmake
             if build_system == "cmake"
             else "meson setup builddir && ninja -C builddir"
             if build_system == "meson"
@@ -577,6 +606,7 @@ def prepare_cpp_repo(
     skip_spec: bool = False,
     spec_url: str = "",
     build_system: str = "auto",
+    cmake_options: list[str] | None = None,
 ) -> dict | None:
     repo_name = upstream.split("/")[-1]
 
@@ -609,7 +639,7 @@ def prepare_cpp_repo(
         git(repo_dir, "checkout", "commit0_all")
         git(repo_dir, "reset", "--hard", default_branch)
 
-    has_cc = generate_compile_commands(repo_dir, build_system)
+    has_cc = generate_compile_commands(repo_dir, build_system, cmake_options=cmake_options)
     if has_cc:
         logger.info("compile_commands.json generated")
     else:
@@ -632,7 +662,7 @@ def prepare_cpp_repo(
         logger.info("Stripped trailing null bytes from %d files", cleaned)
 
     if not skip_compile_check:
-        if not verify_compiles(repo_dir, build_system):
+        if not verify_compiles(repo_dir, build_system, cmake_options=cmake_options):
             logger.error("Stubbed code does not compile. Aborting.")
             return None
 
@@ -723,6 +753,7 @@ def prepare_cpp_repo(
         test_framework=test_framework,
         packages=packages,
         spec_url=readme_spec_url or spec_url,
+        cmake_options=cmake_options,
     )
 
     if not dry_run:
@@ -803,6 +834,15 @@ def main() -> None:
         choices=["auto", "cmake", "meson", "autotools", "make"],
         help="Build system to use (default: auto-detect)",
     )
+    parser.add_argument(
+        "--cmake-options", nargs="+", default=None, metavar="OPT",
+        help=(
+            "Extra CMake -D options to inject into BOTH the dataset's setup.install line "
+            "(used by the Docker build) AND the local cmake configure/verify steps. "
+            "Example: --cmake-options -DCXXOPTS_ENABLE_WARNINGS=OFF -DCXXOPTS_BUILD_TESTS=ON. "
+            "Required for repos that ship -Werror by default."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -830,6 +870,7 @@ def main() -> None:
         skip_spec=args.skip_spec,
         spec_url=args.spec_url,
         build_system=args.build_system,
+        cmake_options=args.cmake_options,
     )
 
     if entry is None:

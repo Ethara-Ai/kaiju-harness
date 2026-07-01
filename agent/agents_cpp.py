@@ -70,9 +70,13 @@ class CppAiderAgents(AiderAgents):
 
         log_file = log_dir / "aider.log"
 
-        _log_handle = open(log_file, "a")
         _saved_stdout = sys.stdout
         _saved_stderr = sys.stderr
+        try:
+            _log_handle = open(log_file, "a")
+        except OSError as e:
+            _logger.error("Failed to redirect stdout/stderr to %s: %s", log_file, e)
+            raise
         sys.stdout = _log_handle
         sys.stderr = _log_handle
 
@@ -255,7 +259,7 @@ class CppAiderAgents(AiderAgents):
             try:
                 _log_handle.close()
             except Exception:
-                pass
+                _logger.debug("Failed to close redirected stdout/stderr", exc_info=True)
 
         agent_return = AiderReturn(log_file)
         agent_return.test_summarizer_cost = sum(c.cost for c in _test_summarizer_costs)

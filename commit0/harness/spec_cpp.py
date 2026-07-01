@@ -113,8 +113,7 @@ class CppSpec(Spec):
             f"git apply -v {diff_path} || git apply {diff_path} || true",
             revert_test_paths,
             "git status",
-            f"{build_cmd}",
-            f"{test_cmd} {{test_ids}} > test_output.txt 2>&1",
+            f"{{{{ {build_cmd} && {test_cmd} {{test_ids}}; }}}} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",
         ]
 

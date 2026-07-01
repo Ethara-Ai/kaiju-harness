@@ -16,7 +16,79 @@ __all__ = [
     "parse_boost_test_output",
     "parse_ctest_output",
     "parse_cpp_test_output",
+    "parse_cmake_build_attribution",
 ]
+
+
+def parse_cmake_build_attribution(output: str) -> Dict[str, List[str]]:
+    """Scan ``cmake --build`` output for per-target build success/failure.
+
+    Returns a dict with three keys:
+      - ``built``:  list of target names that finished linking
+      - ``failed``: list of target names whose object compile or link failed
+      - ``tests_built``:  ``built`` filtered to entries ending in ``-test``,
+        ``_test``, or ``.testbin`` (the convention CMake test fixtures use)
+      - ``tests_failed``: same filter applied to ``failed``
+
+    Supports ``cmake --build build -k 0`` style output where the build keeps
+    going after one target fails. A target counts as ``failed`` if any of its
+    object files or its link step errors out, regardless of whether other
+    targets in the same build completed.
+    """
+    built: List[str] = []
+    failed: List[str] = []
+
+    seen_built = set()
+    seen_failed = set()
+
+    for line in output.splitlines():
+        built_match = re.search(r"Built target\s+(\S+)", line)
+        if built_match:
+            name = built_match.group(1).strip()
+            if name not in seen_built:
+                seen_built.add(name)
+                built.append(name)
+            continue
+
+        target_dir_fail = re.search(
+            r"CMakeFiles/([^/\s]+)\.dir/.+?\]\s+Error\s+\d+", line
+        )
+        if target_dir_fail:
+            name = target_dir_fail.group(1).strip()
+            if name not in seen_failed:
+                seen_failed.add(name)
+                failed.append(name)
+            continue
+
+        target_all_fail = re.search(
+            r"CMakeFiles/([^/\s]+)\.dir/all['\"\]]?\s+Error\s+\d+", line
+        )
+        if target_all_fail:
+            name = target_all_fail.group(1).strip()
+            if name not in seen_failed:
+                seen_failed.add(name)
+                failed.append(name)
+
+    def _is_test_target(name: str) -> bool:
+        n = name.lower()
+        return (
+            n.endswith("-test")
+            or n.endswith("_test")
+            or n.endswith("-tests")
+            or n.endswith("_tests")
+            or n.endswith(".testbin")
+            or n.endswith("-testbin")
+        )
+
+    tests_built = [t for t in built if _is_test_target(t)]
+    tests_failed = [t for t in failed if _is_test_target(t)]
+
+    return {
+        "built": built,
+        "failed": failed,
+        "tests_built": tests_built,
+        "tests_failed": tests_failed,
+    }
 
 
 @dataclass

@@ -52,6 +52,18 @@ def validate_cpp_entry(entry: dict) -> List[str]:
         issues.append("'test' must be a dict")
     elif not test.get("test_cmd"):
         issues.append("test.test_cmd is required")
+    elif isinstance(test, dict):
+        repo_root = Path(__file__).resolve().parents[1]
+        scripts_dir = repo_root / "scripts"
+        import sys as _sys
+        if str(scripts_dir) not in _sys.path:
+            _sys.path.insert(0, str(scripts_dir))
+        try:
+            from validate_cpp_dataset import lint_cmd
+            for label, hint in lint_cmd(test["test_cmd"]):
+                issues.append(f"test.test_cmd: {label} -- {hint.splitlines()[0]}")
+        except ImportError:
+            pass
 
     if not entry.get("src_dir"):
         issues.append("src_dir is required")

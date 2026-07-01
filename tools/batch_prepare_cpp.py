@@ -78,18 +78,23 @@ def parse_csv(csv_path: Path) -> list[dict[str, str]]:
     return repos
 
 
-def _make_test_cmd(build_system: str, test_framework: str) -> str:
-    """Build a test command string for the given framework."""
-    if test_framework in ("gtest", "ctest"):
-        return "ctest --test-dir build --output-junit /testbed/test_results.xml --timeout 60"
-    if test_framework == "catch2":
-        return "./build/tests/test_all -r junit -o /testbed/test_results.xml"
-    if test_framework == "doctest":
-        return "./build/tests/test_all --reporters=junit --out=/testbed/test_results.xml"
-    if test_framework == "boost_test":
-        return "./build/tests/test_all --logger=JUNIT,message,/testbed/test_results.xml"
-    # Fallback to CTest
-    return "ctest --test-dir build --output-junit /testbed/test_results.xml --timeout 60"
+def _make_test_cmd(
+    build_system: str,
+    test_framework: str,
+    configure_cmd: str = "",
+) -> str:
+    """Build the canonical full test_cmd (configure && build with -k 0; test).
+
+    Delegates to ``scripts/validate_cpp_dataset.build_canonical_test_cmd`` so
+    every cpp dataset builder shares one source of truth and passes the
+    pipeline preflight validator without further edits.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    scripts_dir = repo_root / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from validate_cpp_dataset import build_canonical_test_cmd
+    return build_canonical_test_cmd(build_system, test_framework, configure_cmd)
 
 
 def _detect_src_dir(repo_dir: Path) -> str:

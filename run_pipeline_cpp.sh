@@ -31,9 +31,11 @@ VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
 
-# C++ pipeline — hardcoded language and no spec info
+# C++ pipeline — hardcoded language; spec-info now user-toggleable (see --no-spec-info)
 LANGUAGE="cpp"
-USE_SPEC_INFO="false"
+USE_SPEC_INFO="${USE_SPEC_INFO:-false}"
+COMMIT0_BUILD_PLATFORMS="${COMMIT0_BUILD_PLATFORMS:-linux/amd64,linux/arm64}"
+export COMMIT0_BUILD_PLATFORMS
 
 # ============================================================
 # Argument Parsing
@@ -90,6 +92,7 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 7200)
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
+  --no-spec-info             Disable spec/README injection into agent prompt (default: enabled-when-true)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
   --blind-lint               Stage 2 sees only "lint failed: N issues" (default: full output)
@@ -114,6 +117,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -203,7 +207,7 @@ resolve_model() {
             CACHE_PROMPTS="false"
             ;;
         gpt55)
-            MODEL_NAME="openai/gpt-5.5-2026-04-23"
+            MODEL_NAME="${OPENAI_GPT55_MODEL:-openai/gpt-5.5}"
             MODEL_SHORT="gpt-5.5"
             CACHE_PROMPTS="false"
             ;;
@@ -232,13 +236,28 @@ resolve_model() {
             MODEL_SHORT="gemini-3.1-pro"
             CACHE_PROMPTS="false"
             ;;
+        opus48cc|opus48claudecode|claude-opus-4-8-claudecode)
+            MODEL_NAME="anthropic/claude-opus-4-8"
+            MODEL_SHORT="claude-opus-4.8-cc"
+            CACHE_PROMPTS="true"
+            ;;
+        opus47cc|opus47claudecode|claude-opus-4-7-claudecode)
+            MODEL_NAME="anthropic/claude-opus-4-7"
+            MODEL_SHORT="claude-opus-4.7-cc"
+            CACHE_PROMPTS="true"
+            ;;
+        sonnet46cc|sonnet46claudecode|claude-sonnet-4-6-claudecode)
+            MODEL_NAME="anthropic/claude-sonnet-4-6"
+            MODEL_SHORT="claude-sonnet-4.6-cc"
+            CACHE_PROMPTS="true"
+            ;;
         *)
             MODEL_NAME="$arg"
             MODEL_SHORT=$(echo "$arg" | sed 's|.*/||' | tr -dc 'a-zA-Z0-9._-' | cut -c1-20)
             if [[ -z "$MODEL_SHORT" ]]; then
                 MODEL_SHORT="custom"
             fi
-            if [[ "$arg" == bedrock/*claude* ]] || [[ "$arg" == bedrock/*anthropic* ]]; then
+            if [[ "$arg" == bedrock/*claude* ]] || [[ "$arg" == bedrock/*anthropic* ]] || [[ "$arg" == anthropic/* ]]; then
                 CACHE_PROMPTS="true"
             else
                 CACHE_PROMPTS="false"
@@ -487,6 +506,10 @@ for item in data:
                 fi
             done <<< "$repos_in_dataset"
         fi
+
+        if ! "$VENV_PYTHON" "${BASE_DIR}/scripts/validate_cpp_dataset.py" "$DATASET_FILE"; then
+            errors=$((errors + 1))
+        fi
     fi
 
     if [[ "$errors" -gt 0 ]]; then
@@ -657,6 +680,7 @@ write_agent_config() {
     local run_entire_dir_lint="$3"
     local use_unit_tests_info="$4"
     local add_import_module_to_context="$5"
+    local use_spec_info="${6:-${USE_SPEC_INFO:-false}}"
 
     local user_prompt='Here is your task:
 
@@ -690,7 +714,7 @@ use_repo_info: false
 max_repo_info_length: 10000
 use_unit_tests_info: ${use_unit_tests_info}
 max_unit_tests_info_length: 10000
-use_spec_info: false
+use_spec_info: ${use_spec_info}
 max_spec_info_length: 10000
 spec_summary_max_tokens: 4000
 use_lint_info: ${use_lint_info}
@@ -741,12 +765,26 @@ watchdog_run() {
     local hard_timeout_warned="false"
     local mtime_functional="true"
 
-    # Validate get_mtime works before relying on it
     local _probe_mtime
     _probe_mtime=$(get_mtime "/proc/self/status")
     if [[ "$_probe_mtime" -eq 0 ]] 2>/dev/null; then
         log "  WATCHDOG: WARNING — get_mtime returned 0 for /proc/self/status. File-activity detection may be non-functional."
         mtime_functional="false"
+        log "  WATCHDOG: Inactivity-timeout effectively disabled; relying only on absolute wall-time cap."
+    fi
+
+    if [[ "$mtime_functional" == "false" ]] && [[ "$absolute_max" -gt 0 ]]; then
+        local _orig_max="$absolute_max"
+        local _floor="${WATCHDOG_MTIME_FALLBACK_MIN_SECS:-3600}"
+        if ! [[ "$_floor" =~ ^[0-9]+$ ]] || [[ "$_floor" -lt 1 ]]; then
+            log "  WATCHDOG: WARNING — WATCHDOG_MTIME_FALLBACK_MIN_SECS='$_floor' invalid; using 3600s."
+            _floor=3600
+        fi
+        absolute_max=$(( absolute_max / 2 ))
+        if [[ "$absolute_max" -lt "$_floor" ]]; then
+            absolute_max="$_floor"
+        fi
+        log "  WATCHDOG: mtime non-functional — tightened absolute_max from ${_orig_max}s to ${absolute_max}s (floor=${_floor}s)."
     fi
 
     while kill -0 "$agent_pid" 2>/dev/null; do
@@ -862,6 +900,8 @@ run_agent() {
         cmd+=(--override-previous-changes)
     fi
 
+    : "${log_dir:?log_dir must be set before run_agent()}"
+    mkdir -p "$log_dir"
     local agent_log="${log_dir}/agent_run.log"
     log "  Running agent (watchdog: inactivity=${INACTIVITY_TIMEOUT}s, hard=${STAGE_TIMEOUT}s, wall-cap=${MAX_WALL_TIME}s)"
     log "  Command: ${cmd[*]}"
@@ -918,6 +958,8 @@ run_evaluate() {
         --num-workers 1
     )
 
+    : "${LOG_BASE:?LOG_BASE must be set before run_evaluate()}"
+    mkdir -p "$LOG_BASE"
     local eval_log="${LOG_BASE}/${stage_label}_eval.log"
     log "  Running evaluation: ${cmd[*]}"
     log "  Output → ${eval_log}"
@@ -1129,7 +1171,7 @@ stage_1_draft() {
     log "STAGE 1: Draft Initial Implementations"
     log "======================================================================"
 
-    write_agent_config "false" "false" "false" "true" "false"
+    write_agent_config "false" "false" "false" "true" "false" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
@@ -1177,7 +1219,7 @@ stage_2_lint_refine() {
     log "STAGE 2: Refine with Static Analysis (Lint)"
     log "======================================================================"
 
-    write_agent_config "false" "true" "true" "false" "false"
+    write_agent_config "false" "true" "true" "false" "false" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage2_lint"
     mkdir -p "$stage_log_dir"
@@ -1238,7 +1280,7 @@ stage_3_test_refine() {
         log "  Stage 3 lint DISABLED (--no-stage3-lint)"
     fi
 
-    write_agent_config "true" "$s3_lint" "false" "false" "false"
+    write_agent_config "true" "$s3_lint" "false" "false" "false" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage3_tests"
     mkdir -p "$stage_log_dir"
@@ -1348,7 +1390,7 @@ print_summary_table() {
 PIPELINE_SUCCESS="false"
 
 cleanup() {
-    if [[ -n "$AGENT_PID" ]] && kill -0 "$AGENT_PID" 2>/dev/null; then
+    if [[ "$AGENT_PID" =~ ^[1-9][0-9]*$ ]] && kill -0 "$AGENT_PID" 2>/dev/null; then
         kill -- -"$AGENT_PID" 2>/dev/null || true
         sleep 2
         kill -9 -- -"$AGENT_PID" 2>/dev/null || true

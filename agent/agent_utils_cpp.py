@@ -220,10 +220,14 @@ def _get_dir_tree(dir_path: str, max_depth: int = 2, _depth: int = 0) -> str:
     return "\n".join(filter(None, lines))
 
 
+_MAX_DEP_CONTEXT_CHARS = 50_000
+
+
 def get_message_cpp(
     agent_config: AgentConfig,
     repo_path: str,
     test_files: Optional[list[str]] = None,
+    target_files: Optional[list[str]] = None,
 ) -> tuple[str, list[SummarizerCost]]:
     spec_costs: list[SummarizerCost] = []
 
@@ -235,11 +239,14 @@ def get_message_cpp(
         template = agent_config.user_prompt
 
     repo_name = os.path.basename(os.path.normpath(repo_path))
-    target_files = get_target_edit_files_cpp(repo_path)
+    if target_files is None:
+        target_files = get_target_edit_files_cpp(repo_path)
 
     function_lines: list[str] = []
     all_dep_content: list[str] = []
     seen_deps: set[str] = set()
+    dep_chars = 0
+    dep_cap_reached = False
 
     for fpath in target_files:
         stubs = extract_cpp_function_stubs(fpath)
@@ -249,6 +256,8 @@ def get_message_cpp(
                 f"- {stub['name']} ({rel}:{stub['line']}): {stub['signature']}"
             )
 
+        if dep_cap_reached:
+            continue
         deps = get_cpp_file_dependencies(fpath)
         base_dir = os.path.dirname(fpath)
         for dep in deps:
@@ -263,7 +272,18 @@ def get_message_cpp(
                     with open(dep_file, "r", encoding="utf-8", errors="ignore") as fh:
                         dep_lines = fh.readlines()[:200]
                     dep_rel = os.path.relpath(dep_file, repo_path)
-                    all_dep_content.append(f"// --- {dep_rel} ---\n" + "".join(dep_lines))
+                    block = f"// --- {dep_rel} ---\n" + "".join(dep_lines)
+                    remaining = _MAX_DEP_CONTEXT_CHARS - dep_chars
+                    if remaining <= 0:
+                        dep_cap_reached = True
+                        break
+                    if len(block) > remaining:
+                        block = block[:remaining] + "\n// ... dep_context cap reached ...\n"
+                        dep_cap_reached = True
+                    all_dep_content.append(block)
+                    dep_chars += len(block)
+                    if dep_cap_reached:
+                        break
                 except OSError:
                     pass
 
