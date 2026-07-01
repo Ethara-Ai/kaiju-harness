@@ -50,6 +50,7 @@ OUTCOME_TEST_SUITE_TIMEOUT = "TEST_SUITE_TIMEOUT"  # killed by `timeout` (or wat
 OUTCOME_NO_TESTS_DEFINED = "NO_TESTS_DEFINED"      # `cargo test` ran but `running 0 tests`
 OUTCOME_OUTPUT_MISSING = "OUTPUT_MISSING"          # test_output.txt absent / unreadable
 OUTCOME_PARSER_NO_MATCH = "PARSER_NO_MATCH"        # content present but doesn't match known formats
+OUTCOME_INFRA_FETCH_FAILED = "INFRA_FETCH_FAILED"  # A10: cargo couldn't fetch deps (network) — NOT a model failure
 
 # Sniffing patterns for outcome classification.
 _COMPILE_ERR_RE = re.compile(r"^error(?:\[E\d+\])?:", re.MULTILINE)
@@ -62,6 +63,23 @@ _RUNTIME_ERR_RE = re.compile(
 )
 _RUNNING_ZERO_RE = re.compile(r"^running\s+0\s+tests\s*$", re.MULTILINE)
 _PATCH_FAIL_SENTINEL = "PATCH APPLY FAILED"
+# Cheat-guard sentinel written by the eval script when the model edited in-`src`
+# test code (see run_rust_tests). Scored runs carrying it are flagged, not passed.
+_CHEAT_SENTINEL = "CHEAT_DETECTED"
+# A10: written by the eval script when cargo failed to fetch dependencies
+# (network/registry). Such a run is infra-broken, NOT a real compile/test 0%.
+_FETCH_FAIL_SENTINEL = "INFRA_FETCH_FAILED"
+# `cargo test --list` reports doctests as `path/file.rs - some::Item (line N): test`.
+# The libtest TEXT parser only counts unit/integration `test <name> ... ok` lines —
+# the doctest binary's runner uses a different format the parser cannot read. So a
+# doctest-inclusive denominator vs a doctest-blind numerator caps a PERFECT solution
+# below 1.0 (e.g. 17/35=0.486). Drop doctests from the canonical inventory so the
+# denominator matches what the numerator can actually observe.
+# Anchor to the actual `cargo test --list` doctest format:
+#   `path/to/file.rs - some::Item (line N): test`
+# Requiring a `.rs ` path prefix avoids false-dropping a legit unit/integration
+# test whose NAME merely contains ` - ` and `(line N)` (those have no `.rs` path).
+_DOCTEST_INVENTORY_RE = re.compile(r"^\S+\.rs\s+-\s+.+\(line\s+\d+\)")
 
 
 def _read_exit_code(log_dir: str) -> int | None:
@@ -97,10 +115,19 @@ def _load_rust_test_ids(repo_name: str) -> list[str] | None:
     )
     try:
         with bz2.open(p, "rt") as f:
-            return [line.strip() for line in f if line.strip()]
+            ids = [line.strip() for line in f if line.strip()]
     except (OSError, EOFError) as e:
         logger.debug("rust_test_ids missing for %s (%s): %s", repo_name, p, e)
         return None
+    # Exclude doctests so the denominator matches the doctest-blind numerator.
+    unit = [i for i in ids if not _DOCTEST_INVENTORY_RE.search(i)]
+    dropped = len(ids) - len(unit)
+    if dropped:
+        logger.info(
+            "%s: dropped %d doctest entries from canonical inventory (%d unit tests remain)",
+            repo_name, dropped, len(unit),
+        )
+    return unit
 
 
 
@@ -116,6 +143,12 @@ def _classify_eval_outcome(log_dir: str, content: str) -> tuple[str, str]:
     if _PATCH_FAIL_SENTINEL in content[:4096]:
         return (OUTCOME_PATCH_APPLY_FAILED,
                 "patch failed to apply — check git_apply_stderr.log")
+    # A10: a fetch/network failure must be classified BEFORE COMPILE_FAILED — a
+    # failed dep download also emits `error:` lines that would otherwise be
+    # miscounted as the model's compile errors and scored as a real 0%.
+    if _FETCH_FAIL_SENTINEL in content:
+        return (OUTCOME_INFRA_FETCH_FAILED,
+                "cargo could not fetch dependencies (network/registry) — infra, not a model failure")
     exit_code = _read_exit_code(log_dir)
     n_compile_errors = _count_compile_errors(content)
     # Compile failure: rustc exit 101 with error lines, OR error lines visible even
@@ -182,6 +215,24 @@ def _aggregate_rust_results(
         num_passed = summary.get("passed", 0)
         observed_total = summary.get("total", 0)
         num_tests = canonical_total if canonical_total is not None else observed_total
+        # A8: the canonical inventory is collected at the reference_commit while
+        # eval runs at the patched base. If `#[cfg]`/feature gating differs between
+        # the two (e.g. a feature toggled by an un-reverted Cargo.toml, or a
+        # platform cfg), the observed test set diverges from the inventory. The
+        # extracted-flags + Cargo.toml-revert guards make this rare, but surface it
+        # loudly when observed != canonical so a silent denominator drift is caught.
+        # Only warn when we observed FEWER tests than the canonical inventory — that
+        # means tests that should exist didn't run (cfg/feature-gated out, a real
+        # drift symptom). observed > canonical is EXPECTED and benign (e.g. the
+        # inventory drops doctests but the live run may print some), so it must not
+        # trigger a spurious "drift" warning.
+        if canonical_total is not None and observed_total < canonical_total:
+            logger.warning(
+                "%s: A8 possible cfg/feature drift — observed only %d tests but the "
+                "canonical inventory has %d (reference_commit vs patched base); some "
+                "tests may be gated out. num_tests uses the canonical total.",
+                name, observed_total, canonical_total,
+            )
         # Guard against a stale/short canonical inventory: the total can never be
         # below what we actually observed, and passes can never exceed the total.
         # Without this, a smaller bz2 than the live run yields passed_rate > 1.0
@@ -195,12 +246,29 @@ def _aggregate_rust_results(
         # short — observed_total is a lower bound; canonical_total (when present)
         # is the authoritative ceiling.
         exit_code = _read_exit_code(log_dir)
-        if exit_code in (124, 137, 143):
+        # Read raw output once for sentinel checks (timeout / cheat).
+        try:
+            _raw = open(test_output_file, "r", encoding="utf-8", errors="replace").read()
+        except OSError:
+            _raw = ""
+        status = OUTCOME_TESTS_RAN
+        # Only 124 (timeout) / 137 (SIGKILL from --kill-after) mean OUR inner
+        # `timeout` cut the suite short. 143 (SIGTERM) is dropped here: a run that
+        # already produced parseable test results was NOT mid-run-killed by us, and
+        # 143 can come from unrelated causes — zeroing it would discard a real run.
+        if exit_code in (124, 137):
+            # The suite was KILLED mid-run; a partial pass count is NOT a score.
+            status = OUTCOME_TEST_SUITE_TIMEOUT
             logger.warning(
-                "%s: %d/%d tests recovered but suite was killed by timeout "
-                "(exit %s) — actual total is likely higher",
-                name, num_passed, num_tests, exit_code,
+                "%s: suite killed by timeout (exit %s) after %d/%d — NOT scored as TESTS_RAN",
+                name, exit_code, num_passed, num_tests,
             )
+        elif _CHEAT_SENTINEL in _raw:
+            status = "CHEAT_DETECTED"
+            logger.warning("%s: CHEAT_DETECTED — model edited in-src test code; flagging", name)
+        elif _FETCH_FAIL_SENTINEL in _raw:
+            status = OUTCOME_INFRA_FETCH_FAILED
+            logger.warning("%s: INFRA_FETCH_FAILED — cargo couldn't fetch deps; NOT scored as a model failure", name)
         elif num_failed > 0:
             logger.info(
                 "%s: TESTS_RAN — %d passed, %d failed of %d total",
@@ -210,17 +278,27 @@ def _aggregate_rust_results(
             logger.info(
                 "%s: TESTS_RAN — %d/%d passed", name, num_passed, num_tests,
             )
-        if canonical_total is not None:
+        if status == OUTCOME_TEST_SUITE_TIMEOUT:
+            status_detail = f"killed by timeout after {num_passed}/{num_tests}; pass rate NOT valid"
+        elif status == "CHEAT_DETECTED":
+            status_detail = f"in-src test code modified; {num_passed}/{num_tests} NOT trusted"
+        elif status == OUTCOME_INFRA_FETCH_FAILED:
+            status_detail = f"dependency fetch failed (infra); {num_passed}/{num_tests} NOT a valid score"
+        elif canonical_total is not None:
             status_detail = f"{num_passed}/{num_tests} passed, {num_tests - num_passed} failed_or_missing"
         else:
             status_detail = f"{num_passed}/{num_tests} passed, {num_failed} failed"
+        # A killed/cheating/infra-broken run must not contribute a "valid" pass rate.
+        reported_rate = 0.0 if status in (
+            OUTCOME_TEST_SUITE_TIMEOUT, "CHEAT_DETECTED", OUTCOME_INFRA_FETCH_FAILED
+        ) else passed_rate
         out.append({
             "name": name,
             "sum": total_runtime,
-            "passed": passed_rate,
+            "passed": reported_rate,
             "num_passed": num_passed,
             "num_tests": num_tests,
-            "status": OUTCOME_TESTS_RAN,
+            "status": status,
             "status_detail": status_detail,
         })
         return
@@ -424,9 +502,23 @@ def main(
             f"{x['name']},{x['sum']},{x['num_passed']}/{x['num_tests']},{status},{detail}"
         )
     total_runtime = sum(x["sum"] for x in out)
-    averaged_passed = sum(x["passed"] for x in out) / len(out) if out else 0.0
+    # A10/A11: an infra-broken / timed-out / cheating run is NOT a measured model
+    # score — its 0.0 must NOT drag the average down like a genuine 0%. Average
+    # over SCORED repos only; report how many were excluded so a run that is
+    # mostly infra-broken can't masquerade as a real low score.
+    _EXCLUDED_STATUSES = {
+        OUTCOME_INFRA_FETCH_FAILED, OUTCOME_TEST_SUITE_TIMEOUT, "CHEAT_DETECTED",
+    }
+    scored = [x for x in out if x.get("status") not in _EXCLUDED_STATUSES]
+    excluded = len(out) - len(scored)
+    averaged_passed = sum(x["passed"] for x in scored) / len(scored) if scored else 0.0
     print(f"total runtime: {total_runtime}")
     print(f"average pass rate: {averaged_passed}")
+    if excluded:
+        print(
+            f"NOTE: {excluded}/{len(out)} repo(s) EXCLUDED from the average "
+            f"(infra-broken / timeout / cheat — not a measured model score)."
+        )
 
     # Status breakdown — lets the reader see at a glance whether 0/0 means
     # "compile failed", "patch failed", "timeout", or "genuinely zero tests".

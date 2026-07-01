@@ -159,6 +159,20 @@ class LlmCallLog:
         else:
             out["cache_read_tokens"] = sum(c.cache_read_tokens for c in self.calls)
             out["cache_write_tokens"] = sum(c.cache_write_tokens for c in self.calls)
+        # E2 invariant: tokens were spent but cost is $0 ⇒ pricing did not resolve
+        # (bridge/alias model name not in metadata). This is the difference between
+        # a real subscription $0 and a broken cost pipeline — surface it explicitly
+        # so a "successful" run can't silently lie about cost.
+        out["cost_resolved"] = not (
+            out["prompt_tokens"] + out["completion_tokens"] > 0 and out["cost_usd"] == 0.0
+        )
+        if not out["cost_resolved"]:
+            models = sorted({c.model for c in self.calls})
+            _logger.error(
+                "COST UNRESOLVED: %d tokens spent but cost is $0 — pricing missing for "
+                "model(s) %s. Reported cost is NOT a real $0. Add a metadata entry / "
+                "normalize the model name.", out["prompt_tokens"] + out["completion_tokens"], models,
+            )
         return out
 
 
@@ -258,7 +272,21 @@ def _load_pricing(model: str) -> dict[str, float]:
     if cached is not None:
         return cached
     import json
+    import re as _re
     p = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    # E2: normalize runtime model-name variants to the base pricing key. The
+    # bridge / 1M-context aliases surface as e.g. `anthropic/claude-opus-4-8[1m]`
+    # or `…-v1:0` which aren't in the metadata, so pricing silently resolved to
+    # $0 and the whole run reported free. Strip a trailing `[...]` / `:N` suffix
+    # and retry the lookup with the cleaned name in addition to the raw one.
+    _clean = _re.sub(r"\[[^\]]*\]$", "", model)
+    # Do NOT strip a trailing `:N` for Bedrock — there the `:0`/`:1` is the model
+    # VERSION, part of the canonical id (e.g. `...claude-3-5-sonnet-20240620-v1:0`);
+    # stripping it would resolve to the wrong (or no) pricing entry. Only the
+    # `[1m]`-style context-alias suffix is safe to strip universally.
+    if not model.startswith("bedrock/"):
+        _clean = _re.sub(r":\d+$", "", _clean)
+    _lookup_names = [model] if _clean == model else [model, _clean]
     metadata_paths = [
         Path(__file__).resolve().parents[1] / ".aider.model.metadata.json",
     ]
@@ -269,7 +297,11 @@ def _load_pricing(model: str) -> dict[str, float]:
             data = json.loads(mp.read_text())
         except Exception:
             continue
-        entry = data.get(model) or data.get(model.replace("bedrock/", "")) or data.get(model.replace("anthropic/", ""))
+        entry = None
+        for _nm in _lookup_names:
+            entry = data.get(_nm) or data.get(_nm.replace("bedrock/", "")) or data.get(_nm.replace("anthropic/", ""))
+            if entry:
+                break
         if not entry and model.startswith("bedrock/converse/"):
             suffix = model[len("bedrock/converse/"):]
             for key, val in data.items():

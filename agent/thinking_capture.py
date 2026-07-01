@@ -78,6 +78,42 @@ class ThinkingCapture:
     )
     module_llm_calls: dict[str, "LlmCallLog"] = field(default_factory=dict)
     capture_mismatches: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # E6: when set, each turn is appended to this JSONL file AS IT HAPPENS, and a
+    # sibling `.heartbeat` is touched. A worker killed mid-module (timeout, cap,
+    # crash) then still leaves a recoverable per-turn trajectory + a liveness
+    # signal, instead of losing everything because output.json is only written on
+    # clean completion. Set via `set_live_path()` at the start of each module.
+    live_path: "Optional[Any]" = None
+
+    def set_live_path(self, path: "Any") -> None:
+        """Point live per-turn flushing at *path* (a pathlib.Path or str)."""
+        self.live_path = path
+
+    def _flush_turn_live(self, turn: "Turn") -> None:
+        if self.live_path is None:
+            return
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            p = _Path(self.live_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(_json.dumps({
+                    "role": turn.role,
+                    "stage": turn.stage,
+                    "module": turn.module,
+                    "turn_number": turn.turn_number,
+                    "timestamp": turn.timestamp,
+                    "cost": getattr(turn, "cost", 0.0),
+                    "content": turn.content,
+                    "thinking": getattr(turn, "thinking", None),
+                }, ensure_ascii=False) + "\n")
+                fh.flush()
+            # Heartbeat: a mid-module liveness marker (mtime advances per turn).
+            (p.parent / ".heartbeat").touch()
+        except OSError:
+            # Live flush is best-effort; never let it break the run.
+            pass
 
     def add_user_turn(
         self,
@@ -91,16 +127,22 @@ class ThinkingCapture:
         if not timestamp:
             from datetime import datetime, timezone
             timestamp = datetime.now(timezone.utc).isoformat()
-        self.turns.append(
-            Turn(
-                role="user",
-                content=content,
-                stage=stage,
-                module=module,
-                turn_number=turn_number,
-                timestamp=timestamp,
-            )
+        # E16: number turns by their APPEND POSITION, not the caller-supplied
+        # value. Callers historically used two divergent schemes (a
+        # `coder._turn_counter` and `len(turns)`, plus a hardcoded 0), which
+        # interleaved into one list and produced non-monotonic turn numbers.
+        # Deriving it here makes the sequence strictly monotonic by construction.
+        turn_number = len(self.turns)
+        _t = Turn(
+            role="user",
+            content=content,
+            stage=stage,
+            module=module,
+            turn_number=turn_number,
+            timestamp=timestamp,
         )
+        self.turns.append(_t)
+        self._flush_turn_live(_t)
 
     def add_assistant_turn(
         self,
@@ -123,25 +165,27 @@ class ThinkingCapture:
         if not timestamp:
             from datetime import datetime, timezone
             timestamp = datetime.now(timezone.utc).isoformat()
-        self.turns.append(
-            Turn(
-                role="assistant",
-                content=content,
-                thinking=thinking,
-                thinking_tokens=thinking_tokens,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cache_hit_tokens=cache_hit_tokens,
-                cache_write_tokens=cache_write_tokens,
-                cost=cost,
-                stage=stage,
-                module=module,
-                turn_number=turn_number,
-                timestamp=timestamp,
-                llm_response_id=llm_response_id,
-                provider=provider,
-            )
+        # E16: authoritative, monotonic numbering by append position (see add_user_turn).
+        turn_number = len(self.turns)
+        _t = Turn(
+            role="assistant",
+            content=content,
+            thinking=thinking,
+            thinking_tokens=thinking_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cost=cost,
+            stage=stage,
+            module=module,
+            turn_number=turn_number,
+            timestamp=timestamp,
+            llm_response_id=llm_response_id,
+            provider=provider,
         )
+        self.turns.append(_t)
+        self._flush_turn_live(_t)
 
     def to_history(self) -> list[dict]:
         """Convert to output.jsonl history format."""
@@ -283,9 +327,13 @@ class ThinkingCapture:
                 if totals["calls"] > 0:
                     any_calls = True
 
-            result["total_cost"] = grand_cost
-            result["total_prompt_tokens"] = grand_prompt
-            result["total_completion_tokens"] = grand_completion
+            # E10: the spec-summarizer's calls bypass the per-module call-log
+            # (they're tracked separately in summarizer_costs). The call-log path
+            # overwrites total_cost, so WITHOUT re-adding the summarizer cost here
+            # it would be silently dropped — under-reporting the run's true spend.
+            result["total_cost"] = grand_cost + self.summarizer_costs.total_cost
+            result["total_prompt_tokens"] = grand_prompt + self.summarizer_costs.total_prompt_tokens
+            result["total_completion_tokens"] = grand_completion + self.summarizer_costs.total_completion_tokens
             result["total_thinking_tokens"] = grand_thinking
             if any_calls and all_vertex:
                 result["cached_content_tokens"] = grand_cached_content

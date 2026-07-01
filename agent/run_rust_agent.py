@@ -21,6 +21,7 @@ from agent.agent_utils import create_branch, load_agent_config
 from agent.agent_utils_rust import (
     extract_rust_function_stubs,
     find_rust_files_to_edit,
+    get_rust_file_dependencies,
     get_target_edit_files_rust,
     run_with_compile_gate,
 )
@@ -146,7 +147,10 @@ def get_rust_message(
             continue
         rel = os.path.relpath(fpath, repo_path)
         try:
-            with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+            # E14: 'replace' (not 'ignore') so undecodable bytes become a visible
+            # U+FFFD in the prompt context rather than being silently dropped from
+            # code the model must reproduce.
+            with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
                 content = fh.read()
         except OSError as exc:
             logger.warning("Could not read %s for context: %s", fpath, exc)
@@ -366,13 +370,105 @@ def get_rust_lint_cmd(repo_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _topological_module_order(files: list[str], repo_path: str) -> list[str]:
+    """E12: order modules so a file is implemented AFTER the modules it imports.
+
+    Lexicographic order implements modules before their dependencies exist, so the
+    agent reconstructs callers blind to callees. We build a best-effort dependency
+    DAG from `use crate::…`/`mod …` references and Kahn-topo-sort it (ties broken
+    lexicographically for determinism). This is HEURISTIC (module-path → file
+    resolution is approximate), so we enforce a hard invariant: the result must be
+    a PERMUTATION of the input — on any cycle, exception, or set mismatch we fall
+    back to the original order rather than risk dropping a module."""
+    try:
+        # Map each file to a normalized module key derived from its path.
+        def _module_key(f: str) -> str:
+            rel = os.path.relpath(f, repo_path)
+            for prefix in ("src/", ""):
+                if rel.startswith(prefix):
+                    rel = rel[len(prefix):]
+                    break
+            rel = rel[:-3] if rel.endswith(".rs") else rel  # strip .rs
+            parts = [p for p in rel.split("/") if p not in ("", "mod", "lib", "main")]
+            return "::".join(parts)
+
+        key_to_file: dict[str, str] = {}
+        for f in files:
+            key_to_file.setdefault(_module_key(f), f)
+
+        # Edge: file -> set of files it depends on (within our file set).
+        deps_of: dict[str, set[str]] = {f: set() for f in files}
+        for f in files:
+            try:
+                dep_paths = get_rust_file_dependencies(f)
+            except Exception:  # noqa: BLE001
+                dep_paths = []
+            for dp in dep_paths:
+                norm = dp.replace("super::", "")
+                # Match a dependency to a file by exact or suffix module-key match.
+                for key, target in key_to_file.items():
+                    if target == f or not key:
+                        continue
+                    if key == norm or key.endswith("::" + norm) or norm.endswith("::" + key):
+                        deps_of[f].add(target)
+
+        # Kahn's algorithm: emit a node once all its deps are emitted.
+        emitted: list[str] = []
+        emitted_set: set[str] = set()
+        remaining = list(files)
+        while remaining:
+            ready = [f for f in remaining if deps_of[f] <= emitted_set]
+            if not ready:
+                # Cycle — emit the rest in original order and stop (still a perm).
+                emitted.extend(remaining)
+                break
+            ready.sort()  # deterministic tie-break
+            for f in ready:
+                emitted.append(f)
+                emitted_set.add(f)
+            remaining = [f for f in remaining if f not in emitted_set]
+
+        if set(emitted) == set(files) and len(emitted) == len(files):
+            return emitted
+        logger.warning("E12: topo-sort produced a non-permutation; using original order.")
+        return files
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("E12: topo-sort failed (%s); using original order.", exc)
+        return files
+
+
 def _is_module_done(log_dir: Path) -> bool:
     return (log_dir / ".done").exists()
 
 
 def _mark_module_done(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
+    # Clear any stale .needs_retry from a prior failed attempt so a now-successful
+    # module isn't ambiguously marked both done AND needs-retry.
+    (log_dir / ".needs_retry").unlink(missing_ok=True)
     (log_dir / ".done").touch()
+
+
+def _finalize_module(log_dir: Path, gate_result: "Optional[dict]" = None) -> None:
+    """E4/E5: decide .done vs .needs_retry from the compile-gate outcome.
+
+    Marking a module .done when its edits were REVERTED (gate found regressions)
+    or UNVERIFIED (cargo check couldn't run) freezes it as an unimplemented stub:
+    on resume `_is_module_done` skips it forever and it scores 0. For those
+    outcomes we write `.needs_retry` (and ensure no stale `.done`) so a later run
+    re-attempts the module instead of permanently abandoning it.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    status = (gate_result or {}).get("status") if gate_result else None
+    # "kept" is the only outcome that proves a real, compiling edit landed.
+    # reverted/unverified/clean_no_op all leave the module unproven → retry,
+    # never freeze it as .done (which would skip it forever on resume).
+    if status in ("reverted", "unverified", "clean_no_op"):
+        (log_dir / ".done").unlink(missing_ok=True)
+        (log_dir / ".needs_retry").write_text(str(status), encoding="utf-8")
+        logger.info("Module %s left .needs_retry (gate status=%s)", log_dir.name, status)
+        return
+    _mark_module_done(log_dir)
 
 
 def _get_stable_log_dir(log_dir: str, repo_name: str, branch: str) -> Path:
@@ -426,7 +522,15 @@ def run_rust_agent_for_repo(
         # the tree should start clean from base, so reset+clean is correct.
         logger.warning("Discarding uncommitted changes in %s before branching", repo_path)
         local_repo.git.reset("--hard")
-        local_repo.git.clean("-fd")
+        # E18: preserve the expensive-to-regenerate spec artifacts. The decompressed
+        # spec.pdf and the LLM spec-summary cache are UNTRACKED, so a bare
+        # `clean -fd` deletes them every run — forcing a re-summarization (cost +
+        # latency) on each stage. Exclude them so the cache survives.
+        local_repo.git.clean(
+            "-fd",
+            "-e", ".spec_summary_cache.json",
+            "-e", "spec.pdf",
+        )
 
     create_branch(local_repo, branch, example["base_commit"])
 
@@ -450,25 +554,29 @@ def run_rust_agent_for_repo(
         _base = example["base_commit"]
         _stubbed_at_base: set[str] = set()
         try:
-            _ls = _sp.run(
-                ["git", "ls-tree", "-r", "--name-only", _base],
-                cwd=repo_path, capture_output=True, text=True, check=True,
+            # E11: ONE `git grep -l` instead of O(files) `git show` calls (each a
+            # fork+exec with no timeout — minutes on a large crate, and a single
+            # hung git could wedge the whole stage). git grep scans the base tree
+            # for the stub marker in a single pass.
+            _grep = _sp.run(
+                ["git", "grep", "-l", "--fixed-strings",
+                 'panic!("STUB: not implemented")', _base, "--", "*.rs"],
+                cwd=repo_path, capture_output=True, text=True, timeout=120,
             )
-            for _rel in _ls.stdout.splitlines():
-                if not _rel.endswith(".rs"):
-                    continue
-                _show = _sp.run(
-                    ["git", "show", f"{_base}:{_rel}"],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-                if _show.returncode == 0 and 'panic!("STUB: not implemented")' in _show.stdout:
+            # git grep exits 1 (no matches) or 0 (matches); >1 is a real error.
+            if _grep.returncode > 1:
+                raise _sp.CalledProcessError(_grep.returncode, "git grep", _grep.stderr)
+            for _line in _grep.stdout.splitlines():
+                # Output format: "<base>:<path>" — strip the leading "<rev>:".
+                _rel = _line.split(":", 1)[1] if ":" in _line else _line
+                if _rel.endswith(".rs"):
                     _stubbed_at_base.add(os.path.join(repo_path, _rel))
             all_source_files = [f for f in all_source_files if f in _stubbed_at_base]
             logger.info(
                 "strip_non_stubs: kept %d/%d source files (filtered against base_commit %s)",
                 len(all_source_files), len(_stubbed_at_base), _base[:8],
             )
-        except (_sp.CalledProcessError, OSError) as _e:
+        except (_sp.CalledProcessError, OSError, _sp.TimeoutExpired) as _e:
             logger.warning(
                 "strip_non_stubs: failed to compute base-commit stub list (%s). Falling back to current target_edit_files (may break Stage 2/3).",
                 _e,
@@ -476,10 +584,43 @@ def run_rust_agent_for_repo(
             all_source_files = list(target_edit_files)
 
 
+    # E12: implement modules in dependency order (callees before callers) instead
+    # of the lexicographic order find_rust_files_to_edit returns. Falls back to the
+    # original order if the heuristic can't produce a clean permutation.
+    all_source_files = _topological_module_order(all_source_files, repo_path)
+
     test_files_readonly = sorted(
         str(p) for p in Path(repo_path).rglob("*.rs")
         if "/tests/" in str(p) or p.parent.name == "tests"
     )
+    # E9: injecting EVERY integration-test file as read-only context blows the
+    # window on test-heavy crates (and most are irrelevant to a single module).
+    # Cap the total injected bytes (configurable via KAIJU_TEST_CTX_BUDGET_BYTES,
+    # default 256 KiB) and LOG what was dropped — never silently truncate, which
+    # would read as "the agent saw all the tests" when it didn't.
+    _test_ctx_budget = int(os.environ.get("KAIJU_TEST_CTX_BUDGET_BYTES", str(256 * 1024)) or 0)
+    if _test_ctx_budget > 0 and test_files_readonly:
+        _kept: list[str] = []
+        _used = 0
+        for _tf in test_files_readonly:
+            try:
+                _sz = os.path.getsize(_tf)
+            except OSError:
+                _sz = 0
+            if _kept and _used + _sz > _test_ctx_budget:
+                continue
+            _kept.append(_tf)
+            _used += _sz
+        if len(_kept) < len(test_files_readonly):
+            logger.warning(
+                "E9: capped read-only test context to %d/%d files (~%d KiB of %d KiB budget); "
+                "%d test file(s) DROPPED to protect the context window. Raise "
+                "KAIJU_TEST_CTX_BUDGET_BYTES to include more.",
+                len(_kept), len(test_files_readonly), _used // 1024,
+                _test_ctx_budget // 1024, len(test_files_readonly) - len(_kept),
+            )
+        test_files_readonly = _kept
+
     experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
     eval_results = {}
 
@@ -511,7 +652,7 @@ def run_rust_agent_for_repo(
             model_name=agent_config.model_name,
             dataset_path=commit0_config_for_meta.get("dataset_name", ""),
             max_iterations=agent_config.max_iteration,
-            model_short=getattr(agent_config, "model_short", agent_config.model_name),
+            model_short=getattr(agent_config, "model_short", "") or "",
         )
 
     with DirContext(repo_path):
@@ -524,6 +665,10 @@ def run_rust_agent_for_repo(
                 if _is_module_done(test_log_dir):
                     logger.info("Skipping already-completed test module: %s", src_file_name)
                     continue
+
+                # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(test_log_dir) / "turns.jsonl")
 
                 if agent_config.blind_tests:
                     test_cmd = _make_blind_test_cmd()
@@ -569,10 +714,12 @@ def run_rust_agent_for_repo(
                         _kaiju_log_dir=test_log_dir,
                     )
                 with capture_module_calls(
+                    model_short=getattr(agent_config, "model_short", "") or "",
                     thinking_capture=thinking_capture,
                     module=src_file_name,
                     log_dir=test_log_dir,
                 ):
+                    _gate_result = None
                     if getattr(agent_config, "per_edit_compile_gate", False):
                         def _reprompt_test(err_text):
                             return run_with_recovery(agent.run,
@@ -609,7 +756,7 @@ def run_rust_agent_for_repo(
                     else:
                         _ = _invoke_agent_test()
                 module_elapsed = time.time() - module_start
-                _mark_module_done(test_log_dir)
+                _finalize_module(Path(test_log_dir), _gate_result)
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
@@ -665,6 +812,10 @@ def run_rust_agent_for_repo(
                     logger.info("Skipping already-linted file: %s", lint_file_name)
                     continue
 
+                # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
+
                 message, spec_costs = get_rust_message(
                     agent_config,
                     repo_path,
@@ -698,10 +849,12 @@ def run_rust_agent_for_repo(
                         _kaiju_log_dir=lint_log_dir,
                     )
                 with capture_module_calls(
+                    model_short=getattr(agent_config, "model_short", "") or "",
                     thinking_capture=thinking_capture,
                     module=lint_file_name,
                     log_dir=lint_log_dir,
                 ):
+                    _gate_result = None
                     if getattr(agent_config, "per_edit_compile_gate", False):
                         def _reprompt_lint(err_text):
                             return run_with_recovery(agent.run,
@@ -736,7 +889,7 @@ def run_rust_agent_for_repo(
                     else:
                         _ = _invoke_agent_lint()
                 module_elapsed = time.time() - module_start
-                _mark_module_done(lint_log_dir)
+                _finalize_module(Path(lint_log_dir), _gate_result)
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
@@ -791,6 +944,10 @@ def run_rust_agent_for_repo(
                     logger.info("Skipping already-drafted file: %s", file_name)
                     continue
 
+                # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(file_log_dir) / "turns.jsonl")
+
                 iter_message, spec_costs = get_rust_message(
                     agent_config,
                     repo_path,
@@ -822,10 +979,12 @@ def run_rust_agent_for_repo(
                         _kaiju_log_dir=file_log_dir,
                     )
                 with capture_module_calls(
+                    model_short=getattr(agent_config, "model_short", "") or "",
                     thinking_capture=thinking_capture,
                     module=file_name,
                     log_dir=file_log_dir,
                 ):
+                    _gate_result = None
                     if getattr(agent_config, "per_edit_compile_gate", False):
                         def _reprompt_draft(err_text):
                             return run_with_recovery(agent.run,
@@ -859,7 +1018,7 @@ def run_rust_agent_for_repo(
                     else:
                         _ = _invoke_agent_draft()
                 module_elapsed = time.time() - module_start
-                _mark_module_done(file_log_dir)
+                _finalize_module(Path(file_log_dir), _gate_result)
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
@@ -1004,12 +1163,20 @@ def run_rust_agent(
                 results.append(result)
 
             _n_failed = 0
+            # E8: per-worker wall-clock so one wedged repo (e.g. a hung cargo test
+            # with no timeout binary) can't block the whole batch on result.get()
+            # forever. Generous default; override via KAIJU_PER_REPO_BUDGET_SEC.
+            _per_repo_budget = int(os.environ.get("KAIJU_PER_REPO_BUDGET_SEC", "0") or 0) or None
             for result in results:
                 # Collect every worker. The old `result.get()` re-raised the
                 # FIRST failing worker and abandoned the rest, losing their
                 # outcomes; isolate failures so one bad repo can't sink the batch.
                 try:
-                    result.get()
+                    result.get(timeout=_per_repo_budget)
+                except multiprocessing.TimeoutError:
+                    _n_failed += 1
+                    logger.error("Rust agent worker exceeded per-repo budget (%ss) — abandoning it",
+                                 _per_repo_budget)
                 except Exception as _werr:  # noqa: BLE001
                     _n_failed += 1
                     logger.error("Rust agent worker failed: %s", _werr, exc_info=True)
@@ -1017,3 +1184,20 @@ def run_rust_agent(
                 "All %d Rust agent workers completed (%d failed)",
                 len(results), _n_failed,
             )
+            if _n_failed:
+                # E8: a PARTIAL failure must not sink the batch — the successful
+                # repos already produced trajectories worth keeping, and the
+                # `with` Pool block tears the pool down on exit anyway (no manual
+                # terminate() needed). Only a TOTAL wipeout (every worker failed)
+                # signals a systemic fault (bad config, missing bridge) worth
+                # aborting on; a partial failure is logged loudly and tolerated.
+                if _n_failed == len(results):
+                    raise RuntimeError(
+                        f"All {len(results)} Rust agent workers failed — "
+                        f"systemic fault, aborting."
+                    )
+                logger.error(
+                    "%d/%d Rust agent workers failed; keeping the %d successful "
+                    "repos and continuing.",
+                    _n_failed, len(results), len(results) - _n_failed,
+                )

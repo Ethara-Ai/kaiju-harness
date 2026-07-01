@@ -326,6 +326,11 @@ def create_container(
             nano_cpus=nano_cpus,
             environment=environment,
             detach=True,
+            # C6: tag every harness container so the orchestrator can reap
+            # orphans (`docker ps -aq --filter label=kaiju.harness=1`) when an
+            # eval is killed by `timeout` — the container is a child of dockerd,
+            # not of the killed python process, so it survives otherwise.
+            labels={"kaiju.harness": "1"},
         )
         # Opt-in hardening flags only (default: none -> identical to prior behavior).
         if sandbox_hardening:

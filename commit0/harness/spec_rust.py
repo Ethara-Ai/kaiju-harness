@@ -69,7 +69,10 @@ class RustSpec(Spec):
             "git submodule update --init --recursive 2>/dev/null || true",
             "git remote remove origin",
             f"git reset --hard {base_commit}",
-            "timeout 600 cargo fetch 2>/dev/null || true",
+            # A10: don't fully MASK a fetch failure. Setup stays tolerant (deps
+            # may still resolve at build/test time), but we record the failure to
+            # a log so it's diagnosable rather than silently swallowed by `|| true`.
+            "timeout 600 cargo fetch 2>cargo_fetch.log || echo 'CARGO_FETCH_FAILED (setup-time; see cargo_fetch.log)' >> cargo_fetch.log",
         ]
 
     def make_eval_script_list(self) -> list[str]:
@@ -133,6 +136,10 @@ class RustSpec(Spec):
             "fi",
             revert_test_paths,
             "git status",
+            # Force serial test execution (A4): async/UDP crates bind real sockets on
+            # fixed ports; parallel libtest threads collide -> spurious, nondeterministic
+            # failures unrelated to the model. RUST_TEST_THREADS=1 makes runs reproducible.
+            "export RUST_TEST_THREADS=1",
             # Per-suite hard cap. Without this a single hung test (e.g. a fake-socket
             # listener that never wakes) blocks until the outer Docker timeout fires,
             # which kills the process before the partial test_output.txt is flushed.
@@ -146,6 +153,33 @@ class RustSpec(Spec):
             + test_cmd
             + " __TEST_IDS__ > test_output.txt 2>&1",
             "echo $? > cargo_test_exit_code.txt",
+            # A10: a network/registry fetch failure makes `cargo test` fail with a
+            # download error that is NOT the model's fault. The setup-time
+            # `cargo fetch` is intentionally tolerant (deps may resolve at build
+            # time), so we detect the failure HERE and mark it INFRA so the
+            # evaluator scores it as infrastructure-broken, not a real 0%.
+            # IMPORTANT: anchor to cargo's OWN diagnostic prefix (`error:` at line
+            # start) so a test name / panic / asserted string that merely CONTAINS
+            # "failed to download" can't false-trigger an INFRA classification on a
+            # legitimately passing/failing run.
+            "if grep -qE '^error: (failed to (download|fetch|get|load source)|"
+            "could not resolve host|network failure|spurious network error)' test_output.txt 2>/dev/null; then "
+            "echo 'INFRA_FETCH_FAILED: cargo could not fetch dependencies (network/registry)' >> test_output.txt; fi",
+            # CHEAT-GUARD (A3) — runs AFTER cargo test (which truncates test_output.txt
+            # via `>`), so we APPEND. Many crates keep tests inside src/ as
+            # `#[cfg(test)]` modules that the tests/ revert above never touches. At base
+            # the impl is stubbed, so `#[test]`/`#[cfg(test)]`/removed `assert!` lines
+            # exist ONLY in test code — any such change in the model's diff is tampering.
+            # (Adding an assert! in impl is legitimate, so we flag only removed/changed
+            # asserts and any toggled test attribute.)
+            # Only flag REMOVED (`^-`) test attributes / asserts. The agent may
+            # legitimately ADD test code or impl asserts (those are `^+`); flagging
+            # additions false-positived on real implementations and zeroed valid
+            # runs. Removing/altering an existing `#[test]`/`#[cfg(test)]`/`assert!`
+            # — all of which exist only in test code at base — is the real cheat.
+            f"if git diff {base_commit} -- src/ 2>/dev/null | "
+            r"grep -qE '^-[[:space:]]*#\[(tokio::)?test\]|^-[[:space:]]*#\[cfg\(test\)\]|^-[[:space:]]*assert(_eq|_ne)?!'; then "
+            "echo 'CHEAT_DETECTED: model removed/altered in-src test code' >> test_output.txt; fi",
         ]
 
 
