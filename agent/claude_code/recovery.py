@@ -157,11 +157,20 @@ _TRANSIENT_MSG_SIGNALS = (
     "timed out", "timeout", "connection reset", "connection aborted",
     "remote end closed", "server disconnected", "midstream",
     "read timeout", "connection error",
+    # Mid-stream chunked-transfer drop (Anthropic load-shedding a long stream):
+    # "peer closed connection without sending complete message body
+    #  (incomplete chunked read)". Match by message too, not just class name,
+    # so a litellm/httpx rename can't silently drop it off the transient track.
+    "peer closed connection", "incomplete chunked read", "chunked read",
+    "without sending complete message body",
 )
 
 # Default backoff schedule (seconds). Configurable via
 # KAIJU_CC_TRANSIENT_BACKOFF="5,10,20" env var.
-_DEFAULT_TRANSIENT_BACKOFF = (5, 10, 20)
+# 5 attempts (was 3): a giant turn that drops mid-stream is re-sent verbatim, so
+# it often needs several tries to land — especially while the server is
+# load-shedding (529s). The extra waits are cheap vs. losing the module's work.
+_DEFAULT_TRANSIENT_BACKOFF = (5, 10, 20, 40, 60)
 
 
 def _transient_backoff_schedule() -> tuple[int, ...]:
@@ -214,16 +223,15 @@ def _extract_retry_after_from_error(exc: BaseException) -> Optional[int]:
 
 
 def _heartbeat(log_dir: Optional[Path]) -> None:
-    """Touch files the harness watchdog actually polls.
+    """Re-touch the dedicated rate-limit pause marker.
 
-    The watchdog at ``run_pipeline.sh:660+`` checks two file kinds for activity:
-      - ``find <stage_log_dir> -name aider.log`` (newest mtime)
-      - ``<stage_log_dir>/agent_run.log``
-
-    Touching ``_kaiju_log_dir/.rate_limit_paused`` is invisible to it. So we
-    walk UP the directory tree from ``log_dir`` until we find either
-    ``agent_run.log`` or any ``aider.log``, and touch them. We ALSO drop a
-    marker file at ``_kaiju_log_dir/.rate_limit_paused`` for human debugging.
+    B15: we deliberately do NOT forge activity on ``agent_run.log`` / ``aider.log``
+    anymore. Touching the very files the watchdog uses to detect a hang made a
+    genuine wedge (e.g. the recovery loop itself stalling) indistinguishable from
+    a healthy pause. Instead we drop/refresh an EXPLICIT ``.rate_limit_paused``
+    marker that the watchdog now understands (see ``run_pipeline_rust.sh:
+    _pause_marker_fresh``): while the marker is fresh the inactivity kill is
+    suppressed, but the absolute wall-time cap still bounds the pause.
     """
     if log_dir is None:
         return
@@ -231,25 +239,6 @@ def _heartbeat(log_dir: Optional[Path]) -> None:
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / ".rate_limit_paused").touch()
-    except OSError:
-        pass
-    # Walk up to find agent_run.log (lives in the stage_log_dir) and aider.log
-    # files anywhere in subtree of the discovered stage_log_dir. Cap walk depth.
-    try:
-        cur = Path(log_dir).resolve()
-        for _ in range(8):
-            cand = cur / "agent_run.log"
-            if cand.is_file():
-                cand.touch()
-                # Also touch the newest aider.log in this subtree, if any.
-                aider_logs = list(cur.rglob("aider.log"))
-                if aider_logs:
-                    newest = max(aider_logs, key=lambda p: p.stat().st_mtime)
-                    newest.touch()
-                return
-            if cur.parent == cur:
-                return
-            cur = cur.parent
     except OSError:
         pass
 

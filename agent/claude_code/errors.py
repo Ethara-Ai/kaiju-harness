@@ -108,9 +108,11 @@ def _parse_iso_header(headers: Mapping[str, str], name: str) -> Optional[float]:
 
 def extract_retry_after(headers: Mapping[str, str]) -> Optional[int]:
     """Best-effort seconds-to-retry, preferring Retry-After then ratelimit-reset."""
-    explicit = _parse_int_header(headers, "Retry-After") or _parse_int_header(
-        headers, "retry-after"
-    )
+    # B17: `_parse_int_header` already tries both the given case AND lower-case, so
+    # one call covers "Retry-After"/"retry-after". Must use an explicit `is not None`
+    # check — `Retry-After: 0` (retry immediately) is a legitimate value that `or`
+    # would discard as falsy, falling through to the reset-header math instead.
+    explicit = _parse_int_header(headers, "Retry-After")
     if explicit is not None and explicit >= 0:
         return explicit
 
@@ -212,6 +214,20 @@ def classify_anthropic_error(
         if retry_after is not None and retry_after >= TRANSIENT_RETRY_AFTER_THRESHOLD:
             is_cap = True
         if tokens_remaining == 0:
+            is_cap = True
+        # B6: the two heuristic headers are both OPTIONAL — a real 5h/weekly cap
+        # often arrives with neither. Inspect the error message/type, and default
+        # an ambiguous 429 (no retry-after, no tokens header) to cap (bubble up)
+        # rather than inline-hammering a capped account with tiny 2**n waits.
+        # B6: a real 5h/weekly cap often arrives with NO retry-after/tokens header,
+        # so additionally key off the error message text. We do NOT treat a bare
+        # ambiguous 429 (no headers, no cap text) as a cap — that misclassifies
+        # ordinary brief throttles and would abort a run that a short retry fixes.
+        _msg = (message or "").lower()
+        if any(s in _msg for s in (
+            "usage limit", "5-hour", "5 hour", "weekly limit", "subscription",
+            "exceeded your", "rate limit will reset",
+        )):
             is_cap = True
         kind = ErrorKind.SUBSCRIPTION_CAP if is_cap else ErrorKind.TRANSIENT_THROTTLE
         return ClassifiedError(

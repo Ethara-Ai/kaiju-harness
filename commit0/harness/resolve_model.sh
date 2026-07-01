@@ -148,7 +148,10 @@ resolve_model() {
         local _default_cache_prompts=""
         case "$arg" in
             opus)
-                _default_model="bedrock/global.anthropic.claude-opus-4-6-v1"
+                # D5: must match the generated config key (bedrock/converse/...);
+                # the old `bedrock/global...` id had no settings/metadata entry, so
+                # the run silently lost thinking/cache_control/pricing ($0 cost).
+                _default_model="bedrock/converse/global.anthropic.claude-opus-4-6-v1"
                 _default_cache_prompts="true"
                 ;;
             opus47)
@@ -208,6 +211,9 @@ preflight_model_api() {
     fi
 
     local probe_output probe_rc probe_result
+    # D1: give the probe a reliable repo root so it finds .aider.model.settings.yml
+    # regardless of CWD (so it always exercises the REAL extra_params).
+    export KAIJU_REPO_ROOT="${BASE_DIR:-$(pwd)}"
     probe_output=$(mktemp)
 
     set +e
@@ -240,22 +246,88 @@ except Exception as e:
     sys.exit(1)
 
 messages = [{"role": "user", "content": "Reply with exactly: OK"}]
-completion_kwargs = {
-    "model": m.name,
-    "messages": messages,
-    "max_tokens": 64,
-    "timeout": 60,
-}
+
+# D1: exercise the SAME params the real run will send (thinking / output_config
+# / reasoning_effort / max_tokens) under STREAMING, not a trivial 64-token call.
+# Both prior outages (thinking-enabled-budget 400, effort=max ValueError) passed
+# a trivial probe and then failed every real call. Load the model's extra_params
+# from the generated settings and merge them so the probe fails BEFORE a run.
+extra_params = {}
+_found_entry = False
+_settings_seen = False
+try:
+    import yaml  # aider dependency
+    for _cand in (os.path.join(os.environ.get("KAIJU_REPO_ROOT", "."), ".aider.model.settings.yml"),
+                  ".aider.model.settings.yml"):
+        if os.path.isfile(_cand):
+            _settings_seen = True
+            for _entry in (yaml.safe_load(open(_cand)) or []):
+                if isinstance(_entry, dict) and _entry.get("name") == model_name:
+                    _found_entry = True
+                    extra_params = dict(_entry.get("extra_params") or {})
+                    break
+            if _found_entry:
+                break
+except Exception:
+    extra_params = {}
+
+# D9: an off-table model (no settings entry) runs with aider defaults — no
+# thinking/effort/max_tokens/cache tuning, possibly a wrong context window. That
+# silently degrades quality. Warn LOUD so it's a deliberate choice, not a
+# surprise. (We still probe — defaults may be fine — but the operator is told.)
+if _settings_seen and not _found_entry:
+    print(f"PROBE_WARNING: model {model_name!r} has NO entry in "
+          f".aider.model.settings.yml — running with aider DEFAULTS (no thinking/"
+          f"effort/max_tokens/cache tuning). Add it to scripts/generate_aider_config.sh "
+          f"if you want tuned params.")
+
+completion_kwargs = {"model": m.name, "messages": messages, "timeout": 120}
+completion_kwargs.update(extra_params)
+# D10: this probe verifies the thinking/effort/max_tokens param set is ACCEPTED,
+# but it does NOT exercise prompt caching — the probe prompt is far below the
+# per-model cache minimum (~1024-4096 tokens), so `cache_control` is neither
+# triggered nor billed here. Cache correctness through the bridge is therefore
+# unverified by this preflight; a regression would only surface as missing cache
+# discounts in the cost report, not a probe failure. (Verifying it would require
+# a multi-KB probe that inflates preflight time/cost.)
+# Cap output small (we only need to confirm the param set is accepted and yields
+# usable content) but keep it above any thinking floor; stream like the real run.
+# Keep the probe SMALL+FAST. We only need to confirm the param set is accepted
+# (no 400/ValueError) and yields content — a streamed 512-token thinking probe
+# could exceed PROBE_TIMEOUT and falsely fail a model that works.
+completion_kwargs["max_tokens"] = min(int(extra_params.get("max_tokens", 256) or 256), 256)
+completion_kwargs["stream"] = True
 if m.name.startswith("vertex_ai/gemini"):
     _vk = os.environ.get("VERTEX_AI_API_KEY", "").strip()
     if _vk:
         completion_kwargs["gemini_api_key"] = _vk
 try:
-    resp = aider_litellm.completion(**completion_kwargs)
-    content = (resp.choices[0].message.content or "").strip() or "<empty>"
-    cost = getattr(resp, "_hidden_params", {}).get("response_cost")
+    _stream = aider_litellm.completion(**completion_kwargs)
+    _chunks = list(_stream)
+    try:
+        _full = litellm.stream_chunk_builder(_chunks, messages=messages)
+    except Exception:
+        _full = None
+    if _full is not None:
+        content = (_full.choices[0].message.content or "").strip()
+        finish = getattr(_full.choices[0], "finish_reason", None)
+        cost = getattr(_full, "_hidden_params", {}).get("response_cost")
+    else:
+        content, finish, cost = "", None, None
     cost_str = f" cost={cost:.8f}" if cost else " cost=unresolved"
-    print(f"PROBE_OK: model responded: {content!r}{cost_str}")
+    if finish == "length" and not content:
+        # All of the SMALL probe budget went to thinking before any visible text.
+        # The param set was ACCEPTED (no 400) and the model was generating — that's
+        # what we're verifying. Not a failure (the real run uses 128K, not 256).
+        print(f"PROBE_OK: param set accepted; probe hit its small token cap before "
+              f"visible text (finish=length).{cost_str}")
+    elif not content:
+        print(f"PROBE_FAIL_EMPTY: model returned NO content and did NOT hit the token "
+              f"cap with the real param set (thinking/effort from settings). "
+              f"finish_reason={finish}. params={ {k: extra_params[k] for k in extra_params if k != 'max_tokens'} }")
+        sys.exit(1)
+    else:
+        print(f"PROBE_OK: model responded (streamed, real params): {content[:40]!r}{cost_str}")
 except Exception as e:
     err = str(e)
     if "AuthenticationError" in err or "InvalidClientTokenId" in err:

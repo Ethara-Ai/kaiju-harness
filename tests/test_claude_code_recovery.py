@@ -201,35 +201,27 @@ def test_sleep_with_heartbeat_touches_marker(tmp_path, monkeypatch):
 
 
 
-def test_heartbeat_touches_agent_run_log_when_present(tmp_path):
-    """Heartbeat must walk UP to find agent_run.log -- that's what the harness watchdog polls."""
+def test_heartbeat_does_not_forge_activity_on_agent_logs(tmp_path):
+    """B15: heartbeat must NOT touch agent_run.log/aider.log — forging activity on
+    the files the watchdog polls would mask a genuine hang. It only refreshes the
+    explicit `.rate_limit_paused` marker the watchdog now understands."""
     stage_dir = tmp_path / "stage1_draft"
     module_dir = stage_dir / "add_module"
     module_dir.mkdir(parents=True)
     agent_log = stage_dir / "agent_run.log"
     agent_log.write_text("existing log\n")
-    # Make it old enough to verify mtime advances
-    old_mtime = agent_log.stat().st_mtime
-    import time
-    time.sleep(0.05)
-    recovery._heartbeat(module_dir)
-    assert agent_log.stat().st_mtime > old_mtime
-    assert (module_dir / ".rate_limit_paused").exists()
-
-
-def test_heartbeat_touches_aider_log_alongside_agent_run_log(tmp_path):
-    """Heartbeat must also touch any aider.log in the discovered stage subtree."""
-    stage_dir = tmp_path / "stage1_draft"
-    module_dir = stage_dir / "add_module"
-    module_dir.mkdir(parents=True)
-    (stage_dir / "agent_run.log").write_text("x\n")
     aider_log = module_dir / "aider.log"
     aider_log.write_text("y\n")
     import time
-    old = aider_log.stat().st_mtime
+    old_agent = agent_log.stat().st_mtime
+    old_aider = aider_log.stat().st_mtime
     time.sleep(0.05)
     recovery._heartbeat(module_dir)
-    assert aider_log.stat().st_mtime > old
+    # The activity logs are left untouched...
+    assert agent_log.stat().st_mtime == old_agent
+    assert aider_log.stat().st_mtime == old_aider
+    # ...only the dedicated pause marker is (re)touched.
+    assert (module_dir / ".rate_limit_paused").exists()
 
 
 def test_heartbeat_does_not_crash_without_agent_run_log(tmp_path):
@@ -320,7 +312,7 @@ class TestTransientBackoffSchedule:
         monkeypatch.delenv("KAIJU_CC_TRANSIENT_BACKOFF", raising=False)
         from agent.claude_code.recovery import _transient_backoff_schedule
 
-        assert _transient_backoff_schedule() == (5, 10, 20)
+        assert _transient_backoff_schedule() == (5, 10, 20, 40, 60)
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("KAIJU_CC_TRANSIENT_BACKOFF", "2,4,8,16")
@@ -332,10 +324,10 @@ class TestTransientBackoffSchedule:
         monkeypatch.setenv("KAIJU_CC_TRANSIENT_BACKOFF", "not,a,number")
         from agent.claude_code.recovery import _transient_backoff_schedule
 
-        assert _transient_backoff_schedule() == (5, 10, 20)
+        assert _transient_backoff_schedule() == (5, 10, 20, 40, 60)
 
     def test_empty_env_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv("KAIJU_CC_TRANSIENT_BACKOFF", "")
         from agent.claude_code.recovery import _transient_backoff_schedule
 
-        assert _transient_backoff_schedule() == (5, 10, 20)
+        assert _transient_backoff_schedule() == (5, 10, 20, 40, 60)
