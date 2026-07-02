@@ -58,11 +58,11 @@ def _inject_test_ids(eval_script: str, test_ids: str) -> str:
     lines = eval_script.split("\n")
     new_lines: list[str] = []
     for line in lines:
-        # Only match jest/vitest as an argv token (not embedded in a filename
-        # like "vitest-compat.test.ts"). Require the line to be the actual
-        # test-run command (contains --forceExit or vitest AND the redirect).
         stripped = line.strip()
-        if ("--forceExit" in line or " vitest " in " " + stripped + " ") and ">" in line:
+        is_jest_line = "--forceExit" in line
+        is_vitest_line = " vitest " in " " + stripped + " "
+        is_node_test_line = "--test-reporter=tap" in line and " node " in " " + stripped + " "
+        if (is_jest_line or is_vitest_line or is_node_test_line) and ">" in line:
             line = line.rstrip() + " " + quoted
         new_lines.append(line)
     return "\n".join(new_lines)
@@ -198,6 +198,7 @@ def main(
     )
     files_to_collect = [
         "report.json",
+        "report.tap",
         "test_exit_code.txt",
         "test_output.txt",
     ]

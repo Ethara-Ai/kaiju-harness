@@ -228,7 +228,13 @@ def evaluate(
 @commit0_ts_app.command()
 def lint(
     repo_or_repo_dir: str = typer.Argument(..., help="TS repo to lint"),
-    files: Union[list[str], None] = typer.Option(None, help="Files to lint"),
+    files: Union[list[str], None] = typer.Argument(
+        None,
+        help=(
+            "Files to lint (positional, variadic). aider appends "
+            "edit-target file paths here automatically."
+        ),
+    ),
     commit0_config_file: str = typer.Option(
         ".commit0.ts.yaml", help="Path to TS commit0 config"
     ),

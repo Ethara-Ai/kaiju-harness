@@ -589,9 +589,9 @@ def detect_package_manager(repo_dir: Path) -> str:
 def detect_test_framework(repo_dir: Path) -> str:
     """Detect the test framework from package.json and config files.
 
-    Priority: vitest > jest (vitest wins if both present).
+    Priority: vitest > jest > node_test.
 
-    Returns: "jest" | "vitest"
+    Returns: "jest" | "vitest" | "node_test"
     """
     pkg_path = repo_dir / "package.json"
     if not pkg_path.exists():
@@ -635,7 +635,55 @@ def detect_test_framework(repo_dir: Path) -> str:
     if "jest" in test_script:
         return "jest"
 
+    if _detect_node_test_signals(pkg, repo_dir):
+        return "node_test"
+
     return "jest"
+
+
+_NODE_TEST_IMPORT_PATTERNS = (
+    "from 'node:test'",
+    'from "node:test"',
+    "from 'node:test/reporters'",
+    "@paulmillr/jsbt/test",
+    "require('node:test'",
+    'require("node:test"',
+)
+
+
+def _detect_node_test_signals(pkg: dict, repo_dir: Path) -> bool:
+    dev_deps = pkg.get("devDependencies", {})
+    deps = pkg.get("dependencies", {})
+    all_deps = {**deps, **dev_deps}
+    if "@paulmillr/jsbt" in all_deps:
+        return True
+
+    scripts = pkg.get("scripts", {})
+    if isinstance(scripts, dict):
+        for cmd in scripts.values():
+            if isinstance(cmd, str) and "--test" in cmd and "node" in cmd:
+                return True
+
+    test_globs = ("**/*.test.ts", "**/*.test.tsx", "**/*.test.mts", "**/*.test.cts",
+                  "**/*.test.js", "**/*.test.mjs", "**/*.test.cjs")
+    scanned = 0
+    for pattern in test_globs:
+        for path in repo_dir.glob(pattern):
+            if "node_modules" in path.parts:
+                continue
+            scanned += 1
+            if scanned > 25:
+                break
+            try:
+                head = path.read_text(errors="ignore")[:2000]
+            except OSError:
+                continue
+            for sig in _NODE_TEST_IMPORT_PATTERNS:
+                if sig in head:
+                    return True
+        if scanned > 25:
+            break
+    return False
 
 
 _BLOCKED_HOMEPAGE_DOMAINS = (
@@ -772,6 +820,8 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
     prefix = _exec_prefix(pkg_manager)
     if test_framework == "vitest":
         test_cmd = f"{prefix} vitest run"
+    elif test_framework == "node_test":
+        test_cmd = "node --test"
     else:
         test_cmd = f"{prefix} jest"
 

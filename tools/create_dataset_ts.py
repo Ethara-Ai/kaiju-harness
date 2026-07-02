@@ -36,7 +36,7 @@ TS_SETUP_FIELDS = {"node_version", "install", "packages", "pre_install", "specif
 TS_TEST_FIELDS = {"test_cmd", "test_dir"}
 from commit0.harness.constants_ts import SUPPORTED_NODE_VERSIONS
 
-SUPPORTED_TEST_FRAMEWORKS = {"jest", "vitest"}
+SUPPORTED_TEST_FRAMEWORKS = {"jest", "vitest", "node_test"}
 
 
 def generate_ts_split_constants(

@@ -251,22 +251,21 @@ def _detect_framework_from_entry(entry: dict) -> str:  # type: ignore[type-arg]
         ``"vitest"`` or ``"jest"``.
 
     """
-    # 1. Primary: explicit test_framework field
     framework = entry.get("test_framework", "").lower().strip()
-    if framework in ("vitest", "jest"):
+    if framework in ("vitest", "jest", "node_test"):
         return framework
 
-    # 2. Secondary: infer from test_cmd
     test_info = entry.get("test", {})
     test_cmd = test_info.get("test_cmd", "") if isinstance(test_info, dict) else ""
     test_cmd_lower = test_cmd.lower()
 
     if "vitest" in test_cmd_lower:
         return "vitest"
+    if "--test" in test_cmd_lower and "node" in test_cmd_lower.split():
+        return "node_test"
     if "jest" in test_cmd_lower:
         return "jest"
 
-    # 3. Fallback: default to jest
     logger.debug(
         "Could not detect framework for %s, defaulting to jest",
         entry.get("repo", "unknown"),
@@ -360,7 +359,17 @@ def _build_collect_command(
     if framework == "jest":
         return ["npx", "jest", "--json", "--forceExit", test_dir]
 
-    raise ValueError(f"Unknown framework: {framework!r}. Expected 'vitest' or 'jest'.")
+    if framework == "node_test":
+        return [
+            "node",
+            "--test",
+            "--test-reporter=tap",
+            "$_KAIJU_TS_TEST_FILES",
+        ]
+
+    raise ValueError(
+        f"Unknown framework: {framework!r}. Expected 'vitest', 'jest', or 'node_test'."
+    )
 
 
 def _dispatch_parse(
@@ -385,6 +394,14 @@ def _dispatch_parse(
         return _parse_vitest_list_output(stdout, repo_root)
     elif framework == "jest":
         return _parse_jest_json_results(stdout, repo_root)
+    elif framework == "node_test":
+        from commit0.harness.node_test_tap import list_tap_test_names
+        raw = list_tap_test_names(stdout)
+        prefix = repo_root.rstrip("/") + "/"
+        return [
+            n[len(prefix):] if n.startswith(prefix) else n
+            for n in raw
+        ]
     else:
         logger.warning(
             "Unknown framework %r, attempting jest parser as fallback", framework
@@ -585,13 +602,9 @@ def collect_ts_test_ids_docker(
         else ""
     )
 
-    # 3. Build the collection command (as shell string for Docker bash -c)
     cmd_parts = _build_collect_command(framework, test_dir)
     collect_cmd = " ".join(shlex.quote(p) for p in cmd_parts)
 
-    # 4. Compose the full bash command for Docker
-    # Opt-in: build workspace siblings first for monorepo repos (e.g. prisma).
-    # Set KAIJU_TS_BUILD_WORKSPACES=1 to enable. Default off (build is slow).
     workspace_build = ""
     if os.environ.get("KAIJU_TS_BUILD_WORKSPACES") == "1":
         workspace_build = (
@@ -599,9 +612,26 @@ def collect_ts_test_ids_docker(
             "package.json 2>/dev/null; then "
             "pnpm -r build > /dev/null 2>&1 || true; fi; "
         )
+
+    if framework == "node_test":
+        quoted_test_dir = shlex.quote(test_dir)
+        node_test_setup = (
+            "npm install --no-save --silent tsx 2>/dev/null || true; "
+            "export NODE_OPTIONS='--import tsx'; "
+            f"_KAIJU_TS_TEST_FILES=$(find {quoted_test_dir} -type f "
+            "\\( -name '*.test.ts' -o -name '*.test.tsx' -o "
+            "-name '*.test.mts' -o -name '*.test.cts' -o "
+            "-name '*.spec.ts' -o -name '*.spec.tsx' \\) 2>/dev/null | tr '\\n' ' '); "
+        )
+        collect_cmd = collect_cmd.replace(
+            shlex.quote("$_KAIJU_TS_TEST_FILES"), "$_KAIJU_TS_TEST_FILES"
+        )
+    else:
+        node_test_setup = ""
+
     bash_cmd = (
         f"cd {CONTAINER_WORKDIR} && {checkout}{workspace_build}"
-        f"{collect_cmd} 2>/dev/null; true"
+        f"{node_test_setup}{collect_cmd} 2>/dev/null; true"
     )
 
     # 5. Run in Docker container
@@ -746,10 +776,27 @@ def validate_ts_base_commit_docker(
         if image_name is None:
             image_name = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
 
-    # 2. Build collection command WITHOUT checkout
     cmd_parts = _build_collect_command(framework, test_dir)
     collect_cmd = " ".join(shlex.quote(p) for p in cmd_parts)
-    bash_cmd = f"cd {CONTAINER_WORKDIR} && {collect_cmd} 2>&1; true"
+    if framework == "node_test":
+        quoted_test_dir = shlex.quote(test_dir)
+        node_test_setup = (
+            "npm install --no-save --silent tsx 2>/dev/null || true; "
+            "export NODE_OPTIONS='--import tsx'; "
+            f"_KAIJU_TS_TEST_FILES=$(find {quoted_test_dir} -type f "
+            "\\( -name '*.test.ts' -o -name '*.test.tsx' -o "
+            "-name '*.test.mts' -o -name '*.test.cts' -o "
+            "-name '*.spec.ts' -o -name '*.spec.tsx' \\) 2>/dev/null | tr '\\n' ' '); "
+        )
+        collect_cmd = collect_cmd.replace(
+            shlex.quote("$_KAIJU_TS_TEST_FILES"), "$_KAIJU_TS_TEST_FILES"
+        )
+    else:
+        node_test_setup = ""
+    bash_cmd = (
+        f"cd {CONTAINER_WORKDIR} && {node_test_setup}"
+        f"{collect_cmd} 2>&1; true"
+    )
 
     # 3. Run in Docker
     client = docker.from_env()
@@ -789,6 +836,180 @@ def validate_ts_base_commit_docker(
 # ---------------------------------------------------------------------------
 
 
+_NODE_TEST_FILE_GLOBS = (
+    "*.test.ts", "*.test.tsx", "*.test.mts", "*.test.cts",
+    "*.test.js", "*.test.jsx", "*.test.mjs", "*.test.cjs",
+    "*.spec.ts", "*.spec.tsx", "*.spec.mts", "*.spec.cts",
+    "*.spec.js", "*.spec.jsx", "*.spec.mjs", "*.spec.cjs",
+)
+
+
+def _discover_node_test_static(
+    *,
+    repo: str,
+    original_repo: str,
+    clone_dir: Path | None,
+    test_dir: str,
+    src_dir: str,
+    reference_commit: str | None,
+) -> list[str]:
+    from commit0.harness.node_test_tap import extract_test_names_static
+
+    repo_dir = _find_repo_dir(clone_dir, repo, original_repo)
+    if not repo_dir or not repo_dir.is_dir():
+        repo_name = repo.split("/")[-1] if "/" in repo else repo
+        for base in ("repos_ts", "repos", "repos_staging"):
+            candidate = Path.cwd() / base / repo_name
+            if candidate.is_dir():
+                repo_dir = candidate
+                break
+    if not repo_dir or not repo_dir.is_dir():
+        logger.warning(
+            "  node_test static discovery: repo dir not found for %s (searched clone_dir + repos_ts/repos/repos_staging)",
+            repo,
+        )
+        return []
+
+    if reference_commit:
+        try:
+            subprocess.run(
+                ["git", "checkout", reference_commit],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            logger.warning(
+                "  node_test static discovery: could not checkout reference %s (%s) — using current state",
+                reference_commit[:12] if reference_commit else "?",
+                exc,
+            )
+
+    search_roots: list[Path] = []
+    for candidate in (test_dir, src_dir, "."):
+        if not candidate:
+            continue
+        p = repo_dir / candidate
+        if p.exists() and p.is_dir():
+            search_roots.append(p)
+
+    seen_files: set[Path] = set()
+    test_files: list[Path] = []
+    for root in search_roots:
+        for pattern in _NODE_TEST_FILE_GLOBS:
+            for match in root.rglob(pattern):
+                resolved = match.resolve()
+                if resolved in seen_files:
+                    continue
+                parts = resolved.parts
+                if "node_modules" in parts or "dist" in parts or "build" in parts:
+                    continue
+                seen_files.add(resolved)
+                test_files.append(match)
+
+    if not test_files:
+        logger.warning("  node_test static discovery: no *.test.* / *.spec.* files found under %s", search_roots)
+        return []
+
+    all_names: list[str] = []
+    for tf in sorted(test_files):
+        try:
+            content = tf.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.warning("  node_test static discovery: could not read %s: %s", tf, exc)
+            continue
+        names = extract_test_names_static(content)
+        try:
+            rel = tf.relative_to(repo_dir)
+        except ValueError:
+            rel = tf
+        logger.info(
+            "  node_test static: %s → %d test names", str(rel), len(names)
+        )
+        prefix = str(rel).replace(os.sep, "/")
+        for n in names:
+            all_names.append(f"{prefix} > {n}")
+
+    return all_names
+
+
+def _push_test_ids_to_fork(
+    fork_repo: str,
+    bz2_path: Path,
+    token: str | None = None,
+    branch: str = "commit0_all",
+    dest_filename: str = "commit0_test_ids.bz2",
+    commit_message: str = "commit0: publish test IDs from generate_test_ids_ts",
+) -> None:
+    import subprocess
+    import tempfile
+
+    from tools._git_auth import get_github_token, push_to_fork
+
+    if not bz2_path.exists():
+        raise FileNotFoundError(f"test_ids bz2 not found: {bz2_path}")
+
+    token = token or get_github_token(required=True)
+
+    with tempfile.TemporaryDirectory(prefix="kaiju-testids-push-") as td:
+        tmp_repo = Path(td) / "repo"
+        tokenized_url = f"https://x-access-token:{token}@github.com/{fork_repo}.git"
+
+        clone_res = subprocess.run(
+            [
+                "git", "clone", "--depth", "1",
+                "--branch", branch,
+                tokenized_url, str(tmp_repo),
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if clone_res.returncode != 0:
+            raise RuntimeError(
+                f"clone {fork_repo}#{branch} failed: {clone_res.stderr.strip()[:500]}"
+            )
+
+        subprocess.run(
+            ["git", "config", "user.email", "commit0@kaiju.local"],
+            cwd=tmp_repo, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "commit0-bot"],
+            cwd=tmp_repo, check=True, capture_output=True,
+        )
+
+        (tmp_repo / dest_filename).write_bytes(bz2_path.read_bytes())
+
+        subprocess.run(
+            ["git", "add", dest_filename],
+            cwd=tmp_repo, check=True, capture_output=True,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_repo, capture_output=True, text=True, check=True,
+        )
+        if not status.stdout.strip():
+            logger.info(
+                "  test_ids identical to remote — skipping push (fork=%s)", fork_repo
+            )
+            return
+
+        subprocess.run(
+            ["git", "commit", "-m", commit_message],
+            cwd=tmp_repo, check=True, capture_output=True,
+        )
+
+        push_to_fork(
+            tmp_repo, fork_repo, branch=branch, token=token,
+            remote_name="origin", force_with_lease=False,
+        )
+        logger.info(
+            "  Pushed test_ids to %s (branch=%s, file=%s)",
+            fork_repo, branch, dest_filename,
+        )
+
+
 def generate_for_ts_dataset(
     dataset_path: Path,
     output_dir: Path,
@@ -798,6 +1019,8 @@ def generate_for_ts_dataset(
     max_repos: int | None = None,
     validate_base: bool = False,
     framework_override: str | None = None,
+    push_to_fork: bool = False,
+    push_token: str | None = None,
 ) -> dict[str, int]:
     """Generate test IDs for all repos in a dataset entries JSON file.
 
@@ -855,8 +1078,17 @@ def generate_for_ts_dataset(
             framework,
         )
 
-        # 4. Collect test IDs (Docker or local)
-        if use_docker:
+        if framework == "node_test":
+            test_ids = _discover_node_test_static(
+                repo=repo,
+                original_repo=entry.get("original_repo", ""),
+                clone_dir=clone_dir,
+                test_dir=test_dir,
+                src_dir=entry.get("src_dir", "src"),
+                reference_commit=entry.get("reference_commit"),
+            )
+            test_ids = _normalize_ts_test_ids(test_ids, test_dir)
+        elif use_docker:
             test_ids = collect_ts_test_ids_docker(
                 repo_name=repo_name,
                 test_dir=test_dir,
@@ -904,11 +1136,23 @@ def generate_for_ts_dataset(
             )
             test_ids = _normalize_ts_test_ids(test_ids, test_dir)
 
-        # 7. Save results
         if test_ids:
             out_file = save_test_ids(test_ids, repo_name, output_dir)
             logger.info("  Saved %d test IDs to %s", len(test_ids), out_file)
             results[repo_name] = len(test_ids)
+
+            if push_to_fork:
+                try:
+                    _push_test_ids_to_fork(
+                        fork_repo=repo,
+                        bz2_path=Path(out_file),
+                        token=push_token,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "  Push test_ids to fork failed for %s: %s (non-fatal)",
+                        repo, exc,
+                    )
 
             # 8. Validate base commit if requested
             if validate_base and use_docker:
@@ -1011,9 +1255,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--push-to-fork",
+        action="store_true",
+        help=(
+            "After saving test IDs locally, push a copy to each fork's "
+            "commit0_all branch as 'commit0_test_ids.bz2'. Requires GITHUB_TOKEN."
+        ),
+    )
+    parser.add_argument(
         "--framework",
         type=str,
-        choices=["jest", "vitest", "auto"],
+        choices=["jest", "vitest", "node_test", "auto"],
         default="auto",
         help="Test framework to use (default: auto-detect from dataset entry)",
     )
@@ -1063,6 +1315,7 @@ def main() -> None:
             max_repos=args.max_repos,
             validate_base=args.validate_base,
             framework_override=fw,
+            push_to_fork=args.push_to_fork,
         )
 
         total = sum(abs(v) for v in results.values())

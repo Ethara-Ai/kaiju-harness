@@ -131,24 +131,29 @@ class Commit0TsSpec(Spec):
                 f"test_cmd contains shell metacharacters (injection risk): {test_cmd!r}"
             )
 
-        # Detect framework and add JSON report flags.
-        # Tokenise the command and look for 'vitest'/'jest' as an argv token so that
-        # a jest invocation referencing a file named 'vitest-compat.test.ts' is not
-        # misclassified as vitest.
         try:
             _tokens = shlex.split(test_cmd)
         except ValueError:
             _tokens = test_cmd.split()
         _basenames = {t.rsplit("/", 1)[-1] for t in _tokens}
         is_vitest = "vitest" in _basenames
-        if is_vitest:
+        is_node_test = (
+            "--test" in _tokens
+            and any(b == "node" for b in _basenames)
+        )
+        if is_node_test:
+            json_flags = (
+                "--test-reporter=tap --test-reporter-destination=report.tap"
+            )
+        elif is_vitest:
             json_flags = "--reporter=json --outputFile=report.json"
         else:
-            # Jest
             json_flags = "--json --outputFile=report.json"
 
-        # --forceExit and --detectOpenHandles are Jest-only; Vitest rejects unknown flags
-        force_flags = "" if is_vitest else " --forceExit --detectOpenHandles"
+        force_flags = (
+            "" if (is_vitest or is_node_test)
+            else " --forceExit --detectOpenHandles"
+        )
 
         base_commit = (
             self.instance["base_commit"]
@@ -156,46 +161,62 @@ class Commit0TsSpec(Spec):
             else self.instance.base_commit
         )
 
+        _pathspecs = [
+            "test/", "tests/", "__tests__/",
+            ":(glob)**/test/**", ":(glob)**/tests/**", ":(glob)**/__tests__/**",
+            ":(icase,glob)Test/**", ":(icase,glob)Tests/**",
+            ":(glob)**/*.test.js", ":(glob)**/*.test.jsx",
+            ":(glob)**/*.test.mjs", ":(glob)**/*.test.cjs",
+            ":(glob)**/*.test.ts", ":(glob)**/*.test.tsx",
+            ":(glob)**/*.test.mts", ":(glob)**/*.test.cts",
+            ":(glob)**/*.spec.js", ":(glob)**/*.spec.jsx",
+            ":(glob)**/*.spec.mjs", ":(glob)**/*.spec.cjs",
+            ":(glob)**/*.spec.ts", ":(glob)**/*.spec.tsx",
+            "e2e/", "cypress/", "playwright/", "integration/",
+            ":(glob)**/e2e/**", ":(glob)**/cypress/**", ":(glob)**/playwright/**",
+            "jest.config.js", "jest.config.ts", "jest.config.mjs", "jest.config.cjs",
+            ":(glob)**/jest.config.js", ":(glob)**/jest.config.ts",
+            ":(glob)**/jest.config.mjs", ":(glob)**/jest.config.cjs",
+            "vitest.config.js", "vitest.config.ts", "vitest.config.mjs",
+            "vitest.workspace.js", "vitest.workspace.ts",
+            ":(glob)**/vitest.config.js", ":(glob)**/vitest.config.ts",
+            ":(glob)**/vitest.config.mjs", ":(glob)**/vitest.workspace.js",
+            ":(glob)**/vitest.workspace.ts",
+            "cypress.config.js", "cypress.config.ts", "cypress.config.mjs",
+            "playwright.config.js", "playwright.config.ts", "playwright.config.mjs",
+            "karma.conf.js", "karma.conf.ts", "wallaby.conf.js",
+            "babel.config.js", "babel.config.json", ".mocharc.js", ".mocharc.json",
+            "tsconfig.test.json", "tsconfig.spec.json",
+            ":(glob)**/tsconfig.test.json", ":(glob)**/tsconfig.spec.json",
+            "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
+            "pnpm-workspace.yaml",
+            "sitecustomize.py", "usercustomize.py",
+            ".env", ".gitmodules", ".gitattributes",
+        ]
+        _quoted_pathspecs = " ".join(shlex.quote(p) for p in _pathspecs)
         revert_test_paths = (
             f"git checkout {shlex.quote(base_commit)} -- "
-            f"test/ tests/ __tests__/ "
-            f":(glob)**/test/** :(glob)**/tests/** :(glob)**/__tests__/** "
-            f":(icase,glob)Test/** :(icase,glob)Tests/** "
-            f":(glob)**/*.test.js :(glob)**/*.test.jsx :(glob)**/*.test.mjs "
-            f":(glob)**/*.test.cjs :(glob)**/*.test.ts :(glob)**/*.test.tsx "
-            f":(glob)**/*.test.mts :(glob)**/*.test.cts "
-            f":(glob)**/*.spec.js :(glob)**/*.spec.jsx :(glob)**/*.spec.mjs "
-            f":(glob)**/*.spec.cjs :(glob)**/*.spec.ts :(glob)**/*.spec.tsx "
-            f"e2e/ cypress/ playwright/ integration/ "
-            f":(glob)**/e2e/** :(glob)**/cypress/** :(glob)**/playwright/** "
-            f"jest.config.js jest.config.ts jest.config.mjs jest.config.cjs "
-            f":(glob)**/jest.config.js :(glob)**/jest.config.ts "
-            f":(glob)**/jest.config.mjs :(glob)**/jest.config.cjs "
-            f"vitest.config.js vitest.config.ts vitest.config.mjs "
-            f"vitest.workspace.js vitest.workspace.ts "
-            f":(glob)**/vitest.config.js :(glob)**/vitest.config.ts "
-            f":(glob)**/vitest.config.mjs :(glob)**/vitest.workspace.js "
-            f":(glob)**/vitest.workspace.ts "
-            f"cypress.config.js cypress.config.ts cypress.config.mjs "
-            f"playwright.config.js playwright.config.ts playwright.config.mjs "
-            f"karma.conf.js karma.conf.ts wallaby.conf.js "
-            f"babel.config.js babel.config.json .mocharc.js .mocharc.json "
-            f"tsconfig.test.json tsconfig.spec.json "
-            f":(glob)**/tsconfig.test.json :(glob)**/tsconfig.spec.json "
-            f"package-lock.json pnpm-lock.yaml yarn.lock bun.lockb "
-            f"pnpm-workspace.yaml "
-            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
+            f"{_quoted_pathspecs} "
             f"2>/dev/null || true"
         )
-        return [
+        steps: list[str] = [
             f"cd {shlex.quote(self.repo_directory)}",
             f"git reset --hard {shlex.quote(base_commit)}",
             f"git apply --allow-empty -v {shlex.quote(diff_path)}",
             revert_test_paths,
             "git status",
-            f"{test_cmd} {json_flags}{force_flags} > test_output.txt 2>&1",
-            "echo $? > test_exit_code.txt",
         ]
+        if is_node_test:
+            steps.append("npm install --no-save --silent tsx 2>/dev/null || true")
+            steps.append(
+                f"NODE_OPTIONS='--import tsx' {test_cmd} {json_flags}{force_flags} > test_output.txt 2>&1"
+            )
+        else:
+            steps.append(
+                f"{test_cmd} {json_flags}{force_flags} > test_output.txt 2>&1"
+            )
+        steps.append("echo $? > test_exit_code.txt")
+        return steps
 
 
 def make_ts_spec(

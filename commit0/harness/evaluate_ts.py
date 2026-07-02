@@ -216,20 +216,23 @@ def main(
 
     out: list[dict[str, object]] = []
     for name in tqdm(log_dirs):
-        report_file = os.path.join(name, "report.json")
+        tap_file = os.path.join(name, "report.tap")
+        json_file = os.path.join(name, "report.json")
         display_name = name.split("/")[2] if len(name.split("/")) > 2 else name
         test_ids_raw = get_ts_test_ids(display_name, verbose=0)
         test_ids = [xx for x in test_ids_raw for xx in x if xx]
+
+        report_file = tap_file if os.path.exists(tap_file) else json_file
 
         if not os.path.exists(report_file):
             log_parent = os.path.dirname(report_file)
             test_output_file = os.path.join(log_parent, "test_output.txt")
             if os.path.exists(test_output_file):
-                reason = "jest_crash_or_collection_error"
+                reason = "runner_crash_or_collection_error"
             else:
                 reason = "container_or_infra_failure"
             logger.warning(
-                f"{display_name}: missing report.json ({reason}) — check {log_parent}"
+                f"{display_name}: missing report.tap/report.json ({reason}) — check {log_parent}"
             )
             out.append(
                 {
@@ -243,11 +246,16 @@ def main(
             continue
 
         try:
-            with open(report_file, "r") as file:
-                report = json.load(file)
+            if report_file.endswith(".tap"):
+                from commit0.harness.node_test_tap import tap_to_jest_report_shape
+                with open(report_file, "r") as file:
+                    report = tap_to_jest_report_shape(file.read())
+            else:
+                with open(report_file, "r") as file:
+                    report = json.load(file)
         except json.JSONDecodeError:
             logger.warning(
-                "Corrupt report.json for %s (truncated or invalid JSON) "
+                "Corrupt report file for %s (truncated or invalid) "
                 "— treating as 0%% pass rate",
                 display_name,
             )

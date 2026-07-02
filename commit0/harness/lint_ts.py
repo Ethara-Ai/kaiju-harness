@@ -25,6 +25,76 @@ def _detect_exec_prefix(repo_dir: str) -> str:
     return "npx"
 
 
+_ESLINT_CONFIG_FILES = (
+    "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs",
+    "eslint.config.ts", "eslint.config.mts", "eslint.config.cts",
+    ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json",
+    ".eslintrc.yaml", ".eslintrc.yml", ".eslintrc",
+)
+
+
+def _repo_has_eslint_config(repo_dir: str) -> bool:
+    d = Path(repo_dir)
+    for name in _ESLINT_CONFIG_FILES:
+        if (d / name).exists():
+            return True
+    pkg = d / "package.json"
+    if pkg.exists():
+        try:
+            import json
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "eslintConfig" in data:
+                return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
+def _package_json_lint_script(repo_dir: str) -> Optional[str]:
+    pkg = Path(repo_dir) / "package.json"
+    if not pkg.exists():
+        return None
+    try:
+        import json
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    scripts = data.get("scripts", {}) if isinstance(data, dict) else {}
+    if not isinstance(scripts, dict):
+        return None
+    for key in ("lint", "lint:check", "lint:ci"):
+        script = scripts.get(key)
+        if isinstance(script, str) and script.strip():
+            return key
+    return None
+
+
+def run_project_lint_script(
+    repo_dir: str, script_name: str
+) -> tuple[int, str]:
+    prefix = _detect_exec_prefix(repo_dir)
+    if prefix == "npx":
+        cmd = ["npm", "run", script_name, "--silent"]
+    elif prefix == "yarn":
+        cmd = ["yarn", "run", script_name]
+    elif prefix == "pnpm exec":
+        cmd = ["pnpm", "run", script_name]
+    elif prefix == "bunx":
+        cmd = ["bun", "run", script_name]
+    else:
+        cmd = ["npm", "run", script_name, "--silent"]
+
+    logger.info("Running project lint script: %s", " ".join(cmd))
+    try:
+        result = subprocess.run(
+            cmd, cwd=repo_dir,
+            capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return 1, f"Project lint script '{script_name}' timed out after 300s"
+    return result.returncode, (result.stdout + result.stderr)
+
+
 def run_eslint(
     repo_dir: str,
     files: Optional[list[str]] = None,
@@ -34,6 +104,31 @@ def run_eslint(
 
     Returns ``(return_code, combined_stdout_stderr)``.
     """
+    project_lint_key = _package_json_lint_script(repo_dir)
+    if project_lint_key:
+        node_modules = Path(repo_dir) / "node_modules"
+        if not node_modules.is_dir():
+            msg = (
+                f"Project scripts.{project_lint_key} present but node_modules "
+                f"not installed in {repo_dir}. Skipping project lint. "
+                "Run 'npm install' in the repo before linting."
+            )
+            logger.info(msg)
+            return 0, msg
+        logger.info(
+            "Using project's package.json scripts.%s instead of default ESLint",
+            project_lint_key,
+        )
+        return run_project_lint_script(repo_dir, project_lint_key)
+
+    if not config_path and not _repo_has_eslint_config(repo_dir):
+        msg = (
+            "ESLint skipped: no eslint.config.* / .eslintrc.* / package.json "
+            f"scripts.lint found in {repo_dir}. Project does not define linting."
+        )
+        logger.info(msg)
+        return 0, msg
+
     prefix = _detect_exec_prefix(repo_dir)
     cmd: list[str] = prefix.split() + [
         "eslint",
