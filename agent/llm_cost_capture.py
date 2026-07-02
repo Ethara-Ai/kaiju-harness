@@ -233,7 +233,15 @@ def _classify_source(_kwargs: Any) -> str:
     for frame in stack:
         name = frame.name or ""
         fn = (frame.filename or "").lower()
-        if "summarize_test_output" in name or "summarize_specification" in name:
+        # Match every language's summarizer: the generic `summarize_test_output`,
+        # the per-language variants (`summarize_rust_test_output`,
+        # `summarize_cpp_test_output`, …), and `summarize_specification`. The old
+        # exact `summarize_test_output` substring missed the `_rust_`/`_cpp_`
+        # variants, so their calls were mislabeled `main_loop` in by_source.
+        if (
+            ("summarize" in name and "test_output" in name)
+            or "summarize_specification" in name
+        ):
             our_seen = True
         if (
             "summarize_chat_history" in name

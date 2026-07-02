@@ -295,8 +295,12 @@ class TsAiderAgents(AiderAgents):
         agent_return = AiderReturn(log_file)
         agent_return.test_summarizer_cost = sum(c.cost for c in _test_summarizer_costs)
 
-        if thinking_capture is not None:
-            for c in _test_summarizer_costs:
-                thinking_capture.summarizer_costs.add(c)
+        # NOTE: do NOT add _test_summarizer_costs to
+        # thinking_capture.summarizer_costs. The test-output summarizer runs
+        # INSIDE the module capture window (wrapped cmd_test during agent.run),
+        # so its litellm call is already recorded in the per-module call-log
+        # (grand_cost). Adding it here too double-counts it in get_metrics
+        # (grand_cost + summarizer_costs). It is still reported via
+        # agent_return.test_summarizer_cost and shows in by_source['our_summarizer'].
 
         return agent_return
