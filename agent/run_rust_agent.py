@@ -793,7 +793,7 @@ def run_rust_agent_for_repo(
                             metadata=metadata,
                             metrics=thinking_capture.get_module_metrics(src_file_name),
                             stage="test",
-                            stage_runtime_seconds=module_elapsed,
+                            module_runtime_seconds=module_elapsed,
                         )
 
                 if agent_config.record_test_for_each_commit:
@@ -926,7 +926,7 @@ def run_rust_agent_for_repo(
                             metadata=metadata,
                             metrics=thinking_capture.get_module_metrics(lint_file_name),
                             stage="lint",
-                            stage_runtime_seconds=module_elapsed,
+                            module_runtime_seconds=module_elapsed,
                         )
 
                 if agent_config.record_test_for_each_commit:
@@ -1055,7 +1055,7 @@ def run_rust_agent_for_repo(
                             metadata=metadata,
                             metrics=thinking_capture.get_module_metrics(file_name),
                             stage="draft",
-                            stage_runtime_seconds=module_elapsed,
+                            module_runtime_seconds=module_elapsed,
                         )
 
                 if agent_config.record_test_for_each_commit:

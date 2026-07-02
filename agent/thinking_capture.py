@@ -209,46 +209,88 @@ class ThinkingCapture:
     def get_module_metrics(self, module: str) -> dict:
         """Aggregate metrics for a single module.
 
-        When llm_cost_capture recorded calls for this module, totals come from
-        the full call log (main loop + aider auxiliaries + our summarizers) so
-        the numbers reconcile against provider billing. Otherwise fall back to
-        turn-derived totals which only see the main loop.
+        The per-module LLM call-log (``llm_cost_capture``) is the SOURCE OF TRUTH:
+        it records every litellm call (main loop + aider auxiliaries like
+        commit-msg/repomap + our summarizers) and reconciles against provider
+        billing. When it's present ALL scalar counts below are derived from it, so
+        they are mutually consistent:
+
+          - ``total_llm_calls``  = every captured call (all sources).
+          - ``num_turns``        = MAIN-LOOP calls only, i.e. the number of
+            assistant coding turns. This deliberately excludes auxiliary calls
+            (commit-msg, summarizer, repomap) which are not conversational turns.
+            Deriving it from the same call-log as ``by_source`` means
+            ``num_turns == by_source['main_loop']['calls']`` ALWAYS — the previous
+            code took it from a separate turn-capture patch that desynced from the
+            call-log in ~72% of modules (sometimes exceeding the captured call
+            count, which is impossible for a real turn).
+          - ``total_thinking_tokens`` + ``thinking_tokens_estimated``: the flag is
+            True when any contributing call's thinking count was ESTIMATED from
+            (possibly summarized) reasoning text rather than a provider-exact
+            usage field — so consumers don't treat the proxy as a billed figure.
+
+        Only when the call-log is ABSENT (degraded capture) do we fall back to
+        turn-derived totals, which see the main loop only.
         """
+        from agent.llm_cost_capture import SRC_MAIN_LOOP
+
         module_turns = [
             t for t in self.turns if t.role == "assistant" and t.module == module
         ]
-        is_vertex_module = bool(module_turns) and all(
-            getattr(t, "provider", "") == "vertex_ai_gemini" for t in module_turns
-        )
-        metrics: dict = {
-            "total_cost": sum(t.cost for t in module_turns),
-            "total_prompt_tokens": sum(t.prompt_tokens for t in module_turns),
-            "total_completion_tokens": sum(t.completion_tokens for t in module_turns),
-            "total_thinking_tokens": sum(t.thinking_tokens for t in module_turns),
-            "num_turns": len(module_turns),
-        }
-        if is_vertex_module:
-            metrics["cached_content_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
-        else:
-            metrics["cache_hit_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
-            metrics["cache_write_tokens"] = sum(t.cache_write_tokens for t in module_turns)
 
         call_log = self.module_llm_calls.get(module)
         if call_log is not None and call_log.calls:
+            # --- Source of truth: the call-log. All scalars derive from here. ---
             totals = call_log.grand_totals()
-            metrics["total_cost"] = totals["cost_usd"]
-            metrics["total_prompt_tokens"] = totals["prompt_tokens"]
-            metrics["total_completion_tokens"] = totals["completion_tokens"]
-            metrics["total_thinking_tokens"] = totals["thinking_tokens"]
-            for k in ("cache_hit_tokens", "cache_write_tokens", "cached_content_tokens"):
-                metrics.pop(k, None)
+            by_source = call_log.by_source()
+            metrics: dict = {
+                "total_cost": totals["cost_usd"],
+                "total_prompt_tokens": totals["prompt_tokens"],
+                "total_completion_tokens": totals["completion_tokens"],
+                "total_thinking_tokens": totals["thinking_tokens"],
+                "thinking_tokens_estimated": any(
+                    getattr(c, "thinking_tokens_estimated", False) for c in call_log.calls
+                ),
+                # num_turns == main-loop assistant coding turns (reconciled).
+                "num_turns": (by_source.get(SRC_MAIN_LOOP, {}) or {}).get("calls", 0),
+                # total_llm_calls == every captured call across all sources.
+                "total_llm_calls": totals["calls"],
+                # Per-module agent.run wall-clock, measured by capture_module_calls.
+                # This is the fallback runtime for languages (go/c) that don't pass
+                # an explicit module_elapsed; write_module_output_json prefers the
+                # explicit value when the caller provides one.
+                "module_runtime_seconds": round(getattr(call_log, "wall_seconds", 0.0), 2),
+            }
             if "cached_content_tokens" in totals:
                 metrics["cached_content_tokens"] = totals["cached_content_tokens"]
             else:
                 metrics["cache_hit_tokens"] = totals["cache_read_tokens"]
                 metrics["cache_write_tokens"] = totals["cache_write_tokens"]
-            metrics["by_source"] = call_log.by_source()
+            metrics["by_source"] = by_source
             metrics["llm_calls"] = [c.to_dict() for c in call_log.calls]
+        else:
+            # --- Degraded fallback: no call-log, use turn-capture (main loop only). ---
+            is_vertex_module = bool(module_turns) and all(
+                getattr(t, "provider", "") == "vertex_ai_gemini" for t in module_turns
+            )
+            total_thinking = sum(t.thinking_tokens for t in module_turns)
+            metrics = {
+                "total_cost": sum(t.cost for t in module_turns),
+                "total_prompt_tokens": sum(t.prompt_tokens for t in module_turns),
+                "total_completion_tokens": sum(t.completion_tokens for t in module_turns),
+                "total_thinking_tokens": total_thinking,
+                # No call-log to confirm exactness; a non-zero thinking count in
+                # this path is almost always the text-estimate cascade.
+                "thinking_tokens_estimated": total_thinking > 0,
+                "num_turns": len(module_turns),
+                # Without a call-log the only visible calls are the main-loop turns.
+                "total_llm_calls": len(module_turns),
+            }
+            if is_vertex_module:
+                metrics["cached_content_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
+            else:
+                metrics["cache_hit_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
+                metrics["cache_write_tokens"] = sum(t.cache_write_tokens for t in module_turns)
 
         mismatch = self.capture_mismatches.get(module)
         if mismatch is not None:

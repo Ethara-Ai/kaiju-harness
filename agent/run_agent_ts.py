@@ -325,7 +325,7 @@ def run_agent_for_repo_ts(
                                     test_file_name
                                 ),
                                 stage="test",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
 
             elif agent_config.run_entire_dir_lint:
@@ -399,7 +399,7 @@ def run_agent_for_repo_ts(
                                     lint_file_name
                                 ),
                                 stage="lint",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
             else:
                 message, spec_costs = get_message_ts(
@@ -468,7 +468,7 @@ def run_agent_for_repo_ts(
                                 metadata=metadata,
                                 metrics=thinking_capture.get_module_metrics(file_name),
                                 stage="draft",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
 
         if thinking_capture is not None:

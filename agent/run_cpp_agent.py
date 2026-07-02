@@ -482,7 +482,7 @@ def run_cpp_agent_for_repo(
                     metadata=metadata,
                     metrics=thinking_capture.get_module_metrics(stem),
                     stage=stage,
-                    stage_runtime_seconds=module_elapsed,
+                    module_runtime_seconds=module_elapsed,
                 )
 
     # Write eval_results.json — mirrors Java structure

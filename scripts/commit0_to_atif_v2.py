@@ -682,12 +682,18 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
         fm_extra["resolved"] = resolved
     fm_extra["stage_pass_rate"] = stage_pass_rate
     fm_extra["edit_count"] = st.n_edits
-    if _m.get("stage_runtime_seconds") is not None:
-        fm_extra["stage_runtime_seconds"] = _m["stage_runtime_seconds"]
+    if _m.get("module_runtime_seconds") is not None:
+        fm_extra["module_runtime_seconds"] = _m["module_runtime_seconds"]
     if _m.get("num_turns") is not None:
         fm_extra["num_turns"] = _m["num_turns"]
+    if _m.get("total_llm_calls") is not None:
+        fm_extra["total_llm_calls"] = _m["total_llm_calls"]
     if _m.get("total_thinking_tokens") is not None:
         fm_extra["total_thinking_tokens"] = _m["total_thinking_tokens"]
+        # Flag when the thinking count is a text estimate (e.g. Anthropic
+        # display:summarized) rather than a provider-exact billed figure.
+        if _m.get("thinking_tokens_estimated"):
+            fm_extra["thinking_tokens_estimated"] = True
     if _m.get("cache_write_tokens") is not None:
         fm_extra["cache_write_tokens"] = _m["cache_write_tokens"]
     final_metrics = FinalMetrics(

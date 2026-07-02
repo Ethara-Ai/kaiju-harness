@@ -441,7 +441,7 @@ def run_java_agent(
                                 metadata=metadata,
                                 metrics=thinking_capture.get_module_metrics(test_log_name),
                                 stage="test",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
                         _flush_trajectory()
 
@@ -524,7 +524,7 @@ def run_java_agent(
                                 metadata=metadata,
                                 metrics=thinking_capture.get_module_metrics(file_log_name),
                                 stage="draft",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
                         _flush_trajectory()
 

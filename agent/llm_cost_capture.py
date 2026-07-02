@@ -68,6 +68,12 @@ class LlmCallRecord:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     thinking_tokens: int = 0
+    # True when thinking_tokens was ESTIMATED by counting the (possibly
+    # summarized) reasoning text rather than read from a provider-exact
+    # reasoning-token usage field. Anthropic with display:summarized never
+    # returns exact reasoning tokens, so the value is a text-length proxy that
+    # undercounts the real reasoning; flag it so consumers don't treat it as billed.
+    thinking_tokens_estimated: bool = False
     cost_usd: float = 0.0
     duration_s: float = 0.0
     timestamp: str = ""
@@ -81,6 +87,7 @@ class LlmCallRecord:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "thinking_tokens": self.thinking_tokens,
+            "thinking_tokens_estimated": self.thinking_tokens_estimated,
             "cost_usd": self.cost_usd,
             "duration_s": self.duration_s,
             "timestamp": self.timestamp,
@@ -108,6 +115,12 @@ class LlmCallLog:
     # Replaces the deprecated httpx-INFO-log scanner which broke when httpx logs
     # were suppressed to prevent Bedrock ARN leakage.
     callback_event_count: int = 0
+    # Wall-clock seconds of the agent.run() bracketed by capture_module_calls.
+    # Set on context-manager exit. Used as the per-module runtime for languages
+    # (go/c) whose run loop doesn't measure a per-module elapsed itself; the other
+    # languages pass a slightly more inclusive module_elapsed explicitly and that
+    # takes precedence in write_module_output_json.
+    wall_seconds: float = 0.0
 
     def add(self, record: LlmCallRecord) -> None:
         if self.model_short:
@@ -522,6 +535,7 @@ def _record_call(
             "cacheWriteInputTokenCount",
         )
 
+        # Prefer the provider's EXACT reasoning-token usage field.
         thinking_t = _extract_int(
             usage, "reasoning_tokens", "completion_tokens_details_reasoning"
         )
@@ -533,8 +547,11 @@ def _record_call(
             _od = getattr(usage, "output_tokens_details", None)
             if _od is not None:
                 thinking_t = _extract_int(_od, "thinking_tokens")
+        thinking_estimated = False
 
-        # Claude adaptive thinking: count from response body when usage gives 0.
+        # Claude adaptive thinking: no exact usage field, so ESTIMATE by counting
+        # the reasoning text. With display:summarized this text is a SUMMARY, so
+        # the count undercounts the true (billed) reasoning — flag it as estimated.
         if thinking_t == 0 and response is not None:
             try:
                 _msg = response.choices[0].message
@@ -542,6 +559,7 @@ def _record_call(
                 if _rc and isinstance(_rc, str):
                     import litellm as _litellm
                     thinking_t = _litellm.token_counter(model=model, text=_rc)
+                    thinking_estimated = thinking_t > 0
             except Exception:
                 pass
         computed_cost = _compute_cost(model, prompt_t, completion_t, cache_r, cache_w)
@@ -557,7 +575,7 @@ def _record_call(
                 cache_read_tokens=cache_r,
                 cache_write_tokens=cache_w,
                 thinking_tokens=thinking_t,
-
+                thinking_tokens_estimated=thinking_estimated,
                 cost_usd=cost,
                 duration_s=duration,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -984,9 +1002,11 @@ def capture_module_calls(
     _wrap_litellm_completion()
     log = LlmCallLog(model_short=model_short)
     token = _current_log.set(log)
+    _wall_t0 = time.monotonic()
     try:
         yield log
     finally:
+        log.wall_seconds = time.monotonic() - _wall_t0
         _drain_summarizer_threads()
         _current_log.reset(token)
         if thinking_capture is not None:
