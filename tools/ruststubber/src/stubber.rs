@@ -511,54 +511,57 @@ trait MyTrait {
     }
 
     #[test]
-    fn test_impl_iterator_return_unified_to_loop() {
+    fn test_impl_iterator_return_left_unstubbed() {
+        // RPIT can't be stubbed with a divergent body (opaque type infers to `()`
+        // → doesn't compile). Real body must be retained so the base builds.
         let src = r#"
 fn get_items() -> impl Iterator<Item = i32> {
     vec![1, 2, 3].into_iter()
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
-        assert!(!out.contains("vec!"), "got: {out}");
-        assert!(!out.contains("std::iter::empty"), "trait-specific stub leaked: {out}");
+        assert!(out.contains("vec![1, 2, 3].into_iter()"), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
-    fn test_impl_iterator_with_lifetime_unified_to_loop() {
+    fn test_impl_iterator_with_lifetime_left_unstubbed() {
         let src = r#"
 fn get_strs<'a>(v: &'a [String]) -> impl Iterator<Item = &'a str> + 'a {
     v.iter().map(|s| s.as_str())
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(out.contains("v.iter().map"), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
-    fn test_impl_display_return_unified_to_loop() {
+    fn test_impl_display_return_left_unstubbed() {
         let src = r#"
 fn display_thing() -> impl std::fmt::Display {
     "hello"
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
-        assert!(!out.contains("String::new()"), "trait-specific stub leaked: {out}");
+        assert!(out.contains(r#""hello""#), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
-    fn test_impl_into_iterator_return_unified_to_loop() {
+    fn test_impl_into_iterator_return_left_unstubbed() {
         let src = r#"
 fn get_collection() -> impl IntoIterator<Item = u8> {
     vec![1u8, 2, 3]
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(out.contains("vec![1u8, 2, 3]"), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
-    fn test_unknown_impl_trait_fallback_loop() {
+    fn test_unknown_impl_trait_left_unstubbed() {
         let src = r#"
 trait Custom {}
 fn get_custom() -> impl Custom {
@@ -568,7 +571,8 @@ fn get_custom() -> impl Custom {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(out.contains("impl Custom for X"), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
@@ -584,7 +588,7 @@ fn get_vec() -> Vec<i32> {
     }
 
     #[test]
-    fn test_impl_method_with_impl_trait_return_unified_to_loop() {
+    fn test_impl_method_with_impl_trait_return_left_unstubbed() {
         let src = r#"
 struct Foo;
 impl Foo {
@@ -594,11 +598,12 @@ impl Foo {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
+        assert!(out.contains(r#"vec!["a".to_string()].into_iter()"#), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
-    fn test_impl_fn_mut_return_unified_to_loop() {
+    fn test_impl_fn_mut_return_left_unstubbed() {
         let src = r#"
 use std::cmp::Ordering;
 struct GridItem;
@@ -607,20 +612,20 @@ fn cmp_items(_axis: u32) -> impl FnMut(&GridItem, &GridItem) -> Ordering {
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
-        assert!(!out.contains("Ordering::Equal"), "got: {out}");
+        assert!(out.contains("Ordering::Equal"), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
-    fn test_impl_fn_once_no_return_unified_to_loop() {
+    fn test_impl_fn_once_no_return_left_unstubbed() {
         let src = r#"
 fn make_callback() -> impl FnOnce(i32) {
     |x| println!("{}", x)
 }
 "#;
         let out = stub_source(src).unwrap();
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {out}");
-        assert!(!out.contains("println"), "got: {out}");
+        assert!(out.contains("println"), "real body must be retained: {out}");
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub: {out}");
     }
 
     #[test]
