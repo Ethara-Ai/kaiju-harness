@@ -23,6 +23,7 @@ from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
 from agent.llm_cost_capture import capture_module_calls
+from agent import agent_utils_ts_compile_gate as _ts_compile_gate
 from commit0.harness.constants_ts import TS_SPLIT, TS_STUB_MARKER
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_ts_test_ids import main as get_ts_tests
@@ -234,26 +235,70 @@ def run_agent_for_repo_ts(
 
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
+                    _cg_enabled = _ts_compile_gate.is_enabled()
                     with capture_module_calls(
                         thinking_capture,
                         module=test_file_name,
                         log_dir=test_log_dir,
                     ):
-                        _ = run_with_recovery(agent.run, 
-                            "",
-                            test_cmd,
-                            lint_cmd,
-                            target_edit_files,
-                            test_log_dir,
-                            test_first=True,
-                            thinking_capture=thinking_capture,
-                            current_stage="test",
-                            current_module=test_file_name,
-                            max_test_output_length=agent_config.max_test_output_length,
-                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                            test_files_readonly=test_files_readonly,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=test_log_dir,)
+                        def _invoke_agent_test():
+                            return run_with_recovery(agent.run,
+                                "",
+                                test_cmd,
+                                lint_cmd,
+                                target_edit_files,
+                                test_log_dir,
+                                test_first=True,
+                                thinking_capture=thinking_capture,
+                                current_stage="test",
+                                current_module=test_file_name,
+                                max_test_output_length=agent_config.max_test_output_length,
+                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                _kaiju_log_dir=test_log_dir,
+                            )
+
+                        def _reprompt_test(err_text):
+                            return run_with_recovery(agent.run,
+                                f"tsc --noEmit failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
+                                test_cmd,
+                                lint_cmd,
+                                target_edit_files,
+                                test_log_dir,
+                                test_first=False,
+                                thinking_capture=thinking_capture,
+                                current_stage="test",
+                                current_module=test_file_name,
+                                max_test_output_length=agent_config.max_test_output_length,
+                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                _kaiju_log_dir=test_log_dir,
+                            )
+
+                        if _cg_enabled:
+                            _cg_result = _ts_compile_gate.run_with_compile_gate(
+                                _invoke_agent_test,
+                                repo_dir=repo_path,
+                                local_repo=local_repo,
+                                pre_sha=pre_sha,
+                                max_retries=int(os.environ.get(
+                                    "KAIJU_TS_COMPILE_GATE_MAX_RETRIES", "2"
+                                )),
+                                re_prompt_callback=_reprompt_test,
+                                persist_dir=str(test_log_dir),
+                            )
+                            if _cg_result.get("status") == "reverted":
+                                logger.warning(
+                                    "compile_gate REVERTED %s to %s after %d retries (regressions: %s)",
+                                    test_file_name,
+                                    pre_sha[:8],
+                                    _cg_result.get("retries_used", 0),
+                                    _cg_result.get("regressions"),
+                                )
+                        else:
+                            _ = _invoke_agent_test()
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -455,6 +500,77 @@ def run_agent_for_repo_ts(
         local_repo.close()
 
 
+def _run_agent_for_repo_ts_safe(
+    repo_base_dir: str,
+    agent_config: AgentConfig,
+    example: RepoInstance,
+    branch: str,
+    override_previous_changes: bool,
+    backend: str,
+    log_dir: str,
+    commit0_config_file: str,
+) -> tuple[str, bool]:
+    try:
+        _, repo_name = example["repo"].split("/")
+    except (KeyError, ValueError, AttributeError):
+        repo_name = "<unknown>"
+    try:
+        run_agent_for_repo_ts(
+            repo_base_dir,
+            agent_config,
+            example,
+            branch,
+            override_previous_changes,
+            backend,
+            log_dir,
+            commit0_config_file,
+        )
+        return repo_name, True
+    except Exception:
+        logger.error(
+            "TS agent worker for %s failed; isolating so the batch continues",
+            repo_name,
+            exc_info=True,
+        )
+        return repo_name, False
+
+
+def _collect_worker_results_ts(
+    results: list, per_worker_timeout: float | None
+) -> dict:
+    succeeded = 0
+    failed = 0
+    failed_repos: list = []
+    for result in results:
+        try:
+            value = result.get(timeout=per_worker_timeout)
+        except multiprocessing.TimeoutError:
+            failed += 1
+            failed_repos.append("<timeout>")
+            logger.error(
+                "TS worker exceeded per-worker timeout of %ss; isolating",
+                per_worker_timeout,
+            )
+            continue
+        except Exception:
+            failed += 1
+            logger.error(
+                "A TS worker raised before returning a status; isolating",
+                exc_info=True,
+            )
+            continue
+        if isinstance(value, tuple) and len(value) == 2:
+            repo_name, ok = value
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+                failed_repos.append(repo_name)
+        else:
+            succeeded += 1
+    return {"succeeded": succeeded, "failed": failed, "failed_repos": failed_repos}
+
+
 def run_agent_ts_impl(
     branch: str,
     override_previous_changes: bool,
@@ -497,9 +613,19 @@ def run_agent_ts_impl(
         with multiprocessing.Pool(processes=max_parallel_repos) as pool:
             results = []
 
+            per_worker_timeout_env = os.environ.get(
+                "KAIJU_TS_WORKER_TIMEOUT_SEC", "21600"
+            )
+            try:
+                per_worker_timeout: float | None = float(per_worker_timeout_env)
+                if per_worker_timeout <= 0:
+                    per_worker_timeout = None
+            except ValueError:
+                per_worker_timeout = 21600.0
+
             for example in filtered_dataset:
                 result = pool.apply_async(
-                    run_agent_for_repo_ts,
+                    _run_agent_for_repo_ts_safe,
                     args=(
                         commit0_config["base_dir"],
                         agent_config,
@@ -514,9 +640,15 @@ def run_agent_ts_impl(
                 )
                 results.append(result)
 
-            for result in results:
-                result.get()
-            logger.info("All %d TS agent workers completed", len(results))
+            summary = _collect_worker_results_ts(results, per_worker_timeout)
+            logger.info(
+                "TS agent batch completed: %d succeeded, %d failed (%s)",
+                summary["succeeded"],
+                summary["failed"],
+                ", ".join(summary["failed_repos"])
+                if summary["failed_repos"]
+                else "none",
+            )
 
 
 @app.command()

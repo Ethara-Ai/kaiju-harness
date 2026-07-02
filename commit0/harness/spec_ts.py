@@ -83,11 +83,10 @@ class Commit0TsSpec(Spec):
         setup = self._get_setup_dict()
         install_cmd = setup.get("install", "npm install")
 
-        _SHELL_DANGER = set(";&|`$(){}!><")
+        _SHELL_DANGER = set(";&|`$(){}!><\\\n\r")
         if any(c in _SHELL_DANGER for c in install_cmd):
-            logger.warning(
-                "install_cmd contains shell metacharacters: %r — potential injection risk",
-                install_cmd,
+            raise ValueError(
+                f"install_cmd contains shell metacharacters (injection risk): {install_cmd!r}"
             )
 
         steps = [
@@ -103,7 +102,7 @@ class Commit0TsSpec(Spec):
         steps.extend(self._package_manager_install(install_cmd))
         steps.extend(
             [
-                f"{install_cmd} --ignore-scripts 2>/dev/null || {install_cmd} 2>/dev/null || true",
+                f"{install_cmd} --ignore-scripts 2>/dev/null || {install_cmd} --ignore-scripts 2>/dev/null || (echo 'INSTALL_FAILED' >&2; exit 1)",
                 f"{prefix}{' --yes' if prefix == 'npx' else ''} node-gyp rebuild 2>/dev/null || true",
                 f"git reset --hard {shlex.quote(base_commit)}",
             ]
@@ -126,11 +125,10 @@ class Commit0TsSpec(Spec):
             else default_test
         )
 
-        _SHELL_DANGER = set(";&|`$(){}!><")
+        _SHELL_DANGER = set(";&|`$(){}!><\\\n\r")
         if any(c in _SHELL_DANGER for c in test_cmd):
-            logger.warning(
-                "test_cmd contains shell metacharacters: %r — potential injection risk",
-                test_cmd,
+            raise ValueError(
+                f"test_cmd contains shell metacharacters (injection risk): {test_cmd!r}"
             )
 
         # Detect framework and add JSON report flags.
@@ -161,10 +159,31 @@ class Commit0TsSpec(Spec):
         revert_test_paths = (
             f"git checkout {shlex.quote(base_commit)} -- "
             f"test/ tests/ __tests__/ "
+            f":(glob)**/test/** :(glob)**/tests/** :(glob)**/__tests__/** "
+            f":(icase,glob)Test/** :(icase,glob)Tests/** "
+            f":(glob)**/*.test.js :(glob)**/*.test.jsx :(glob)**/*.test.mjs "
+            f":(glob)**/*.test.cjs :(glob)**/*.test.ts :(glob)**/*.test.tsx "
+            f":(glob)**/*.test.mts :(glob)**/*.test.cts "
+            f":(glob)**/*.spec.js :(glob)**/*.spec.jsx :(glob)**/*.spec.mjs "
+            f":(glob)**/*.spec.cjs :(glob)**/*.spec.ts :(glob)**/*.spec.tsx "
+            f"e2e/ cypress/ playwright/ integration/ "
+            f":(glob)**/e2e/** :(glob)**/cypress/** :(glob)**/playwright/** "
             f"jest.config.js jest.config.ts jest.config.mjs jest.config.cjs "
+            f":(glob)**/jest.config.js :(glob)**/jest.config.ts "
+            f":(glob)**/jest.config.mjs :(glob)**/jest.config.cjs "
             f"vitest.config.js vitest.config.ts vitest.config.mjs "
             f"vitest.workspace.js vitest.workspace.ts "
+            f":(glob)**/vitest.config.js :(glob)**/vitest.config.ts "
+            f":(glob)**/vitest.config.mjs :(glob)**/vitest.workspace.js "
+            f":(glob)**/vitest.workspace.ts "
+            f"cypress.config.js cypress.config.ts cypress.config.mjs "
+            f"playwright.config.js playwright.config.ts playwright.config.mjs "
+            f"karma.conf.js karma.conf.ts wallaby.conf.js "
             f"babel.config.js babel.config.json .mocharc.js .mocharc.json "
+            f"tsconfig.test.json tsconfig.spec.json "
+            f":(glob)**/tsconfig.test.json :(glob)**/tsconfig.spec.json "
+            f"package-lock.json pnpm-lock.yaml yarn.lock bun.lockb "
+            f"pnpm-workspace.yaml "
             f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
             f"2>/dev/null || true"
         )

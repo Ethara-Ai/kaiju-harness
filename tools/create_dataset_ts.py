@@ -32,7 +32,7 @@ TS_REQUIRED_FIELDS = {
     "language": str,
 }
 
-TS_SETUP_FIELDS = {"node", "install", "packages", "pre_install", "specification"}
+TS_SETUP_FIELDS = {"node_version", "install", "packages", "pre_install", "specification"}
 TS_TEST_FIELDS = {"test_cmd", "test_dir"}
 from commit0.harness.constants_ts import SUPPORTED_NODE_VERSIONS
 
@@ -176,6 +176,12 @@ def validate_ts_entry(entry: dict, index: int) -> list[str]:
                 issues.append(
                     f"[{index}] Unrecognized test command prefix in test.test_cmd: "
                     f"'{first_word}'. Allowed: {sorted(allowed_test_prefixes)}"
+                )
+            _SHELL_DANGER = set(";&|`$(){}!><")
+            if any(c in _SHELL_DANGER for c in test_cmd):
+                issues.append(
+                    f"[{index}] test.test_cmd contains shell metacharacters: "
+                    f"'{test_cmd}'. Only simple runner commands allowed."
                 )
 
     return issues

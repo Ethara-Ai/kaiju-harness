@@ -6,6 +6,7 @@ Analogue of run_pytest_ids.py — runs Jest/Vitest tests inside Docker container
 import git
 import logging
 import os
+import shlex
 import sys
 import traceback
 from pathlib import Path
@@ -46,16 +47,23 @@ def _inject_test_ids(eval_script: str, test_ids: str) -> str:
     if not test_ids:
         return eval_script
 
-    # Defensive: strip newlines and NUL bytes so a tampered test id cannot inject
-    # extra lines into the generated bash script.
-    sanitized = test_ids.replace("\n", " ").replace("\r", " ").replace("\x00", "")
+    # Tokenize test_ids and shlex-quote each so shell metacharacters in a
+    # dataset-supplied id cannot escape argv into a new shell command.
+    tokens = [
+        t for t in test_ids.replace("\r", " ").replace("\x00", "").split()
+        if t
+    ]
+    quoted = " ".join(shlex.quote(t) for t in tokens)
 
     lines = eval_script.split("\n")
     new_lines: list[str] = []
     for line in lines:
-        if "--forceExit" in line or "vitest" in line:
-            # Append test_ids (space-separated) to the test command
-            line = line.rstrip() + " " + sanitized
+        # Only match jest/vitest as an argv token (not embedded in a filename
+        # like "vitest-compat.test.ts"). Require the line to be the actual
+        # test-run command (contains --forceExit or vitest AND the redirect).
+        stripped = line.strip()
+        if ("--forceExit" in line or " vitest " in " " + stripped + " ") and ">" in line:
+            line = line.rstrip() + " " + quoted
         new_lines.append(line)
     return "\n".join(new_lines)
 
@@ -93,9 +101,8 @@ def main(
         if repo_or_repo_dir.endswith("/"):
             repo_or_repo_dir = repo_or_repo_dir[:-1]
         repo_name = example["repo"].split("/")[-1]
-        if repo_name in os.path.basename(repo_or_repo_dir) or repo_or_repo_dir.endswith(
-            repo_name
-        ):
+        target_basename = os.path.basename(repo_or_repo_dir)
+        if target_basename == repo_name or repo_or_repo_dir.endswith("/" + repo_name):
             spec = make_ts_spec(cast(RepoInstance, example), absolute=absolute)
             break
 

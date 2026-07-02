@@ -15,14 +15,12 @@
 # ============================================================
 
 set -euo pipefail
+set -m
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE_TS="${BASE_DIR}/repos_ts"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
@@ -433,11 +431,13 @@ watchdog_run() {
     local hard_timeout_warned="false"
     local mtime_functional="true"
 
-    local _probe_mtime
-    _probe_mtime=$(get_mtime "/proc/self/status")
-    if [[ "$_probe_mtime" -eq 0 ]] 2>/dev/null; then
-        log "  WATCHDOG: WARNING — get_mtime returned 0 for /proc/self/status."
-        mtime_functional="false"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        local _probe_mtime
+        _probe_mtime=$(get_mtime "/proc/self/status")
+        if [[ "$_probe_mtime" -eq 0 ]] 2>/dev/null; then
+            log "  WATCHDOG: WARNING — get_mtime returned 0 for /proc/self/status."
+            mtime_functional="false"
+        fi
     fi
 
     while kill -0 "$agent_pid" 2>/dev/null; do
@@ -877,6 +877,17 @@ run_evaluate_ts() {
     combined_output=$(cat "$eval_log")
 
     parse_eval_output "$combined_output"
+
+    EVAL_INFRA_FAILED="false"
+    if [[ $eval_rc -eq 124 ]]; then
+        log "  Evaluation TIMED OUT after ${EVAL_TIMEOUT}s — marking infra failure (pass_rate=null)"
+        EVAL_INFRA_FAILED="true"
+        EVAL_PASS_RATE="null"
+    elif [[ $eval_rc -ne 0 && "$EVAL_NUM_TESTS" -eq 0 ]]; then
+        log "  Evaluation FAILED with no parseable results (rc=${eval_rc}) — marking infra failure (pass_rate=null)"
+        EVAL_INFRA_FAILED="true"
+        EVAL_PASS_RATE="null"
+    fi
 
     if [[ $eval_rc -ne 0 ]]; then
         log "  Evaluation FAILED — last 10 lines:"
