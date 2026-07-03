@@ -66,6 +66,11 @@ class Turn:
     timestamp: str = ""
     llm_response_id: str | None = None
     provider: str = ""
+    # Ground-truth edits aider ACTUALLY applied in this turn, captured from
+    # EditBlockCoder.apply_edits (see agent.edit_capture). Each entry is
+    # {"path", "old_str", "new_str"}. None = not captured (fall back to
+    # re-parsing `content`); [] = captured and the turn applied zero edits.
+    applied_edits: Optional[list] = None
 
 
 @dataclass
@@ -78,6 +83,14 @@ class ThinkingCapture:
     )
     module_llm_calls: dict[str, "LlmCallLog"] = field(default_factory=dict)
     capture_mismatches: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # True once ground-truth edit-capture is installed (agent.edit_capture, wired
+    # from capture_module_calls). While active, a captured assistant turn starts
+    # with applied_edits=[] instead of None, so a turn whose apply_edits is skipped
+    # by an aider send_message early-return (add-files reflection / max_tokens /
+    # interrupted) reads as "0 edits applied" — NOT as "uncaptured", which would
+    # make the formatter fabricate phantom edits from the model's text. None still
+    # means "capture inactive" (legacy / non-EditBlock coder) -> text-parser fallback.
+    edit_capture_active: bool = False
     # E6: when set, each turn is appended to this JSONL file AS IT HAPPENS, and a
     # sibling `.heartbeat` is touched. A worker killed mid-module (timeout, cap,
     # crash) then still leaves a recoverable per-turn trajectory + a liveness
@@ -183,6 +196,12 @@ class ThinkingCapture:
             timestamp=timestamp,
             llm_response_id=llm_response_id,
             provider=provider,
+            # Under active ground-truth capture, start at [] (authoritative "no
+            # edits applied yet"); record_applied_edits extends it if apply_edits
+            # fires. A turn whose apply_edits is skipped (early-return) then stays
+            # [] and the formatter emits no edits — instead of the None -> parser
+            # -> phantom path. Legacy/inactive capture keeps None (parser fallback).
+            applied_edits=[] if self.edit_capture_active else None,
         )
         self.turns.append(_t)
         self._flush_turn_live(_t)

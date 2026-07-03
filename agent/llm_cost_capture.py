@@ -1000,6 +1000,23 @@ def capture_module_calls(
 
     register_litellm_callbacks()
     _wrap_litellm_completion()
+    # Ground-truth edit capture: patch aider's apply_edits ONCE so the trajectory
+    # uses the edits aider actually applied, not a heuristic re-parse of the
+    # model's text. Idempotent + best-effort; installed here (the one shared
+    # choke point all languages wrap agent.run with) so there's no per-language
+    # wiring. A hook failure must never break the run.
+    try:
+        from agent.edit_capture import install_edit_capture
+
+        # Mark capture active ONLY if the patch is really in place, so a turn whose
+        # apply_edits is skipped by an aider early-return (add-files reflection /
+        # max_tokens / interrupted) reads as "0 edits applied" instead of falling
+        # back to the phantom-producing text parser. If aider is unavailable
+        # (install returns False), leave it inactive so the parser fallback applies.
+        if install_edit_capture() and thinking_capture is not None:
+            thinking_capture.edit_capture_active = True
+    except Exception:  # noqa: BLE001
+        _logger.debug("edit capture install skipped", exc_info=True)
     log = LlmCallLog(model_short=model_short)
     token = _current_log.set(log)
     _wall_t0 = time.monotonic()

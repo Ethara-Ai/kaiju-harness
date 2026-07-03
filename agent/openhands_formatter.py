@@ -530,7 +530,22 @@ def _convert_file_read_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
 
 
 def _convert_assistant_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
-    reasoning, edits = parse_edit_blocks(turn.content)
+    # Reasoning text always comes from the parser (it strips the SEARCH/REPLACE
+    # blocks out of the prose). For the EDITS themselves, prefer the ground-truth
+    # list aider actually applied (agent.edit_capture) when it was captured;
+    # `applied_edits is None` means capture didn't fire (e.g. a non-EditBlock
+    # coder) so we fall back to the heuristic text parse. `applied_edits == []`
+    # is authoritative "this turn applied zero edits" and is honored as-is.
+    reasoning, parsed_edits = parse_edit_blocks(turn.content)
+    captured = getattr(turn, "applied_edits", None)
+    if captured is not None:
+        edits = [
+            EditBlock(path=e["path"], old_str=e.get("old_str", ""), new_str=e.get("new_str", ""))
+            for e in captured
+            if isinstance(e, dict) and e.get("path")
+        ]
+    else:
+        edits = parsed_edits
     thinking_blocks = _make_thinking_blocks(turn.thinking)
     events: list[dict] = []
     rid = getattr(turn, "llm_response_id", None)
