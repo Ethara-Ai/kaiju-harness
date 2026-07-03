@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+import uuid as _uuid_mod
 
 from commit0.harness.constants_c import ALLOWED_APT_PACKAGES
 
@@ -139,14 +140,13 @@ def create_hf_dataset_dict(entries: list[dict]) -> list[dict]:
     represents a distinct experiment instance, so the id is generated here
     (not in prepare_repo_c.py where entries.json is a reusable source).
     """
-    import uuid as _uuid_mod
 
     hf_entries: list[dict] = []
     for entry in entries:
         hf_entries.append(
             {
                 "instance_id": entry["instance_id"],
-                "id": str(_uuid_mod.uuid4()),
+                "id": entry.get("id") or str(_uuid_mod.uuid4()),
                 "repo": entry["repo"],
                 "original_repo": entry["original_repo"],
                 "base_commit": entry["base_commit"],

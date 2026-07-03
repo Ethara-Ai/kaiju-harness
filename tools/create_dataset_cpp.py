@@ -13,6 +13,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, List
+import uuid as _uuid_mod
 
 logger = logging.getLogger(__name__)
 
@@ -185,13 +186,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if args.command == "create":
-        import uuid as _uuid_mod
 
         raw = Path(args.entries).read_text()
         entries = json.loads(raw)
         if isinstance(entries, dict):
             entries = [entries]
-        annotated = [dict(e, id=str(_uuid_mod.uuid4())) for e in entries]
+        annotated = [dict(e, id=e.get("id") or str(_uuid_mod.uuid4())) for e in entries]
         if args.output:
             output = args.output
         elif annotated:

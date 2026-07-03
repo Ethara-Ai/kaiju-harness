@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import uuid as _uuid_mod
 
 from tools._git_auth import (
     git,
@@ -442,6 +443,7 @@ def create_dataset_entry(
 
     return {
         "instance_id": f"commit-0/{repo_name}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": upstream,
         "base_commit": base_commit,

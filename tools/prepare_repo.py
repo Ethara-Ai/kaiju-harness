@@ -37,6 +37,7 @@ import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
+import uuid as _uuid_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -878,6 +879,7 @@ def create_dataset_entry(
 
     entry = {
         "instance_id": f"commit-0/{repo_name}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,

@@ -12,7 +12,7 @@ Reuses git helpers from tools.prepare_repo -- ZERO modifications to existing fil
 """
 
 from __future__ import annotations
-
+import uuid as _uuid_mod
 import json
 import logging
 import os
@@ -1217,6 +1217,7 @@ def prepare_ts_repo(
 
     return {
         "instance_id": f"commit-0/{full_name.split('/')[-1]}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,

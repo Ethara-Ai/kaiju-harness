@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import uuid as _uuid_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -319,7 +320,7 @@ def create_dataset_entry(
         setup["java_version"] = det.version
         setup["version_source"] = det.source
         setup["version_conflicts"] = det.conflicts
-    import uuid as _uuid_mod
+
 
     return {
         "instance_id": f"commit-0/{repo_short}",

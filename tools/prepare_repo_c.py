@@ -34,6 +34,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+import uuid as _uuid_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -403,6 +404,7 @@ def prepare_one(
 
     entry = {
         "instance_id": f"{slug.split('/')[-1]}_c",
+        "id": str(_uuid_mod.uuid4()),
         "repo": target_repo_slug,
         "original_repo": slug,
         "base_commit": base_commit,

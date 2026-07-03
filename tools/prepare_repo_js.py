@@ -28,6 +28,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+import uuid as _uuid_mod
 
 from commit0.harness.constants_js import (
     DEFAULT_NODE_VERSION,
@@ -696,6 +697,7 @@ def prepare_js_repo(
 
     return {
         "instance_id": f"commit-0/{full_name.split('/')[-1]}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,

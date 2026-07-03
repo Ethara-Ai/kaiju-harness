@@ -30,7 +30,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-
+import uuid as _uuid_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -469,6 +469,7 @@ def prepare_single_repo(
         repo_name = full_name.split("/")[-1]
         entry = {
             "instance_id": f"{full_name.replace('/', '_')}_go",
+            "id": str(_uuid_mod.uuid4()),
             "repo": forked_name,
             "original_repo": full_name,
             "base_commit": base_commit,

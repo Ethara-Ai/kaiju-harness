@@ -44,6 +44,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import uuid as _uuid_mod
 
 from tools._git_auth import (
     git,
@@ -486,7 +487,6 @@ def create_dataset_entry(
             )
             test_dir = crate_root
 
-    import uuid as _uuid_mod
 
     return {
         "instance_id": f"commit-0/{crate}",
