@@ -940,6 +940,20 @@ watchdog_run() {
     local mtime_functional="true"
     local _veto_start=0  # C1: when the live-conn/CPU gate started suppressing the inactivity kill
 
+    # C1 (gj fix): how long a live-connection / advancing-CPU agent may run WITHOUT
+    # log progress before we kill it anyway. The old bound was a hard 2x inactivity
+    # (30 min at defaults) — far too tight for a legitimate long extended-thinking
+    # turn, ESPECIALLY now that the bridge buffers the whole SSE stream (Option D),
+    # so aider writes NOTHING to the log until a turn completes. A live connection +
+    # advancing work is strong health evidence, and the absolute wall-time cap
+    # (MAX_WALL_TIME, default 24h) already backstops a true hang, so this can be
+    # generous. Default 90 min; override with WATCHDOG_LIVECONN_VETO_SECS.
+    local _liveconn_veto_secs="${WATCHDOG_LIVECONN_VETO_SECS:-}"
+    if ! [[ "$_liveconn_veto_secs" =~ ^[0-9]+$ ]] || [[ "$_liveconn_veto_secs" -lt 1 ]]; then
+        _liveconn_veto_secs=$(( INACTIVITY_TIMEOUT * 6 ))
+        [[ "$_liveconn_veto_secs" -lt 5400 ]] && _liveconn_veto_secs=5400
+    fi
+
     # Validate get_mtime works before relying on it. Probe a path that exists on
     # BOTH Linux and macOS — the agent's log_dir (created before launch) — not
     # /proc/self/status, which is absent on macOS and made the inactivity
@@ -1065,7 +1079,11 @@ watchdog_run() {
             local _alive="false"
             if _pgroup_has_live_conn "$agent_pid"; then
                 _alive="true"
-                log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                # Throttle this message: at a 5s poll it would print ~1080 identical
+                # lines over a 90-min veto window. Log at most ~once/minute.
+                if [[ $(( idle % 60 )) -lt 5 ]]; then
+                    log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                fi
             else
                 local _cpu1 _cpu2
                 _cpu1=$(_pgroup_cpu_secs "$agent_pid")
@@ -1080,14 +1098,15 @@ watchdog_run() {
                 # C1 (regression fix): a live connection/CPU DELAYS the inactivity
                 # kill, it must not VETO it forever — otherwise a stale half-open
                 # ESTABLISHED socket with --max-wall-time 0 hangs indefinitely.
-                # Bound the veto: after 2x the inactivity limit of continuous
-                # "alive but no log progress", kill anyway.
+                # Bound the veto at _liveconn_veto_secs (default 90 min, generous
+                # for long buffered-stream turns); the absolute wall-time cap still
+                # backstops a genuine infinite hang.
                 if [[ "$_veto_start" -eq 0 ]]; then _veto_start="$now_epoch"; fi
                 local _veto_for=$(( now_epoch - _veto_start ))
-                if [[ "$_veto_for" -lt $(( inactivity_limit * 2 )) ]]; then
+                if [[ "$_veto_for" -lt "$_liveconn_veto_secs" ]]; then
                     continue
                 fi
-                log "  WATCHDOG: agent alive-but-silent for ${_veto_for}s (>2x inactivity) — killing despite live signal."
+                log "  WATCHDOG: agent alive-but-silent for ${_veto_for}s (> ${_liveconn_veto_secs}s live-conn veto cap) — killing despite live signal."
             else
                 _veto_start=0
             fi

@@ -150,9 +150,18 @@ def _max_inline_wait_seconds() -> int:
 
 # Option D — buffer-and-retry: buffer the whole upstream SSE stream and re-issue
 # on a mid-stream drop so the client only ever sees a COMPLETE response.
+#
+# DEFAULT OFF (opt-in). Buffering the whole stream means the client (aider) gets
+# NO incremental output until a turn completes, so the harness inactivity
+# watchdog sees a frozen log for the entire turn and — on a long extended-thinking
+# module (observed on gj's promise_node) — false-killed a healthy agent. The
+# mid-stream drop is already handled transparently at the call level by litellm
+# `num_retries` (Option A) plus recovery.py's transient retry (Option B), so D is
+# only needed as a last resort. Enable with KAIJU_CC_BUFFER_AND_RETRY=1 when A/B
+# prove insufficient for a persistent drop.
 def _buffer_and_retry_enabled() -> bool:
-    return os.environ.get("KAIJU_CC_BUFFER_AND_RETRY", "1").strip().lower() not in (
-        "0", "false", "no", "off", "",
+    return os.environ.get("KAIJU_CC_BUFFER_AND_RETRY", "0").strip().lower() in (
+        "1", "true", "yes", "on",
     )
 
 
