@@ -486,8 +486,11 @@ def create_dataset_entry(
             )
             test_dir = crate_root
 
+    import uuid as _uuid_mod
+
     return {
         "instance_id": f"commit-0/{crate}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": upstream,
         "base_commit": base_commit,

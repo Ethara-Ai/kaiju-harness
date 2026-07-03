@@ -653,6 +653,7 @@ def run_rust_agent_for_repo(
             dataset_path=commit0_config_for_meta.get("dataset_name", ""),
             max_iterations=agent_config.max_iteration,
             model_short=getattr(agent_config, "model_short", "") or "",
+            dataset_id=example.get("id"),
         )
 
     with DirContext(repo_path):

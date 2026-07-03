@@ -128,7 +128,7 @@ def build_metadata(
         Metadata dictionary for output.jsonl.
 
     """
-    return {
+    result = {
         "llm": {
             "model": model_short,
             **{k: v for k, v in extra.items() if k.startswith("llm_")},
@@ -136,3 +136,6 @@ def build_metadata(
         "dataset": os.path.basename(dataset_path),
         "max_iterations": max_iterations,
     }
+    if extra.get("dataset_id"):
+        result["dataset_id"] = extra["dataset_id"]
+    return result

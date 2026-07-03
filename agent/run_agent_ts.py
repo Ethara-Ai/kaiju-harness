@@ -195,6 +195,7 @@ def run_agent_for_repo_ts(
                 dataset_path=commit0_config_for_meta.get("dataset_name", ""),
                 max_iterations=agent_config.max_iteration,
                 model_short=agent_config.model_short,
+                dataset_id=example.get("id"),
             )
 
         with DirContext(repo_path):

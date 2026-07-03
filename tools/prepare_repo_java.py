@@ -319,8 +319,11 @@ def create_dataset_entry(
         setup["java_version"] = det.version
         setup["version_source"] = det.source
         setup["version_conflicts"] = det.conflicts
+    import uuid as _uuid_mod
+
     return {
         "instance_id": f"commit-0/{repo_short}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,

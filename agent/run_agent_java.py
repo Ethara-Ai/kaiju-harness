@@ -352,6 +352,7 @@ def run_java_agent(
             dataset_path="",
             max_iterations=agent_config.max_iteration,
             model_short=agent_config.model_short,
+            dataset_id=example.get("id"),
         )
 
     from agent.openhands_formatter import write_module_output_json
