@@ -226,6 +226,74 @@ def install_edit_capture(coder_cls: Any = None) -> bool:
     return patched_any
 
 
+_REFLECTION_INSTALLED = False
+
+
+def record_reflections(coder: Any) -> None:
+    """Accumulate aider's per-run_one ``num_reflections`` onto the coder's current
+    module in ``thinking_capture.module_reflections``.
+
+    aider resets ``num_reflections`` to 0 at the start of every ``run_one`` (one per
+    user message) and increments it for each auto-injected continuation (add-files /
+    lint / test / edit-format retry). We read it AFTER run_one and add it to the
+    module's running total, so a module with several ``coder.run`` calls sums all
+    reflections. Best-effort: silently no-ops if the coder wasn't turn-capture wired.
+    """
+    tc = getattr(coder, "_thinking_capture", None)
+    module = getattr(coder, "_current_module", None)
+    if tc is None or not module:
+        return
+    n = getattr(coder, "num_reflections", 0) or 0
+    store = getattr(tc, "module_reflections", None)
+    if store is None:
+        store = {}
+        tc.module_reflections = store
+    store[module] = store.get(module, 0) + int(n)
+
+
+def install_reflection_capture(coder_cls: Any = None) -> bool:
+    """Idempotently class-patch aider's ``Coder.run_one`` so each completed run_one
+    records its reflection count (see ``record_reflections``).
+
+    ``run_one`` is defined on the base ``Coder`` and inherited by every coder, so a
+    single class-level patch covers all languages/coders with no per-language wiring
+    (mirrors ``install_edit_capture``). Pass ``coder_cls`` to patch a specific class
+    (tests). Returns True if the patch is in place, False if aider was unavailable.
+    """
+    global _REFLECTION_INSTALLED
+    is_default = coder_cls is None
+    if is_default:
+        if _REFLECTION_INSTALLED:
+            return True
+        try:
+            from aider.coders.base_coder import Coder as coder_cls  # type: ignore
+        except Exception:  # noqa: BLE001
+            _logger.debug("reflection capture: aider Coder unavailable")
+            return False
+
+    if getattr(coder_cls.run_one, "_kaiju_reflect_original", None) is None:
+        original_run_one = coder_cls.run_one
+
+        def _wrapped_run_one(self: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return original_run_one(self, *args, **kwargs)
+            finally:
+                try:
+                    record_reflections(self)
+                except Exception:  # noqa: BLE001 — capture must never break the run
+                    _logger.debug("reflection capture: record failed", exc_info=True)
+
+        _wrapped_run_one._kaiju_reflect_original = original_run_one  # type: ignore[attr-defined]
+        coder_cls.run_one = _wrapped_run_one  # type: ignore[assignment]
+        _logger.debug("reflection capture: installed on %s.run_one", coder_cls.__name__)
+
+    # The module-level guard tracks ONLY the real base-Coder patch, so an explicit
+    # test class can't short-circuit production install.
+    if is_default:
+        _REFLECTION_INSTALLED = True
+    return True
+
+
 def edits_to_records(edits: Any) -> list[dict]:
     """Normalize an aider edit list into ``{"path", "old_str", "new_str"}`` records.
 

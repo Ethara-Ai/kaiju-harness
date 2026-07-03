@@ -605,3 +605,86 @@ class TestNoIoLeak:
         c.apply_edits([("a.rs", "fn a() { OLD }", "fn a() { NEW }")], dry_run=False)
         assert "write_text" in io.__dict__ and io.write_text is sentinel
 
+
+
+class TestReflectionCapture:
+    """num_reflections (aider's exact per-run_one count, accumulated per module) and
+    num_agent_turns = num_turns - num_reflections. Additive: num_turns unchanged."""
+
+    def _fake_coder(self, tc, module, num_reflections):
+        class _C:
+            pass
+        c = _C()
+        c._thinking_capture = tc
+        c._current_module = module
+        c.num_reflections = num_reflections
+        return c
+
+    def test_record_accumulates_per_module(self):
+        from agent.edit_capture import record_reflections
+        tc = ThinkingCapture()
+        record_reflections(self._fake_coder(tc, "m", 2))   # run_one #1
+        record_reflections(self._fake_coder(tc, "m", 1))   # run_one #2 (retry)
+        record_reflections(self._fake_coder(tc, "other", 5))
+        assert tc.module_reflections == {"m": 3, "other": 5}
+
+    def test_record_noops_without_module_or_capture(self):
+        from agent.edit_capture import record_reflections
+        tc = ThinkingCapture()
+        record_reflections(self._fake_coder(tc, "", 3))     # no module
+        c = self._fake_coder(None, "m", 3); c._thinking_capture = None
+        record_reflections(c)                                # no capture
+        assert tc.module_reflections == {}
+
+    def test_metrics_derives_agent_turns(self):
+        from agent.llm_cost_capture import LlmCallLog, LlmCallRecord, SRC_MAIN_LOOP
+        tc = ThinkingCapture()
+        tc.module_reflections["m"] = 2
+        log = LlmCallLog()
+        for _ in range(3):  # 3 main_loop calls = num_turns
+            log.add(LlmCallRecord(source=SRC_MAIN_LOOP, model="x", prompt_tokens=1,
+                                  completion_tokens=1, cost_usd=0.0, provider="anthropic"))
+        tc.module_llm_calls["m"] = log
+        m = tc.get_module_metrics("m")
+        assert m["num_turns"] == 3               # unchanged (main_loop calls)
+        assert m["num_reflections"] == 2
+        assert m["num_agent_turns"] == 1         # 3 - 2
+
+    def test_metrics_zero_reflections_default(self):
+        from agent.llm_cost_capture import LlmCallLog, LlmCallRecord, SRC_MAIN_LOOP
+        tc = ThinkingCapture()
+        log = LlmCallLog()
+        log.add(LlmCallRecord(source=SRC_MAIN_LOOP, model="x", prompt_tokens=1,
+                              completion_tokens=1, cost_usd=0.0, provider="anthropic"))
+        tc.module_llm_calls["m"] = log
+        m = tc.get_module_metrics("m")
+        assert m["num_reflections"] == 0 and m["num_agent_turns"] == m["num_turns"] == 1
+
+    def test_metrics_fallback_path_has_reflection_fields(self):
+        # No call-log -> degraded path still emits the fields.
+        tc = ThinkingCapture()
+        tc.add_user_turn("u", "draft", "m", turn_number=0)
+        tc.add_assistant_turn("a", None, 0, 1, 1, 0, 0, 0.0, "draft", "m", turn_number=0)
+        tc.module_reflections["m"] = 0
+        m = tc.get_module_metrics("m")
+        assert "num_reflections" in m and "num_agent_turns" in m
+        assert m["num_agent_turns"] == m["num_turns"]
+
+    def test_agent_turns_never_negative(self):
+        from agent.llm_cost_capture import LlmCallLog, LlmCallRecord, SRC_MAIN_LOOP
+        tc = ThinkingCapture()
+        tc.module_reflections["m"] = 99   # pathological: more reflections than calls
+        log = LlmCallLog()
+        log.add(LlmCallRecord(source=SRC_MAIN_LOOP, model="x", prompt_tokens=1,
+                              completion_tokens=1, cost_usd=0.0, provider="anthropic"))
+        tc.module_llm_calls["m"] = log
+        assert tc.get_module_metrics("m")["num_agent_turns"] == 0    # clamped
+
+    def test_install_idempotent_on_real_coder(self):
+        from agent.edit_capture import install_reflection_capture
+        assert install_reflection_capture() is True
+        from aider.coders.base_coder import Coder
+        first = Coder.run_one
+        install_reflection_capture()
+        assert Coder.run_one is first
+        assert getattr(Coder.run_one, "_kaiju_reflect_original", None) is not None

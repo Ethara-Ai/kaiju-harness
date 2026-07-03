@@ -83,6 +83,12 @@ class ThinkingCapture:
     )
     module_llm_calls: dict[str, "LlmCallLog"] = field(default_factory=dict)
     capture_mismatches: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-module count of aider reflection continuations (add-files / lint / test /
+    # edit-format retries). Accumulated from aider's own coder.num_reflections after
+    # each run_one (which resets it per user message), via agent.edit_capture. A
+    # reflection is an auto-injected continuation of the SAME turn, not a new agent
+    # turn — so num_agent_turns = num_turns(main_loop calls) - num_reflections.
+    module_reflections: dict[str, int] = field(default_factory=dict)
     # True once ground-truth edit-capture is installed (agent.edit_capture, wired
     # from capture_module_calls). While active, a captured assistant turn starts
     # with applied_edits=[] instead of None, so a turn whose apply_edits is skipped
@@ -310,6 +316,15 @@ class ThinkingCapture:
             else:
                 metrics["cache_hit_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
                 metrics["cache_write_tokens"] = sum(t.cache_write_tokens for t in module_turns)
+
+        # Reflection accounting (additive; leaves num_turns untouched). num_turns
+        # counts main-loop LLM calls, which INCLUDES aider's auto-injected reflection
+        # continuations (add-files / lint / test / edit-format retries). Those are
+        # continuations of the same turn, not new agent turns. num_reflections is
+        # aider's own exact count; num_agent_turns is the substantive rounds.
+        num_reflections = int(self.module_reflections.get(module, 0) or 0)
+        metrics["num_reflections"] = num_reflections
+        metrics["num_agent_turns"] = max(0, metrics.get("num_turns", 0) - num_reflections)
 
         mismatch = self.capture_mismatches.get(module)
         if mismatch is not None:

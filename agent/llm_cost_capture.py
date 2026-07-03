@@ -1006,7 +1006,7 @@ def capture_module_calls(
     # choke point all languages wrap agent.run with) so there's no per-language
     # wiring. A hook failure must never break the run.
     try:
-        from agent.edit_capture import install_edit_capture
+        from agent.edit_capture import install_edit_capture, install_reflection_capture
 
         # Mark capture active ONLY if the patch is really in place, so a turn whose
         # apply_edits is skipped by an aider early-return (add-files reflection /
@@ -1015,6 +1015,10 @@ def capture_module_calls(
         # (install returns False), leave it inactive so the parser fallback applies.
         if install_edit_capture() and thinking_capture is not None:
             thinking_capture.edit_capture_active = True
+        # Reflection capture: accumulate aider's per-module reflection count so
+        # get_module_metrics can report num_reflections + num_agent_turns. Class-
+        # level patch on Coder.run_one (all languages), idempotent + best-effort.
+        install_reflection_capture()
     except Exception:  # noqa: BLE001
         _logger.debug("edit capture install skipped", exc_info=True)
     log = LlmCallLog(model_short=model_short)
