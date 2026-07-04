@@ -115,6 +115,13 @@ class LlmCallLog:
     # Replaces the deprecated httpx-INFO-log scanner which broke when httpx logs
     # were suppressed to prevent Bedrock ARN leakage.
     callback_event_count: int = 0
+    # Per-log dedup keys: the same underlying call is recorded by up to three paths
+    # (litellm callback, stream interceptor, completion wrapper). This set catches
+    # those WITHIN one capture window. It is per-LlmCallLog (NOT a module-global) so
+    # two DIFFERENT calls in different modules that happen to share a signature
+    # (model+tokens) are never cross-deduped into a single record (which silently
+    # under-counted cost/calls/turns).
+    _seen: set = field(default_factory=set)
     # Wall-clock seconds of the agent.run() bracketed by capture_module_calls.
     # Set on context-manager exit. Used as the per-module runtime for languages
     # (go/c) whose run loop doesn't measure a per-module elapsed itself; the other
@@ -223,7 +230,8 @@ def _drain_summarizer_threads() -> None:
                     t.join(timeout=60)
         except Exception as e:
             _logger.warning("summarizer drain failed: %s", e)
-_seen_call_ids: set[str] = set()
+# Guards the per-log `_seen` dedup sets (see LlmCallLog._seen). The dedup state is
+# per-LlmCallLog, not module-global, to avoid cross-module false-dedup.
 _seen_lock = threading.Lock()
 
 
@@ -380,15 +388,23 @@ def _compute_cost(model: str, p_tok: int, c_tok: int, cr_tok: int, cw_tok: int) 
 
 
 def _normalize_model(model: str) -> str:
+    """Canonicalize a model id for cross-path dedup ONLY (not pricing).
+
+    The wrapper path sees the model the API RETURNED (often bare, e.g. ``gpt-5.5``
+    after the codex bridge remaps it) while the callback path sees the model the
+    CLIENT sent (prefixed + dated, e.g. ``openai/gpt-5.5-2026-04-23``). Both must
+    reduce to the same string or the same call is recorded twice. So strip every
+    known provider prefix AND a trailing date snapshot suffix.
+    """
     if not model:
         return ""
     m = model
-    while m.startswith("bedrock/"):
-        m = m[len("bedrock/"):]
-    while m.startswith("anthropic/"):
-        m = m[len("anthropic/"):]
-    while m.startswith("vertex_ai/"):
-        m = m[len("vertex_ai/"):]
+    for _prefix in ("bedrock/", "anthropic/", "vertex_ai/", "vertex_ai_beta/",
+                    "openai/", "gemini/", "azure/"):
+        while m.startswith(_prefix):
+            m = m[len(_prefix):]
+    # Drop a trailing OpenAI-style date snapshot, e.g. "gpt-5.5-2026-04-23".
+    m = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", m)
     return m
 
 
@@ -484,15 +500,16 @@ def _record_call(
             if isinstance(mp, str):
                 model_pre = mp
         canonical_key = f"call:{_normalize_model(model_pre)}:{prompt_t}:{completion_t}:{cache_r_pre}:{cache_w_pre}"
+        seen = log._seen  # per-log dedup window (not module-global)
         with _seen_lock:
-            if canonical_key in _seen_call_ids:
+            if canonical_key in seen:
                 return
-            if call_id and call_id in _seen_call_ids:
-                _seen_call_ids.add(canonical_key)
+            if call_id and call_id in seen:
+                seen.add(canonical_key)
                 return
-            _seen_call_ids.add(canonical_key)
+            seen.add(canonical_key)
             if call_id:
-                _seen_call_ids.add(call_id)
+                seen.add(call_id)
         cost = 0.0
         if isinstance(hidden, dict):
             raw = hidden.get("response_cost")
@@ -636,9 +653,9 @@ def _record_stream_chunk_usage(model: str, usage: Any) -> None:
 
         dedup_key = f"call:{_normalize_model(model)}:{prompt_t}:{completion_t}:{cache_r}:{cache_w}"
         with _seen_lock:
-            if dedup_key in _seen_call_ids:
+            if dedup_key in log._seen:
                 return
-            _seen_call_ids.add(dedup_key)
+            log._seen.add(dedup_key)
 
         cost = _compute_cost(model, prompt_t, completion_t, cache_r, cache_w)
         log.add(
@@ -720,9 +737,9 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
                 pass
         dedup_key = f"call:{_normalize_model(model)}:{prompt_t}:{completion_t}:{cache_r}:{cache_w}"
         with _seen_lock:
-            if dedup_key in _seen_call_ids:
+            if dedup_key in log._seen:
                 return
-            _seen_call_ids.add(dedup_key)
+            log._seen.add(dedup_key)
 
         try:
             stack_kwargs = {"model": model}
