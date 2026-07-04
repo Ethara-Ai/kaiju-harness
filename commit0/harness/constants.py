@@ -69,10 +69,33 @@ class Files(BaseModel):
 
 BASE_BRANCH = "commit0"
 
-# Constants - Evaluation Log Directories
-BASE_IMAGE_BUILD_DIR = Path("logs/build_images/base")
-REPO_IMAGE_BUILD_DIR = Path("logs/build_images/repo")
-OCI_IMAGE_DIR = Path("logs/build_images/oci")
+import os as _os
+from kaiju.paths import is_consolidated as _is_consolidated, build_logs_dir as _build_logs_dir
+
+
+def _resolve_build_dir(subdir: str) -> Path:
+    """Route build-image logs to outputs/<uuid>/build_logs/<subdir> when consolidated + KAIJU_EXPERIMENT_UUID set; legacy logs/build_images/<subdir> otherwise."""
+    uuid = _os.environ.get("KAIJU_EXPERIMENT_UUID", "")
+    if uuid and _is_consolidated():
+        return _build_logs_dir(uuid) / subdir
+    return Path(f"logs/build_images/{subdir}")
+
+
+def base_image_build_dir() -> Path:
+    return _resolve_build_dir("base")
+
+
+def repo_image_build_dir() -> Path:
+    return _resolve_build_dir("repo")
+
+
+def oci_image_dir() -> Path:
+    return _resolve_build_dir("oci")
+
+
+BASE_IMAGE_BUILD_DIR = base_image_build_dir()
+REPO_IMAGE_BUILD_DIR = repo_image_build_dir()
+OCI_IMAGE_DIR = oci_image_dir()
 RUN_PYTEST_LOG_DIR = Path("logs/pytest")
 RUN_AGENT_LOG_DIR = Path("logs/agent")
 

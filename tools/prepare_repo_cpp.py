@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 import uuid as _uuid_mod
 
 from tools._git_auth import (
@@ -846,7 +847,26 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     if args.repo is None:
         args.repo = args.upstream

@@ -30,6 +30,7 @@ if [[ -f "${BASE_DIR}/.env" ]]; then
     source "${BASE_DIR}/.env"
     set +a
 fi
+source "${BASE_DIR}/scripts/_outputs_layout.sh"
 REPO_BASE_JS="${BASE_DIR}/repos_js"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
@@ -259,6 +260,17 @@ DATASET_SHORT=""
 DATASET_SPLIT="train"
 resolve_dataset_js "$DATASET_ARG"
 
+DATASET_UUID=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[0].get('id','') if d else '')" "$DATASET_FILE" 2>/dev/null || true)
+DATASET_N=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$DATASET_FILE" 2>/dev/null || echo 1)
+if [[ "$DATASET_N" -gt 1 ]]; then
+    echo "[WARNING] dataset has $DATASET_N entries; using entries[0].id ($DATASET_UUID) as folder key. Dataset-level UUIDs deferred (§11 Q1)."
+fi
+if [[ -z "$DATASET_UUID" ]]; then
+    DATASET_UUID="$DATASET_SHORT"
+fi
+export KAIJU_EXPERIMENT_UUID="$DATASET_UUID"
+
+
 BASE_BRANCH_NAME="${BRANCH_OVERRIDE:-aider-js-${MODEL_SHORT}-${DATASET_SHORT}}"
 if [[ -z "$BRANCH_OVERRIDE" ]] && [[ "$NO_STAGE3_LINT" == "true" ]]; then
     BASE_BRANCH_NAME="${BASE_BRANCH_NAME}-nolint-s3"
@@ -284,13 +296,25 @@ set_sample_vars() {
         BRANCH_NAME="${BASE_BRANCH_NAME}-run_${sample_idx}"
         RUN_ID="${BASE_RUN_ID_FLAT}_run_${sample_idx}"
     fi
-    LOG_BASE="${BASE_DIR}/logs/agent_js/${DATASET_DIR_NAME}/${MODEL_DIR_NAME}/run_${sample_idx}"
-    PIPELINE_LOG="${BASE_DIR}/logs/pipeline_js_${RUN_ID}_results.json"
+    if is_consolidated; then
+        LOG_BASE="$(runs_dir "$DATASET_UUID")/${MODEL_DIR_NAME}/agent/run_${sample_idx}"
+        PIPELINE_LOG="${LOG_BASE}/pipeline_results.json"
+    else
+        LOG_BASE="${BASE_DIR}/logs/agent_js/${DATASET_DIR_NAME}/${MODEL_DIR_NAME}/run_${sample_idx}"
+        PIPELINE_LOG="${BASE_DIR}/logs/pipeline_js_${RUN_ID}_results.json"
+    fi
     COMMIT0_JS_CONFIG="${BASE_DIR}/.commit0.js_${RUN_ID}.yaml"
     AGENT_CONFIG="${BASE_DIR}/.agent_js_${RUN_ID}.yaml"
+    if is_consolidated; then
+        COMMIT0_JS_CONFIG="$(configs_dir "$DATASET_UUID")/commit0.js_${RUN_ID}.yaml"
+        AGENT_CONFIG="$(configs_dir "$DATASET_UUID")/agent_js_${RUN_ID}.yaml"
+    fi
 }
 
 set_sample_vars 1
+
+mkdir -p "$LOG_BASE"
+exec > >(tee -a "$LOG_BASE/pipeline.log") 2>&1
 
 # ============================================================
 # Preflight Checks

@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -1290,8 +1291,26 @@ def main() -> None:
         default="./specs",
         help="Directory to save scraped spec PDFs (default: ./specs)",
     )
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
 
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     setup_git_credentials(dry_run=args.dry_run)
     _validate_stubber_deps()
@@ -1358,7 +1377,28 @@ def main() -> None:
             min(len(candidates), args.max_repos or len(candidates)),
         )
 
-    if args.output:
+    if _consolidated and entries and entries[0].get("id"):
+        _uuid = entries[0]["id"]
+        _out_dir = datasets_dir(_uuid)
+        _entries_path = _out_dir / "entries.json"
+        with open(_entries_path, "w") as f:
+            json.dump(entries, f, indent=2)
+        logger.info("Wrote %d entries to %s (consolidated)", len(entries), _entries_path)
+        for _entry in entries:
+            _short = _entry.get("original_repo", "").split("/")[-1]
+            _candidates = [args.clone_dir / _short / "spec.pdf.bz2"]
+            for _src in _candidates:
+                if _src.exists():
+                    _dest = consolidated_spec_path(_entry["id"])
+                    shutil.copy2(str(_src), str(_dest))
+                    logger.info("  Snapshotted spec.pdf.bz2 → %s", _dest)
+                    break
+        if args.output:
+            _legacy_path = Path(args.output)
+            with open(_legacy_path, "w") as f:
+                json.dump(entries, f, indent=2)
+            logger.info("Also wrote legacy copy to %s", _legacy_path)
+    elif args.output:
         output_path = Path(args.output)
         with open(output_path, "w") as f:
             json.dump(entries, f, indent=2)

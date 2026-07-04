@@ -44,6 +44,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 import uuid as _uuid_mod
 
 from tools._git_auth import (
@@ -940,7 +941,26 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     if args.repo is None:
         args.repo = args.upstream
@@ -993,7 +1013,17 @@ def main() -> None:
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps([entry], indent=2))
+    if _consolidated and entry.get("id"):
+        _uuid = entry["id"]
+        _out_dir = datasets_dir(_uuid)
+        _entries_path = _out_dir / "entries.json"
+        _entries_path.write_text(json.dumps([entry], indent=2))
+        _dataset_path = _out_dir / "dataset.json"
+        _dataset_path.write_text(json.dumps([entry], indent=2))
+        logger.info("Wrote consolidated entries+dataset to %s", _out_dir)
+        out_path.write_text(json.dumps([entry], indent=2))
+    else:
+        out_path.write_text(json.dumps([entry], indent=2))
     logger.info("Wrote dataset entry to %s", out_path)
 
 

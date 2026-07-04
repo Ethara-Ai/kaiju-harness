@@ -29,10 +29,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 from typing import Optional
 import uuid as _uuid_mod
 
@@ -495,7 +497,26 @@ def main() -> None:
         default=Path("specs"),
         help="Directory to save scraped spec PDFs (default: ./specs)",
     )
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     args.repo = args.repo or args.upstream
 
@@ -541,7 +562,15 @@ def main() -> None:
             continue
         entries.append(entry)
 
-    args.output.write_text(json.dumps(entries, indent=2))
+    if _consolidated and entries and entries[0].get("id"):
+        _uuid = entries[0]["id"]
+        _out_dir = datasets_dir(_uuid)
+        _entries_path = _out_dir / "entries.json"
+        _entries_path.write_text(json.dumps(entries, indent=2))
+        logger.info("Wrote %d entries to %s (consolidated)", len(entries), _entries_path)
+        Path(args.output).write_text(json.dumps(entries, indent=2))
+    else:
+        args.output.write_text(json.dumps(entries, indent=2))
     logger.info("Wrote %d entries to %s", len(entries), args.output)
 
     if rejected:

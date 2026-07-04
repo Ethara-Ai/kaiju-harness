@@ -7,7 +7,7 @@ from typing import List, Optional
 from commit0.harness.docker_build import build_image, _resolve_mitm_ca_cert
 from commit0.harness.docker_utils import get_docker_platform
 from commit0.harness.spec_java import make_java_spec
-from commit0.harness.constants import BASE_IMAGE_BUILD_DIR, REPO_IMAGE_BUILD_DIR
+from commit0.harness.constants import base_image_build_dir, repo_image_build_dir
 from commit0.harness.constants_java import (
     JAVA_BASE_IMAGE_PREFIX, SUPPORTED_JAVA_VERSIONS, JAVA_SPLIT
 )
@@ -54,7 +54,7 @@ def build_java_base_images(
         tag = f"{JAVA_BASE_IMAGE_PREFIX}{version}:latest"
         spec = make_java_spec({"java_version": version})
         dockerfile_content = spec.base_dockerfile
-        build_dir = BASE_IMAGE_BUILD_DIR / tag.replace(":", "__")
+        build_dir = base_image_build_dir() / tag.replace(":", "__")
         build_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Building Java {version} base image: {tag}")
         build_image(
@@ -96,7 +96,7 @@ def _build_single_repo(
     tag = f"{JAVA_BASE_IMAGE_PREFIX}-{repo_name.split('/')[-1]}:latest"
     dockerfile_content = spec.repo_dockerfile
     setup_scripts = _scripts_list_to_dict(spec.make_repo_script_list())
-    build_dir = REPO_IMAGE_BUILD_DIR / tag.replace(":", "__")
+    build_dir = repo_image_build_dir() / tag.replace(":", "__")
     build_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Building Java repo image: {tag}")
     build_image(
