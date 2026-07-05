@@ -49,7 +49,13 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from agent.openai_codex.credentials import CredentialProvider, CredentialsError
+from agent.openai_codex.credentials import (
+    CredentialProvider,
+    CredentialsError,
+    MultiAccountCredentialProvider,
+    load_account_pool,
+)
+from agent.openai_codex.errors import classify_openai_error
 from agent.openai_codex import translate as _xlate
 
 _LOG = logging.getLogger(__name__)
@@ -248,10 +254,21 @@ def _forward_headers(request: Request, token: str, account_id: str) -> dict[str,
     return headers
 
 
+def _default_provider():
+    """A multi-account pool if KAIJU_CODEX_ACCOUNT_POOL is set, else single-account."""
+    pool_spec = os.environ.get("KAIJU_CODEX_ACCOUNT_POOL", "").strip()
+    if pool_spec:
+        pool = load_account_pool(pool_spec)
+        if pool is not None:
+            return pool
+    return CredentialProvider()
+
+
 def build_app(provider=None) -> FastAPI:
     """Construct the FastAPI app. `provider` is injected for tests; defaults to a
-    single-account CredentialProvider reading ~/.codex/auth.json."""
-    provider = provider or CredentialProvider()
+    multi-account pool (if KAIJU_CODEX_ACCOUNT_POOL is set) or a single-account
+    CredentialProvider reading ~/.codex/auth.json."""
+    provider = provider or _default_provider()
     app = FastAPI(title="codex-bridge")
     # Long-lived async client with generous timeouts (reasoning turns are slow).
     client = httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=1800.0, write=60.0, pool=15.0))
@@ -271,6 +288,13 @@ def build_app(provider=None) -> FastAPI:
                                  "account_prefix": provider.account_id[:8] + "..."})
         except CredentialsError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=503)
+
+    @app.get("/quota")
+    async def quota() -> JSONResponse:  # noqa: D401
+        if isinstance(provider, MultiAccountCredentialProvider):
+            return JSONResponse({"multi_account": True, **provider.status()})
+        return JSONResponse({"multi_account": False,
+                             "account_prefix": provider.account_id[:8] + "..."})
 
     def _auth_or_401(request: Request):
         if not _client_authorized(request):
@@ -298,7 +322,14 @@ def build_app(provider=None) -> FastAPI:
         if upstream.status_code >= 400:
             err = await upstream.aread()
             await upstream.aclose()
-            _LOG.warning("codex upstream %s: %s", upstream.status_code, err[:300])
+            classified = classify_openai_error(
+                upstream.status_code, err, dict(upstream.headers))
+            _LOG.warning("codex upstream %s [%s]: %s",
+                         upstream.status_code, classified.kind.value, err[:300])
+            # On a cap / rate-limit, cool down the active account and rotate so the
+            # NEXT request uses a healthy one (multi-account pools only).
+            if classified.should_rotate_account and isinstance(provider, MultiAccountCredentialProvider):
+                provider.penalize(classified.retry_after or 900)
             media = upstream.headers.get("content-type", "application/json")
             return None, Response(content=err, status_code=upstream.status_code, media_type=media)
         return upstream, None

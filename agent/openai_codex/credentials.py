@@ -275,3 +275,146 @@ class CredentialProvider:
         except Exception as e:  # noqa: BLE001 — persistence is best-effort
             _LOG.debug("token write-back skipped: %s", e)
 
+
+
+class _FileCredentialProvider(CredentialProvider):
+    """A single-account provider bound to a specific auth.json path."""
+
+    def __init__(self, path: str) -> None:
+        self._lock = threading.Lock()
+        p = Path(path).expanduser()
+        if not p.is_file():
+            raise CredentialsError(f"account auth.json not found: {path}")
+        self._creds = _parse_auth_json(p.read_text(), str(p))
+        self._persist_path = str(p)
+
+
+class MultiAccountCredentialProvider:
+    """Round-robins across several Codex accounts, skipping ones on cooldown.
+
+    Each slot is a CredentialProvider over its own auth.json. On a cap / rate-limit
+    the bridge calls ``penalize(seconds)`` for the active slot, and the next
+    ``get_access_token()`` advances to the next healthy slot. Cooldown state is
+    kept in memory (and optionally persisted). Presents the SAME interface as
+    CredentialProvider — ``get_access_token()`` + ``account_id`` — so the bridge
+    is agnostic to single vs multi account.
+    """
+
+    def __init__(self, providers: list[CredentialProvider],
+                 state_path: Optional[str] = None) -> None:
+        if not providers:
+            raise CredentialsError("MultiAccountCredentialProvider needs >=1 provider")
+        self._providers = providers
+        self._lock = threading.Lock()
+        self._idx = 0
+        self._cooldown_until: list[float] = [0.0] * len(providers)
+        self._state_path = state_path or os.environ.get("KAIJU_CODEX_POOL_STATE_PATH")
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if not self._state_path:
+            return
+        try:
+            data = json.loads(Path(self._state_path).read_text())
+            cds = data.get("cooldown_until", [])
+            for i in range(min(len(cds), len(self._cooldown_until))):
+                self._cooldown_until[i] = float(cds[i])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _save_state(self) -> None:
+        if not self._state_path:
+            return
+        try:
+            Path(self._state_path).write_text(json.dumps({"cooldown_until": self._cooldown_until}))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _pick(self, now: float) -> int:
+        """Return the index of the next slot not on cooldown; if all are cooling
+        down, return the one whose cooldown expires soonest."""
+        n = len(self._providers)
+        for step in range(n):
+            i = (self._idx + step) % n
+            if self._cooldown_until[i] <= now:
+                self._idx = i
+                return i
+        # all cooling down: the soonest-free
+        i = min(range(n), key=lambda j: self._cooldown_until[j])
+        self._idx = i
+        return i
+
+    def get_access_token(self) -> str:
+        with self._lock:
+            i = self._pick(time.time())
+        # get_access_token does its own (per-provider) refresh + locking.
+        return self._providers[i].get_access_token()
+
+    def get_token_and_account(self) -> tuple[str, str]:
+        """Return (token, account_id) from the SAME slot, atomically.
+
+        Callers must use this rather than get_access_token()+account_id
+        separately: a concurrent rotation between the two calls could otherwise
+        pair one account's token with another's id (-> upstream 401).
+        """
+        with self._lock:
+            i = self._pick(time.time())
+            provider = self._providers[i]
+        return provider.get_access_token(), provider.account_id
+
+    @property
+    def account_id(self) -> str:
+        with self._lock:
+            i = self._idx
+        return self._providers[i].account_id
+
+    def penalize(self, seconds: float) -> None:
+        """Put the ACTIVE slot on cooldown for `seconds` and advance the cursor."""
+        with self._lock:
+            i = self._idx
+            self._cooldown_until[i] = time.time() + max(1.0, seconds)
+            self._idx = (self._idx + 1) % len(self._providers)
+            self._save_state()
+        _LOG.warning("codex account %d cooled down for %ss; rotating", i, int(seconds))
+
+    def status(self) -> dict:
+        now = time.time()
+        with self._lock:
+            return {
+                "active": self._idx,
+                "accounts": [
+                    {"account_prefix": p.account_id[:8] + "...",
+                     "cooldown_remaining": max(0, round(self._cooldown_until[i] - now, 1))}
+                    for i, p in enumerate(self._providers)
+                ],
+            }
+
+
+def load_account_pool(spec: str,
+                      state_path: Optional[str] = None) -> Optional[MultiAccountCredentialProvider]:
+    """Build a MultiAccountCredentialProvider from a colon-separated spec.
+
+    Each entry is one of:
+      - a path to an auth.json (absolute or ``~``-relative),
+      - ``default`` -> the standard CredentialProvider (~/.codex/auth.json).
+
+    Returns None if the spec yields no usable slots.
+    Example: ``KAIJU_CODEX_ACCOUNT_POOL="default:~/codex-accounts/acct2.json"``.
+    """
+    if not spec:
+        return None
+    providers: list[CredentialProvider] = []
+    for entry in spec.split(":"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if entry == "default":
+                providers.append(CredentialProvider())
+            else:
+                providers.append(_FileCredentialProvider(entry))
+        except CredentialsError as e:
+            _LOG.warning("skipping codex account %r: %s", entry, e)
+    if not providers:
+        return None
+    return MultiAccountCredentialProvider(providers, state_path=state_path)

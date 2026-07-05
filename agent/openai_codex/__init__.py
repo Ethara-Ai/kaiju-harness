@@ -9,14 +9,28 @@ from agent.openai_codex.credentials import (
     CodexCredentials,
     CredentialProvider,
     CredentialsError,
+    MultiAccountCredentialProvider,
+    load_account_pool,
     load_credentials,
     refresh_credentials,
+)
+from agent.openai_codex.errors import (
+    ClassifiedError,
+    ErrorKind,
+    classify_openai_error,
+    extract_retry_after,
 )
 
 __all__ = [
     "CodexCredentials",
+    "ClassifiedError",
     "CredentialProvider",
     "CredentialsError",
+    "ErrorKind",
+    "MultiAccountCredentialProvider",
+    "classify_openai_error",
+    "extract_retry_after",
+    "load_account_pool",
     "load_credentials",
     "refresh_credentials",
 ]

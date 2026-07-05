@@ -477,3 +477,152 @@ class TestConcurrencyAndDedupFixes:
             _record_response_object("m", _R(), 1.0)
             _record_response_object("m", _R(), 1.0)      # same sig -> deduped
         assert len(lc.calls) == 1
+
+
+class TestErrorClassification:
+    def _c(self, code, body="", headers=None):
+        from agent.openai_codex.errors import classify_openai_error
+        return classify_openai_error(code, body, headers)
+
+    def test_200_ok(self):
+        assert self._c(200).kind.value == "ok"
+
+    def test_401_auth_triggers_refresh(self):
+        e = self._c(401, '{"error":"invalid token"}')
+        assert e.kind.value == "auth" and e.should_refresh_token
+
+    def test_429_rate_limit_rotates(self):
+        e = self._c(429, "Rate limit reached", {"retry-after": "12"})
+        assert e.kind.value in ("rate_limit", "cap") and e.should_rotate_account
+        assert e.retry_after == 12.0
+
+    def test_429_usage_cap(self):
+        e = self._c(429, "You exceeded your current quota")
+        assert e.kind.value == "cap" and e.should_rotate_account
+
+    def test_403_plan_cap_vs_auth(self):
+        assert self._c(403, "weekly limit reached").kind.value == "cap"
+        assert self._c(403, "forbidden").kind.value == "auth"
+
+    def test_400_bad_request_fatal(self):
+        e = self._c(400, "Unsupported parameter: max_output_tokens")
+        assert e.kind.value == "bad_request" and not e.retryable
+
+    def test_404_not_found(self):
+        assert self._c(404, "Not Found").kind.value == "not_found"
+
+    def test_5xx_transient(self):
+        e = self._c(503, "service unavailable")
+        assert e.kind.value == "transient" and e.retryable
+
+    def test_none_status_transient(self):
+        assert self._c(None, "conn reset").kind.value == "transient"
+
+    def test_retry_after_from_body(self):
+        from agent.openai_codex.errors import extract_retry_after
+        assert extract_retry_after(None, "Please try again in 8s") == 8.0
+
+
+# --------------------------------------------------------------------------
+# multi-account pool
+# --------------------------------------------------------------------------
+
+
+class TestMultiAccountPool:
+    def _pool(self, n=3):
+        from agent.openai_codex.credentials import MultiAccountCredentialProvider
+        return MultiAccountCredentialProvider([_StubProvider(f"acct{i}") for i in range(n)],
+                                              state_path=None)
+
+    def test_starts_on_first(self):
+        p = self._pool()
+        assert p.get_access_token() == "tok-acct0"
+        assert p.account_id == "acct0"
+
+    def test_penalize_rotates(self):
+        p = self._pool()
+        p.get_access_token()               # active = 0
+        p.penalize(600)                    # cool 0, advance to 1
+        assert p.get_access_token() == "tok-acct1"
+
+    def test_skips_cooled_down(self):
+        p = self._pool(2)
+        p.get_access_token()               # active 0
+        p.penalize(600)                    # cool 0 -> active 1
+        p.get_access_token()               # active 1
+        p.penalize(600)                    # cool 1 -> active 0 (still cooling) -> picks soonest
+        # both cooled: _pick returns the soonest-free (0). Must still return a token.
+        assert p.get_access_token() in ("tok-acct0", "tok-acct1")
+
+    def test_status_shape(self):
+        p = self._pool(2)
+        s = p.status()
+        assert s["active"] == 0 and len(s["accounts"]) == 2
+        assert "cooldown_remaining" in s["accounts"][0]
+
+    def test_load_pool_default_entry(self, monkeypatch):
+        from agent.openai_codex.credentials import load_account_pool
+        monkeypatch.setenv("CODEX_CREDENTIALS", _auth_json())
+        pool = load_account_pool("default:default")
+        assert pool is not None and len(pool._providers) == 2
+
+    def test_load_pool_empty_returns_none(self):
+        from agent.openai_codex.credentials import load_account_pool
+        assert load_account_pool("") is None
+
+
+# --------------------------------------------------------------------------
+# recovery (transient retry)
+# --------------------------------------------------------------------------
+
+
+class TestRecovery:
+    def test_retries_transient_then_succeeds(self):
+        from agent.openai_codex.recovery import run_with_recovery
+        calls = {"n": 0}
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("peer closed connection")
+            return "ok"
+        out = run_with_recovery(flaky, max_retries=5, sleep=lambda s: None)
+        assert out == "ok" and calls["n"] == 3
+
+    def test_non_transient_propagates_immediately(self):
+        from agent.openai_codex.recovery import run_with_recovery
+        calls = {"n": 0}
+        def boom():
+            calls["n"] += 1
+            raise ValueError("bad request")
+        with pytest.raises(ValueError):
+            run_with_recovery(boom, sleep=lambda s: None)
+        assert calls["n"] == 1               # not retried
+
+    def test_gives_up_after_cap(self):
+        from agent.openai_codex.recovery import run_with_recovery
+        def always():
+            raise RuntimeError("503 service unavailable")
+        with pytest.raises(RuntimeError):
+            run_with_recovery(always, max_retries=2, sleep=lambda s: None)
+
+
+# --------------------------------------------------------------------------
+# chat<->responses translation
+# --------------------------------------------------------------------------
+
+
+# (multi-account atomicity test, folded into the codex resilience commit)
+class TestMultiAccountAtomic:
+    def test_multi_account_token_and_id_atomic(self):
+        # get_token_and_account must return token+id from the SAME slot.
+        from agent.openai_codex.credentials import MultiAccountCredentialProvider
+
+        class _P:
+            def __init__(self, n): self._n = n
+            def get_access_token(self): return f"tok-{self._n}"
+            @property
+            def account_id(self): return f"acct-{self._n}"
+
+        pool = MultiAccountCredentialProvider([_P(0), _P(1)], state_path=None)
+        tok, acct = pool.get_token_and_account()
+        assert tok.split("-")[1] == acct.split("-")[1]     # same slot
