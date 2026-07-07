@@ -27,7 +27,7 @@ from commit0.harness.constants import (
     SimpleInstance,
 )
 from commit0.harness.constants_js import MAX_PATCH_BYTES, RUN_JS_TEST_LOG_DIR
-from commit0.harness.execution_context import Docker, ExecutionBackend
+from commit0.harness.execution_context import Docker, ExecutionBackend, LocalInplace
 from commit0.harness.spec_js import make_js_spec
 from commit0.harness.utils import (
     EvaluationError,
@@ -249,13 +249,17 @@ def main(
         eval_file.write_text(eval_script)
 
         backend = backend.upper()
-        if ExecutionBackend(backend) != ExecutionBackend.LOCAL:
+        if ExecutionBackend(backend) == ExecutionBackend.LOCAL:
+            _ctx = Docker
+            logger.info("Running locally via Docker")
+        elif ExecutionBackend(backend) == ExecutionBackend.LOCAL_INPLACE:
+            _ctx = LocalInplace
+            logger.info("Running locally in-place (git worktree, no new container)")
+        else:
             raise ValueError(
-                f"JS pipeline only supports LOCAL (Docker) backend, got {backend}. "
+                f"JS pipeline supports LOCAL (Docker) or local_inplace, got {backend}. "
                 f"Valid backends: {', '.join(EVAL_BACKENDS)}"
             )
-
-        logger.info("Running locally via Docker")
 
         files_to_copy = Files(
             eval_script={"src": eval_file, "dest": Path("/eval.sh")},
@@ -270,7 +274,7 @@ def main(
         ]
 
         eval_command = "/bin/bash /eval.sh > test_output.txt 2>&1"
-        with Docker(
+        with _ctx(
             spec,
             logger,
             timeout,

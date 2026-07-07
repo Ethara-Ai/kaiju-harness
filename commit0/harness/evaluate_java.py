@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import docker
 import docker.errors
 
-from commit0.harness.execution_context import Docker
+from commit0.harness.execution_context import Docker, ExecutionBackend, LocalInplace
 from commit0.harness.constants import Files, RUN_PYTEST_LOG_DIR, TestStatus
 from commit0.harness.spec_java import make_java_spec
 from commit0.harness.java_test_parser import (
@@ -33,6 +33,7 @@ def evaluate_java_repo(
     timeout: int = 600,
     num_cpus: int = 1,
     log_dir: Optional[str] = None,
+    backend: str = "local",
 ) -> Dict[str, TestStatus]:
     """Evaluate a Java patch: apply it in a Docker container and parse test results.
 
@@ -84,8 +85,11 @@ def evaluate_java_repo(
         "test_exit_code.txt",
     ]
 
+    _ctx = (LocalInplace
+            if ExecutionBackend(backend.upper()) == ExecutionBackend.LOCAL_INPLACE
+            else Docker)
     try:
-        with Docker(
+        with _ctx(
             spec=spec,
             logger=eval_logger,
             timeout=timeout,
@@ -202,6 +206,7 @@ def _eval_single_repo(
             patch_path=patch_path,
             timeout=timeout,
             num_cpus=num_cpus,
+            backend=backend,
         )
     except Exception as e:
         logger.error("Evaluation failed for %s: %s", short_name, e)
@@ -249,6 +254,7 @@ def evaluate_java_repos(
     num_cpus: int = 1,
     num_workers: int = 4,
     repo_filter: Optional[str] = None,
+    backend: str = "local",
 ) -> List[Tuple[str, float, int, int]]:
     instances = dataset if isinstance(dataset, list) else list(dataset)
 
@@ -269,7 +275,12 @@ def evaluate_java_repos(
 
     logger.info("Evaluating %d repo(s) with %d workers", len(instances), num_workers)
 
-    missing_images = _preflight_check_java_images(instances)
+    # local_inplace eval runs in a git worktree (no docker image); skip the
+    # image preflight so the pipeline can run entirely inside a container.
+    missing_images = (
+        [] if str(backend).lower() == "local_inplace"
+        else _preflight_check_java_images(instances)
+    )
     if missing_images:
         logger.error(
             "Pre-flight failed: %d Docker image(s) not found: %s. "

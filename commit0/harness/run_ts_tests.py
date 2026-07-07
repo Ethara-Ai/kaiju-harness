@@ -33,6 +33,7 @@ from commit0.harness.utils import (
 from commit0.harness.execution_context import (
     ExecutionBackend,
     Docker,
+    LocalInplace,
 )
 
 
@@ -178,13 +179,17 @@ def main(
     eval_file.write_text(eval_script)
 
     backend = backend.upper()
-    if ExecutionBackend(backend) != ExecutionBackend.LOCAL:
+    if ExecutionBackend(backend) == ExecutionBackend.LOCAL:
+        _ctx = Docker
+        logger.info("Running locally via Docker")
+    elif ExecutionBackend(backend) == ExecutionBackend.LOCAL_INPLACE:
+        _ctx = LocalInplace
+        logger.info("Running locally in-place (git worktree, no new container)")
+    else:
         raise ValueError(
-            f"TS pipeline only supports LOCAL (Docker) backend, got {backend}. "
+            f"TS pipeline supports LOCAL (Docker) or local_inplace, got {backend}. "
             f"Valid backends: {', '.join(EVAL_BACKENDS)}"
         )
-
-    logger.info("Running locally via Docker")
 
     files_to_copy = Files(
         eval_script={
@@ -205,7 +210,7 @@ def main(
 
     eval_command = "/bin/bash /eval.sh"
     try:
-        with Docker(
+        with _ctx(
             spec,
             logger,
             timeout,

@@ -28,6 +28,7 @@ from commit0.harness.utils import (
 from commit0.harness.execution_context import (
     ExecutionBackend,
     Docker,
+    LocalInplace,
     Modal,
     E2B,
 )
@@ -202,6 +203,9 @@ def main(
     elif ExecutionBackend(backend) == ExecutionBackend.LOCAL:
         logger.info("Running locally")
         execution_context = Docker
+    elif ExecutionBackend(backend) == ExecutionBackend.LOCAL_INPLACE:
+        logger.info("Running locally in-place (git worktree, no new container)")
+        execution_context = LocalInplace
     elif ExecutionBackend(backend) == ExecutionBackend.E2B:
         logger.info("Running E2B")
         execution_context = E2B
