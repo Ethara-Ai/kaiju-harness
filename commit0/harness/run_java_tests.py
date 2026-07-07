@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from commit0.harness.constants import Files, RUN_PYTEST_LOG_DIR
-from commit0.harness.execution_context import Docker
+from commit0.harness.execution_context import Docker, ExecutionBackend, LocalInplace
 from commit0.harness.spec_java import make_java_spec
 from commit0.harness.java_test_parser import (
     parse_surefire_reports,
@@ -27,6 +27,7 @@ def run_java_tests(
     num_cpus: int = 1,
     log_dir: Optional[str] = None,
     verbose: int = 0,
+    backend: str = "local",
 ) -> Dict[str, str]:
     """Run Java tests inside a Docker container and return parsed results.
 
@@ -77,8 +78,11 @@ def run_java_tests(
         "test_exit_code.txt",
     ]
 
+    _ctx = (LocalInplace
+            if ExecutionBackend(backend.upper()) == ExecutionBackend.LOCAL_INPLACE
+            else Docker)
     try:
-        with Docker(
+        with _ctx(
             spec=spec,
             logger=test_logger,
             timeout=timeout,

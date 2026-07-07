@@ -27,7 +27,9 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 from typing import Iterator
+import uuid as _uuid_mod
 
 from commit0.harness.constants_js import (
     DEFAULT_NODE_VERSION,
@@ -696,6 +698,7 @@ def prepare_js_repo(
 
     return {
         "instance_id": f"commit-0/{full_name.split('/')[-1]}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,
@@ -746,7 +749,26 @@ def main() -> None:
         default=None,
         help="Batch mode: maximum number of repos to prepare",
     )
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     setup_git_credentials(dry_run=args.dry_run)
     _validate_stubber_deps()
@@ -811,7 +833,15 @@ def main() -> None:
             min(len(candidates), args.max_repos or len(candidates)),
         )
 
-    if args.output:
+    if _consolidated and entries and entries[0].get("id"):
+        _uuid = entries[0]["id"]
+        _out_dir = datasets_dir(_uuid)
+        _entries_path = _out_dir / "entries.json"
+        _entries_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        logger.info("Wrote %d entries to %s (consolidated)", len(entries), _entries_path)
+        if args.output:
+            Path(args.output).write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    elif args.output:
         output_path = Path(args.output)
         output_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
         logger.info("Wrote %d entries to %s", len(entries), output_path)

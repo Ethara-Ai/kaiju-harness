@@ -25,6 +25,25 @@ _FN_PATTERN = re.compile(
 )
 
 
+def _read_source_text(file_path: str) -> str:
+    """E14: read a source file, SURFACING decode problems instead of hiding them.
+
+    The old `errors="ignore"` silently DROPPED undecodable bytes from source the
+    model has to reproduce verbatim — corrupting the content invisibly. We use
+    `errors="replace"` (consistent with the test-file reads) so any bad byte
+    becomes a visible U+FFFD, and we WARN when that happens so a genuinely
+    non-UTF-8 source file is flagged rather than silently mangled. Raises OSError
+    to the caller (callers already handle it)."""
+    with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+        content = fh.read()
+    if "�" in content:
+        logger.warning(
+            "E14: %s contains bytes that are not valid UTF-8 — replaced with U+FFFD. "
+            "The model may not reproduce this file exactly.", file_path,
+        )
+    return content
+
+
 def find_rust_files_to_edit(src_dir: str) -> list[str]:
     """Walk *src_dir* and collect ``.rs`` files, excluding non-source paths.
 
@@ -60,8 +79,7 @@ def get_target_edit_files_rust(src_dir: str) -> list[str]:
 
     for file_path in all_files:
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-                content = fh.read()
+            content = _read_source_text(file_path)
             if RUST_STUB_MARKER in content:
                 target_files.append(file_path)
         except OSError as exc:
@@ -79,8 +97,7 @@ def extract_rust_function_stubs(file_path: str) -> list[dict]:
       - ``signature``: full text from qualifiers through the opening ``{`` (str)
     """
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-            content = fh.read()
+        content = _read_source_text(file_path)
     except OSError as exc:
         logger.warning("Could not read %s: %s", file_path, exc)
         return []
@@ -126,8 +143,7 @@ def get_rust_file_dependencies(file_path: str) -> list[str]:
     Returns a deduplicated, sorted list of module path strings.
     """
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-            content = fh.read()
+        content = _read_source_text(file_path)
     except OSError as exc:
         logger.warning("Could not read %s: %s", file_path, exc)
         return []
@@ -187,8 +203,13 @@ _TRANSIENT_CARGO_ERRORS = (
     "503 service unavailable",
     "502 bad gateway",
     "could not connect to",
-    "blocking waiting for file lock",
     "unexpected eof",
+    # E3: "blocking waiting for file lock" is intentionally NOT here. cargo prints
+    # it while WAITING and normally proceeds once the lock frees — if it instead
+    # surfaces in stderr of a FAILED run, a sibling cargo is wedged holding the
+    # lock, and retrying just re-blocks on the same dead lock (wasting
+    # max_attempts × timeout). The pgid-kill timeout above already reaps any
+    # orphan WE created; a persistent foreign lock should fail fast and visibly.
 )
 
 
@@ -215,24 +236,47 @@ def _run_cargo_with_retry(
     failure), or ``None`` if cargo could not be launched at all.
     """
     import random
+    import signal
     import time
 
     last_result = None
     for attempt in range(1, max_attempts + 1):
+        # E3: cargo spawns rustc grandchildren. `subprocess.run(timeout=)` SIGKILLs
+        # only cargo on timeout, orphaning rustc workers that keep holding the
+        # build lock and burning CPU. Run cargo in its own session and kill the
+        # WHOLE process group on timeout so a hung test can't wedge the next run.
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 args,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 cwd=cwd,
-                timeout=timeout,
+                start_new_session=True,
             )
         except FileNotFoundError:
             logger.warning("cargo not found on PATH while running %s", args)
             return None
+        except OSError as exc:
+            logger.warning("cargo launch OSError (cwd=%s): %s", cwd, exc)
+            if attempt >= max_attempts:
+                return None
+            time.sleep((backoff_base ** attempt) + random.uniform(0, 0.5))
+            continue
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            result = subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
         except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                proc.communicate(timeout=10)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                pass
             logger.warning(
-                "cargo %s attempt %d/%d timed out (cwd=%s)",
+                "cargo %s attempt %d/%d timed out — process group killed (cwd=%s)",
                 args[1] if len(args) > 1 else "?",
                 attempt,
                 max_attempts,
@@ -575,6 +619,14 @@ def get_lint_cmd_rust(
 
     *repo_name* is accepted for signature parity with the Python
     ``get_lint_cmd`` but is not used directly.
+
+    E17: this is necessarily a WHOLE-CRATE clippy — clippy operates at
+    crate/target granularity and cannot lint a single file. The lint stage loops
+    per file and runs this command in each file's agent session, so clippy
+    re-runs (and each session sees the full-crate warning set, not just its
+    file's). That is a known cost×files trade-off; true per-file scoping would
+    require running clippy ONCE and filtering diagnostics by path before each
+    session. Callers that care about cost should lint once and cache.
     """
     if not use_lint_info:
         return ""
@@ -792,9 +844,20 @@ _CARGO_ERROR_SPAN_RE = re.compile(
     r"^\s*-->\s+([^\s:]+?\.rs):(?P<line>\d+):(?P<col>\d+)\s*$",
     re.MULTILINE,
     )
+# E15: match BOTH long-format (`error[E0308]: ...` at line start) AND short-format
+# (`src/foo.rs:12:5: error[E0308]: ...`), since the gate runs cargo with
+# `--message-format=short`. The old `^error...` anchor missed every short-format
+# diagnostic, so the re-prompt fed the LLM an EMPTY error list on a broken build.
 _CARGO_ERROR_LINE_RE = re.compile(
-    r"^error(?:\[[A-Z]\d+\])?:\s", re.MULTILINE
+    r"^(?:\S+\.rs:\d+:\d+:\s+)?error(?:\[[A-Z]\d+\])?:\s", re.MULTILINE
     )
+
+
+# E13: process-level baseline cache, keyed on (repo_realpath, git HEAD sha). A
+# given tree state has one cargo-check result, so consecutive modules at the same
+# sha reuse it instead of re-running a whole-crate check. Keyed on the exact sha,
+# so a changed tree (new sha) always re-checks — never a stale baseline.
+_BASELINE_CHECK_CACHE: "dict[tuple[str, str], tuple[int, str]]" = {}
 
 
 def _run_cargo_check(repo_path: str, timeout: int = 180) -> tuple[int, str]:
@@ -804,20 +867,37 @@ def _run_cargo_check(repo_path: str, timeout: int = 180) -> tuple[int, str]:
     we want without the full multi-line span output (which can be huge).
     """
     import subprocess
+    import signal
+    # C12/E13: cargo spawns rustc grandchildren; a plain `timeout=` SIGKILLs only
+    # cargo and leaves rustc holding the build lock, wedging the next check. Run
+    # cargo in its own process group and kill the whole group on timeout.
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             ["cargo", "check", "--tests", "--all-features", "--message-format=short"],
             cwd=repo_path,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return 124, f"cargo check timed out after {timeout}s"
     except (OSError, subprocess.SubprocessError) as exc:
         return -1, f"cargo check failed to invoke: {exc}"
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.communicate(timeout=10)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        return 124, f"cargo check timed out after {timeout}s (process group killed)"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return -1, f"cargo check failed: {exc}"
     # cargo emits errors on stderr; combine with stdout in case any leaked.
-    return result.returncode, (result.stderr or "") + (result.stdout or "")
+    return proc.returncode, (stderr or "") + (stdout or "")
 
 
 def _extract_files_with_errors(cargo_output: str, repo_path: str) -> set[str]:
@@ -964,17 +1044,50 @@ def run_with_compile_gate(
       - ``final_broken_files``: list[str]
       - ``regressions``: list[str]   # files the agent broke
     """
-    # Baseline: errors that already exist BEFORE this module touches anything.
-    baseline_rc, baseline_out = _run_cargo_check(repo_path, timeout=cargo_timeout)
-    # rc 124 (timeout) / -1 (failed to invoke) mean the check didn't actually
-    # run — retry once so we don't proceed with a phantom-empty baseline that
-    # would later mis-attribute inherited errors as regressions.
-    if baseline_rc in (124, -1):
-        logger.warning(
-            "CompileGate: baseline cargo check unavailable (rc=%d); retrying once",
-            baseline_rc,
-        )
+    # E13: the baseline cargo check is whole-crate and re-run for EVERY module —
+    # quadratic across a stage. Cache (repo_path, head_sha) -> (rc, output) so
+    # consecutive modules at the same committed tree reuse the result.
+    # IMPORTANT: the HEAD sha only captures the COMMITTED tree. aider "sometimes
+    # leaves" uncommitted edits (see _files_edited_since), so a dirty working tree
+    # at the same sha is a DIFFERENT tree than the cached clean baseline. We
+    # therefore ONLY cache/reuse when the tree is CLEAN — a dirty tree always
+    # re-runs, so the cache can never serve a stale baseline.
+    _head_sha = None
+    _tree_clean = False
+    try:
+        _head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_path,
+            capture_output=True, text=True, timeout=15,
+        ).stdout.strip() or None
+        _porcelain = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repo_path,
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        _tree_clean = (_porcelain.strip() == "")
+    except (subprocess.SubprocessError, OSError):
+        _head_sha = None
+        _tree_clean = False
+    _cache_key = (os.path.realpath(repo_path), _head_sha) if (_head_sha and _tree_clean) else None
+    _cached = _BASELINE_CHECK_CACHE.get(_cache_key) if _cache_key else None
+    if _cached is not None:
+        baseline_rc, baseline_out = _cached
+        logger.info("CompileGate: reusing cached baseline for HEAD %s (rc=%d)",
+                    _head_sha[:8], baseline_rc)
+    else:
+        # Baseline: errors that already exist BEFORE this module touches anything.
         baseline_rc, baseline_out = _run_cargo_check(repo_path, timeout=cargo_timeout)
+        # rc 124 (timeout) / -1 (failed to invoke) mean the check didn't actually
+        # run — retry once so we don't proceed with a phantom-empty baseline that
+        # would later mis-attribute inherited errors as regressions.
+        if baseline_rc in (124, -1):
+            logger.warning(
+                "CompileGate: baseline cargo check unavailable (rc=%d); retrying once",
+                baseline_rc,
+            )
+            baseline_rc, baseline_out = _run_cargo_check(repo_path, timeout=cargo_timeout)
+        # Only cache a baseline that actually RAN (don't memoize a timeout/failure).
+        if _cache_key is not None and baseline_rc not in (124, -1):
+            _BASELINE_CHECK_CACHE[_cache_key] = (baseline_rc, baseline_out)
     baseline_unavailable = baseline_rc in (124, -1)
     baseline_broken = _extract_files_with_errors(baseline_out, repo_path)
     baseline_counts = _extract_file_error_counts(baseline_out, repo_path)

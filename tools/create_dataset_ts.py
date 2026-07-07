@@ -16,6 +16,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import uuid as _uuid_mod
+from kaiju.paths import datasets_dir
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -32,11 +34,11 @@ TS_REQUIRED_FIELDS = {
     "language": str,
 }
 
-TS_SETUP_FIELDS = {"node", "install", "packages", "pre_install", "specification"}
+TS_SETUP_FIELDS = {"node_version", "install", "packages", "pre_install", "specification"}
 TS_TEST_FIELDS = {"test_cmd", "test_dir"}
 from commit0.harness.constants_ts import SUPPORTED_NODE_VERSIONS
 
-SUPPORTED_TEST_FRAMEWORKS = {"jest", "vitest"}
+SUPPORTED_TEST_FRAMEWORKS = {"jest", "vitest", "node_test"}
 
 
 def generate_ts_split_constants(
@@ -177,6 +179,12 @@ def validate_ts_entry(entry: dict, index: int) -> list[str]:
                     f"[{index}] Unrecognized test command prefix in test.test_cmd: "
                     f"'{first_word}'. Allowed: {sorted(allowed_test_prefixes)}"
                 )
+            _SHELL_DANGER = set(";&|`$(){}!><")
+            if any(c in _SHELL_DANGER for c in test_cmd):
+                issues.append(
+                    f"[{index}] test.test_cmd contains shell metacharacters: "
+                    f"'{test_cmd}'. Only simple runner commands allowed."
+                )
 
     return issues
 
@@ -204,12 +212,18 @@ def validate_ts_dataset(
 
 
 def create_ts_hf_dataset_dict(entries: list[dict]) -> list[dict]:
-    """Convert TS entries to HuggingFace-compatible format (10 fields)."""
-    hf_entries: list[dict] = []
+    """Convert TS entries to HuggingFace-compatible format.
 
+    Assigns a fresh UUID4 to each entry's ``id`` field — each dataset build
+    represents a distinct experiment instance, so the id is generated here
+    (not in prepare_repo_ts.py where entries.json is a reusable source).
+    """
+
+    hf_entries: list[dict] = []
     for entry in entries:
         hf_entry = {
             "instance_id": entry["instance_id"],
+            "id": entry.get("id") or str(_uuid_mod.uuid4()),
             "repo": entry["repo"],
             "original_repo": entry["original_repo"],
             "base_commit": entry["base_commit"],
@@ -270,8 +284,12 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=str,
-        default="ts_custom_dataset.json",
-        help="Output dataset JSON file (default: ts_custom_dataset.json)",
+        default=None,
+        help=(
+            "Output dataset JSON file. Default: auto-generated from the "
+            "first entry's 'id' field (<uuid>.json), or 'ts_custom_dataset.json' "
+            "if no id present."
+        ),
     )
     parser.add_argument(
         "--split-name",
@@ -306,8 +324,26 @@ def main() -> None:
         action="store_true",
         help="Generate .commit0.yaml for the custom TS dataset",
     )
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
 
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     entries = json.loads(Path(args.entries_file).read_text())
     logger.info("Loaded %d entries from %s", len(entries), args.entries_file)
@@ -323,7 +359,14 @@ def main() -> None:
 
     hf_entries = create_ts_hf_dataset_dict(valid)
 
-    output_path = Path(args.output)
+    if _consolidated and hf_entries and hf_entries[0].get("id"):
+        output_path = datasets_dir(hf_entries[0]["id"]) / "dataset.json"
+    elif args.output:
+        output_path = Path(args.output)
+    elif hf_entries and hf_entries[0].get("id"):
+        output_path = Path(f"{hf_entries[0]['id']}.json")
+    else:
+        output_path = Path("ts_custom_dataset.json")
     output_path.write_text(json.dumps(hf_entries, indent=2))
     logger.info("Saved dataset to %s", output_path)
 

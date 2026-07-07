@@ -530,7 +530,22 @@ def _convert_file_read_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
 
 
 def _convert_assistant_turn(turn: "Turn", base_timestamp: str) -> list[dict]:
-    reasoning, edits = parse_edit_blocks(turn.content)
+    # Reasoning text always comes from the parser (it strips the SEARCH/REPLACE
+    # blocks out of the prose). For the EDITS themselves, prefer the ground-truth
+    # list aider actually applied (agent.edit_capture) when it was captured;
+    # `applied_edits is None` means capture didn't fire (e.g. a non-EditBlock
+    # coder) so we fall back to the heuristic text parse. `applied_edits == []`
+    # is authoritative "this turn applied zero edits" and is honored as-is.
+    reasoning, parsed_edits = parse_edit_blocks(turn.content)
+    captured = getattr(turn, "applied_edits", None)
+    if captured is not None:
+        edits = [
+            EditBlock(path=e["path"], old_str=e.get("old_str", ""), new_str=e.get("new_str", ""))
+            for e in captured
+            if isinstance(e, dict) and e.get("path")
+        ]
+    else:
+        edits = parsed_edits
     thinking_blocks = _make_thinking_blocks(turn.thinking)
     events: list[dict] = []
     rid = getattr(turn, "llm_response_id", None)
@@ -675,14 +690,14 @@ def format_openhands_output(
     system_prompt: str | None = None,
     error: str | None = None,
     attempt: int = 1,
-    stage_runtime_seconds: float = 0.0,
+    module_runtime_seconds: float = 0.0,
 ) -> dict:
     events = turns_to_openhands_events(turns, system_prompt=system_prompt)
     tool_counts = _count_tool_calls(events)
 
     metrics = {
         **metrics,
-        "stage_runtime_seconds": round(stage_runtime_seconds, 2),
+        "module_runtime_seconds": round(module_runtime_seconds, 2),
         "tool_calls": tool_counts,
         "total_tool_calls": sum(tool_counts.values()),
     }
@@ -712,7 +727,7 @@ def write_openhands_jsonl(
     system_prompt: str | None = None,
     error: str | None = None,
     attempt: int = 1,
-    stage_runtime_seconds: float = 0.0,
+    module_runtime_seconds: float = 0.0,
 ) -> None:
     from pathlib import Path
 
@@ -729,7 +744,7 @@ def write_openhands_jsonl(
         system_prompt=system_prompt,
         error=error,
         attempt=attempt,
-        stage_runtime_seconds=stage_runtime_seconds,
+        module_runtime_seconds=module_runtime_seconds,
     )
 
     try:
@@ -752,7 +767,7 @@ def write_module_output_json(
     stage: str,
     system_prompt: str | None = None,
     error: str | None = None,
-    stage_runtime_seconds: float = 0.0,
+    module_runtime_seconds: float = 0.0,
 ) -> None:
     from pathlib import Path
 
@@ -765,6 +780,12 @@ def write_module_output_json(
     metrics_public = dict(metrics)
     audit_mismatch = metrics_public.pop("capture_mismatch", None)
 
+    # Per-module runtime: prefer the explicit value the caller measured (the
+    # 6 languages that time the whole per-module block, including spec-summary
+    # overhead); fall back to the capture_module_calls wall-clock carried in
+    # metrics (covers go/c, whose run loop doesn't measure a per-module elapsed).
+    _runtime = module_runtime_seconds or metrics_public.get("module_runtime_seconds", 0.0)
+
     record = {
         "module": module,
         "instance_id": instance_id,
@@ -775,7 +796,7 @@ def write_module_output_json(
         "history": events,
         "metrics": {
             **metrics_public,
-            "stage_runtime_seconds": round(stage_runtime_seconds, 2),
+            "module_runtime_seconds": round(_runtime, 2),
             "tool_calls": tool_counts,
             "total_tool_calls": sum(tool_counts.values()),
         },

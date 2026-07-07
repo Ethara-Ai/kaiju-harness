@@ -12,6 +12,8 @@ import json
 import logging
 import os
 from pathlib import Path
+from kaiju.paths import datasets_dir
+import uuid as _uuid_mod
 
 from commit0.harness.constants_js import (
     JS_SHELL_METACHARS,
@@ -211,11 +213,18 @@ def validate_js_dataset(entries: list[dict]) -> tuple[list[dict], list[str]]:
 
 
 def create_js_hf_dataset_dict(entries: list[dict]) -> list[dict]:
-    """Project entries into the JS HuggingFace row schema."""
+    """Project entries into the JS HuggingFace row schema.
+
+    Assigns a fresh UUID4 to each entry's ``id`` field — each dataset build
+    represents a distinct experiment instance, so the id is generated here
+    (not in prepare_repo_js.py where entries.json is a reusable source).
+    """
+
     hf_entries: list[dict] = []
     for entry in entries:
         hf_entry = {
             "instance_id": entry["instance_id"],
+            "id": entry.get("id") or str(_uuid_mod.uuid4()),
             "repo": entry["repo"],
             "original_repo": entry["original_repo"],
             "base_commit": entry["base_commit"],
@@ -275,7 +284,14 @@ def main() -> None:
     )
     parser.add_argument("entries_file", help="Input js_entries.json from prepare_repo_js.py")
     parser.add_argument(
-        "--output", type=str, default="js_custom_dataset.json", help="Output dataset JSON"
+        "--output",
+        type=str,
+        default=None,
+        help=(
+            "Output dataset JSON file. Default: auto-generated from the "
+            "first entry's 'id' field (<uuid>.json), or 'js_custom_dataset.json' "
+            "if no id present."
+        ),
     )
     parser.add_argument(
         "--split-name", type=str, default="custom_js", help="Name for the JS_SPLIT entry"
@@ -300,7 +316,26 @@ def main() -> None:
         action="store_true",
         help="Generate .commit0.<split>.js.yaml for the custom JS dataset",
     )
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     entries = json.loads(Path(args.entries_file).read_text(encoding="utf-8"))
     logger.info("Loaded %d entries from %s", len(entries), args.entries_file)
@@ -316,7 +351,14 @@ def main() -> None:
 
     hf_entries = create_js_hf_dataset_dict(valid)
 
-    output_path = Path(args.output)
+    if _consolidated and hf_entries and hf_entries[0].get("id"):
+        output_path = datasets_dir(hf_entries[0]["id"]) / "dataset.json"
+    elif args.output:
+        output_path = Path(args.output)
+    elif hf_entries and hf_entries[0].get("id"):
+        output_path = Path(f"{hf_entries[0]['id']}.json")
+    else:
+        output_path = Path("js_custom_dataset.json")
     output_path.write_text(json.dumps(hf_entries, indent=2), encoding="utf-8")
     logger.info("Saved dataset to %s", output_path)
 

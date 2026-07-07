@@ -52,29 +52,56 @@ def parse_jest_vitest_report(
     * Durations are in **milliseconds** — they are converted to seconds here.
     * Any ``test_ids`` not present in the report are counted as ``"failed"``.
     """
-    status: list[str] = []
-    durations_ms: list[float] = []
-    seen_full_names: set[str] = set()
-
-    for test_result in report.get("testResults", []):
-        for assertion in test_result.get("assertionResults", []):
-            raw_status: str = assertion.get("status", "failed")
-            mapped = STATUS_MAP.get(raw_status, "failed")
-            status.append(mapped)
-            durations_ms.append(float(assertion.get("duration", 0)))
-            full_name = assertion.get("fullName", "")
-            if full_name:
-                seen_full_names.add(full_name)
-
+    canonical: set[str] = set()
     for tid in test_ids:
         if not tid:
             continue
-        bare_name = tid.split(" > ", 1)[1] if " > " in tid else tid
-        if bare_name not in seen_full_names and tid not in seen_full_names:
+        canonical.add(tid)
+        if " > " in tid:
+            canonical.add(tid.split(" > ", 1)[1])
+
+    matched: dict[str, str] = {}
+    durations_ms: list[float] = []
+
+    for test_result in report.get("testResults", []):
+        for assertion in test_result.get("assertionResults", []):
+            full_name = assertion.get("fullName", "")
+            if not full_name or full_name not in canonical:
+                continue
+            raw_status: str = assertion.get("status", "failed")
+            mapped = STATUS_MAP.get(raw_status, "failed")
+            if full_name not in matched or (
+                matched[full_name] == "failed" and mapped == "passed"
+            ):
+                matched[full_name] = mapped
+            durations_ms.append(float(assertion.get("duration", 0)))
+
+    status: list[str] = []
+    for tid in test_ids:
+        if not tid:
+            continue
+        bare = tid.split(" > ", 1)[1] if " > " in tid else tid
+        if bare in matched:
+            status.append(matched[bare])
+        elif tid in matched:
+            status.append(matched[tid])
+        else:
             status.append("failed")
 
     total_seconds = sum(durations_ms) / 1000.0
     return Counter(status), total_seconds
+
+
+def detect_jest_vitest_suite_crash(report: dict) -> bool:
+    test_results = report.get("testResults", [])
+    if not test_results:
+        return True
+    for tr in test_results:
+        assertions = tr.get("assertionResults", [])
+        failure_message = tr.get("failureMessage")
+        if not assertions and failure_message:
+            return True
+    return False
 
 
 def main(
@@ -189,20 +216,23 @@ def main(
 
     out: list[dict[str, object]] = []
     for name in tqdm(log_dirs):
-        report_file = os.path.join(name, "report.json")
+        tap_file = os.path.join(name, "report.tap")
+        json_file = os.path.join(name, "report.json")
         display_name = name.split("/")[2] if len(name.split("/")) > 2 else name
         test_ids_raw = get_ts_test_ids(display_name, verbose=0)
         test_ids = [xx for x in test_ids_raw for xx in x if xx]
+
+        report_file = tap_file if os.path.exists(tap_file) else json_file
 
         if not os.path.exists(report_file):
             log_parent = os.path.dirname(report_file)
             test_output_file = os.path.join(log_parent, "test_output.txt")
             if os.path.exists(test_output_file):
-                reason = "jest_crash_or_collection_error"
+                reason = "runner_crash_or_collection_error"
             else:
                 reason = "container_or_infra_failure"
             logger.warning(
-                f"{display_name}: missing report.json ({reason}) — check {log_parent}"
+                f"{display_name}: missing report.tap/report.json ({reason}) — check {log_parent}"
             )
             out.append(
                 {
@@ -216,11 +246,16 @@ def main(
             continue
 
         try:
-            with open(report_file, "r") as file:
-                report = json.load(file)
+            if report_file.endswith(".tap"):
+                from commit0.harness.node_test_tap import tap_to_jest_report_shape
+                with open(report_file, "r") as file:
+                    report = tap_to_jest_report_shape(file.read())
+            else:
+                with open(report_file, "r") as file:
+                    report = json.load(file)
         except json.JSONDecodeError:
             logger.warning(
-                "Corrupt report.json for %s (truncated or invalid JSON) "
+                "Corrupt report file for %s (truncated or invalid) "
                 "— treating as 0%% pass rate",
                 display_name,
             )
@@ -236,23 +271,19 @@ def main(
             continue
 
         status_counter, total_duration = parse_jest_vitest_report(report, test_ids)
+        suite_crashed = detect_jest_vitest_suite_crash(report)
 
-        # Use the actual number of assertion results from the report when
-        # available.  Jest ``--listTests`` only returns file-level paths so
-        # ``len(test_ids)`` may be 1 (one file) even though the file contains
-        # 13 individual tests.  The report's assertion results are the
-        # authoritative count, matching how Python's evaluate.py works with
-        # individual pytest node IDs.
-        #
-        # When the report has assertions, the status_counter already includes
-        # phantom "failed" entries for test_ids missing from the report, so
-        # sum(status_counter.values()) is the correct total.  We only fall
-        # back to len(test_ids) when the report returned zero assertions
-        # (e.g. collection error).
-        report_test_count = sum(status_counter.values())
-        num_total = report_test_count if report_test_count > 0 else len(test_ids)
+        num_total = len([t for t in test_ids if t])
         num_passed = status_counter.get("passed", 0)
         passed_rate = num_passed / num_total if num_total > 0 else 0.0
+
+        if suite_crashed:
+            logger.warning(
+                "%s: test suite CRASHED at import/setup — 0/%d indicates infrastructure "
+                "failure, not real test failures. Check the failureMessage in report.json.",
+                display_name,
+                num_total,
+            )
 
         out.append(
             {
@@ -261,6 +292,7 @@ def main(
                 "passed": passed_rate,
                 "num_passed": num_passed,
                 "num_tests": num_total,
+                "suite_crashed": suite_crashed,
             }
         )
 

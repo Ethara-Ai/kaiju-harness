@@ -897,7 +897,10 @@ class TestRunThinkingCaptureSummarizerCostsAdd:
                         max_test_output_length=50,
                     )
 
-        assert tc.summarizer_costs.total_cost == pytest.approx(0.01)
-        assert tc.summarizer_costs.total_prompt_tokens == 50
-        assert tc.summarizer_costs.total_completion_tokens == 25
-        assert len(tc.summarizer_costs.costs) == 1
+        # Corrected accounting: the TEST-output summarizer runs INSIDE the module
+        # capture window, so its cost is captured in the per-module call-log — it
+        # must NOT also be added to summarizer_costs (that double-counted it in
+        # get_metrics). So summarizer_costs stays empty for a test-only run; the
+        # cost is still reported via agent_return.test_summarizer_cost.
+        assert tc.summarizer_costs.total_cost == pytest.approx(0.0)
+        assert len(tc.summarizer_costs.costs) == 0

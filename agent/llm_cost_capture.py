@@ -68,6 +68,12 @@ class LlmCallRecord:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     thinking_tokens: int = 0
+    # True when thinking_tokens was ESTIMATED by counting the (possibly
+    # summarized) reasoning text rather than read from a provider-exact
+    # reasoning-token usage field. Anthropic with display:summarized never
+    # returns exact reasoning tokens, so the value is a text-length proxy that
+    # undercounts the real reasoning; flag it so consumers don't treat it as billed.
+    thinking_tokens_estimated: bool = False
     cost_usd: float = 0.0
     duration_s: float = 0.0
     timestamp: str = ""
@@ -81,6 +87,7 @@ class LlmCallRecord:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "thinking_tokens": self.thinking_tokens,
+            "thinking_tokens_estimated": self.thinking_tokens_estimated,
             "cost_usd": self.cost_usd,
             "duration_s": self.duration_s,
             "timestamp": self.timestamp,
@@ -108,6 +115,19 @@ class LlmCallLog:
     # Replaces the deprecated httpx-INFO-log scanner which broke when httpx logs
     # were suppressed to prevent Bedrock ARN leakage.
     callback_event_count: int = 0
+    # Per-log dedup keys: the same underlying call is recorded by up to three paths
+    # (litellm callback, stream interceptor, completion wrapper). This set catches
+    # those WITHIN one capture window. It is per-LlmCallLog (NOT a module-global) so
+    # two DIFFERENT calls in different modules that happen to share a signature
+    # (model+tokens) are never cross-deduped into a single record (which silently
+    # under-counted cost/calls/turns).
+    _seen: set = field(default_factory=set)
+    # Wall-clock seconds of the agent.run() bracketed by capture_module_calls.
+    # Set on context-manager exit. Used as the per-module runtime for languages
+    # (go/c) whose run loop doesn't measure a per-module elapsed itself; the other
+    # languages pass a slightly more inclusive module_elapsed explicitly and that
+    # takes precedence in write_module_output_json.
+    wall_seconds: float = 0.0
 
     def add(self, record: LlmCallRecord) -> None:
         if self.model_short:
@@ -159,6 +179,20 @@ class LlmCallLog:
         else:
             out["cache_read_tokens"] = sum(c.cache_read_tokens for c in self.calls)
             out["cache_write_tokens"] = sum(c.cache_write_tokens for c in self.calls)
+        # E2 invariant: tokens were spent but cost is $0 ⇒ pricing did not resolve
+        # (bridge/alias model name not in metadata). This is the difference between
+        # a real subscription $0 and a broken cost pipeline — surface it explicitly
+        # so a "successful" run can't silently lie about cost.
+        out["cost_resolved"] = not (
+            out["prompt_tokens"] + out["completion_tokens"] > 0 and out["cost_usd"] == 0.0
+        )
+        if not out["cost_resolved"]:
+            models = sorted({c.model for c in self.calls})
+            _logger.error(
+                "COST UNRESOLVED: %d tokens spent but cost is $0 — pricing missing for "
+                "model(s) %s. Reported cost is NOT a real $0. Add a metadata entry / "
+                "normalize the model name.", out["prompt_tokens"] + out["completion_tokens"], models,
+            )
         return out
 
 
@@ -196,7 +230,8 @@ def _drain_summarizer_threads() -> None:
                     t.join(timeout=60)
         except Exception as e:
             _logger.warning("summarizer drain failed: %s", e)
-_seen_call_ids: set[str] = set()
+# Guards the per-log `_seen` dedup sets (see LlmCallLog._seen). The dedup state is
+# per-LlmCallLog, not module-global, to avoid cross-module false-dedup.
 _seen_lock = threading.Lock()
 
 
@@ -219,7 +254,15 @@ def _classify_source(_kwargs: Any) -> str:
     for frame in stack:
         name = frame.name or ""
         fn = (frame.filename or "").lower()
-        if "summarize_test_output" in name or "summarize_specification" in name:
+        # Match every language's summarizer: the generic `summarize_test_output`,
+        # the per-language variants (`summarize_rust_test_output`,
+        # `summarize_cpp_test_output`, …), and `summarize_specification`. The old
+        # exact `summarize_test_output` substring missed the `_rust_`/`_cpp_`
+        # variants, so their calls were mislabeled `main_loop` in by_source.
+        if (
+            ("summarize" in name and "test_output" in name)
+            or "summarize_specification" in name
+        ):
             our_seen = True
         if (
             "summarize_chat_history" in name
@@ -258,7 +301,21 @@ def _load_pricing(model: str) -> dict[str, float]:
     if cached is not None:
         return cached
     import json
+    import re as _re
     p = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    # E2: normalize runtime model-name variants to the base pricing key. The
+    # bridge / 1M-context aliases surface as e.g. `anthropic/claude-opus-4-8[1m]`
+    # or `…-v1:0` which aren't in the metadata, so pricing silently resolved to
+    # $0 and the whole run reported free. Strip a trailing `[...]` / `:N` suffix
+    # and retry the lookup with the cleaned name in addition to the raw one.
+    _clean = _re.sub(r"\[[^\]]*\]$", "", model)
+    # Do NOT strip a trailing `:N` for Bedrock — there the `:0`/`:1` is the model
+    # VERSION, part of the canonical id (e.g. `...claude-3-5-sonnet-20240620-v1:0`);
+    # stripping it would resolve to the wrong (or no) pricing entry. Only the
+    # `[1m]`-style context-alias suffix is safe to strip universally.
+    if not model.startswith("bedrock/"):
+        _clean = _re.sub(r":\d+$", "", _clean)
+    _lookup_names = [model] if _clean == model else [model, _clean]
     metadata_paths = [
         Path(__file__).resolve().parents[1] / ".aider.model.metadata.json",
     ]
@@ -269,7 +326,11 @@ def _load_pricing(model: str) -> dict[str, float]:
             data = json.loads(mp.read_text())
         except Exception:
             continue
-        entry = data.get(model) or data.get(model.replace("bedrock/", "")) or data.get(model.replace("anthropic/", ""))
+        entry = None
+        for _nm in _lookup_names:
+            entry = data.get(_nm) or data.get(_nm.replace("bedrock/", "")) or data.get(_nm.replace("anthropic/", ""))
+            if entry:
+                break
         if not entry and model.startswith("bedrock/converse/"):
             suffix = model[len("bedrock/converse/"):]
             for key, val in data.items():
@@ -327,15 +388,23 @@ def _compute_cost(model: str, p_tok: int, c_tok: int, cr_tok: int, cw_tok: int) 
 
 
 def _normalize_model(model: str) -> str:
+    """Canonicalize a model id for cross-path dedup ONLY (not pricing).
+
+    The wrapper path sees the model the API RETURNED (often bare, e.g. ``gpt-5.5``
+    after the codex bridge remaps it) while the callback path sees the model the
+    CLIENT sent (prefixed + dated, e.g. ``openai/gpt-5.5-2026-04-23``). Both must
+    reduce to the same string or the same call is recorded twice. So strip every
+    known provider prefix AND a trailing date snapshot suffix.
+    """
     if not model:
         return ""
     m = model
-    while m.startswith("bedrock/"):
-        m = m[len("bedrock/"):]
-    while m.startswith("anthropic/"):
-        m = m[len("anthropic/"):]
-    while m.startswith("vertex_ai/"):
-        m = m[len("vertex_ai/"):]
+    for _prefix in ("bedrock/", "anthropic/", "vertex_ai/", "vertex_ai_beta/",
+                    "openai/", "gemini/", "azure/"):
+        while m.startswith(_prefix):
+            m = m[len(_prefix):]
+    # Drop a trailing OpenAI-style date snapshot, e.g. "gpt-5.5-2026-04-23".
+    m = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", m)
     return m
 
 
@@ -431,15 +500,16 @@ def _record_call(
             if isinstance(mp, str):
                 model_pre = mp
         canonical_key = f"call:{_normalize_model(model_pre)}:{prompt_t}:{completion_t}:{cache_r_pre}:{cache_w_pre}"
+        seen = log._seen  # per-log dedup window (not module-global)
         with _seen_lock:
-            if canonical_key in _seen_call_ids:
+            if canonical_key in seen:
                 return
-            if call_id and call_id in _seen_call_ids:
-                _seen_call_ids.add(canonical_key)
+            if call_id and call_id in seen:
+                seen.add(canonical_key)
                 return
-            _seen_call_ids.add(canonical_key)
+            seen.add(canonical_key)
             if call_id:
-                _seen_call_ids.add(call_id)
+                seen.add(call_id)
         cost = 0.0
         if isinstance(hidden, dict):
             raw = hidden.get("response_cost")
@@ -482,6 +552,7 @@ def _record_call(
             "cacheWriteInputTokenCount",
         )
 
+        # Prefer the provider's EXACT reasoning-token usage field.
         thinking_t = _extract_int(
             usage, "reasoning_tokens", "completion_tokens_details_reasoning"
         )
@@ -493,8 +564,11 @@ def _record_call(
             _od = getattr(usage, "output_tokens_details", None)
             if _od is not None:
                 thinking_t = _extract_int(_od, "thinking_tokens")
+        thinking_estimated = False
 
-        # Claude adaptive thinking: count from response body when usage gives 0.
+        # Claude adaptive thinking: no exact usage field, so ESTIMATE by counting
+        # the reasoning text. With display:summarized this text is a SUMMARY, so
+        # the count undercounts the true (billed) reasoning — flag it as estimated.
         if thinking_t == 0 and response is not None:
             try:
                 _msg = response.choices[0].message
@@ -502,6 +576,7 @@ def _record_call(
                 if _rc and isinstance(_rc, str):
                     import litellm as _litellm
                     thinking_t = _litellm.token_counter(model=model, text=_rc)
+                    thinking_estimated = thinking_t > 0
             except Exception:
                 pass
         computed_cost = _compute_cost(model, prompt_t, completion_t, cache_r, cache_w)
@@ -517,7 +592,7 @@ def _record_call(
                 cache_read_tokens=cache_r,
                 cache_write_tokens=cache_w,
                 thinking_tokens=thinking_t,
-
+                thinking_tokens_estimated=thinking_estimated,
                 cost_usd=cost,
                 duration_s=duration,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -578,9 +653,9 @@ def _record_stream_chunk_usage(model: str, usage: Any) -> None:
 
         dedup_key = f"call:{_normalize_model(model)}:{prompt_t}:{completion_t}:{cache_r}:{cache_w}"
         with _seen_lock:
-            if dedup_key in _seen_call_ids:
+            if dedup_key in log._seen:
                 return
-            _seen_call_ids.add(dedup_key)
+            log._seen.add(dedup_key)
 
         cost = _compute_cost(model, prompt_t, completion_t, cache_r, cache_w)
         log.add(
@@ -662,9 +737,9 @@ def _record_response_object(model: str, response: Any, duration_s: float = 0.0) 
                 pass
         dedup_key = f"call:{_normalize_model(model)}:{prompt_t}:{completion_t}:{cache_r}:{cache_w}"
         with _seen_lock:
-            if dedup_key in _seen_call_ids:
+            if dedup_key in log._seen:
                 return
-            _seen_call_ids.add(dedup_key)
+            log._seen.add(dedup_key)
 
         try:
             stack_kwargs = {"model": model}
@@ -942,11 +1017,34 @@ def capture_module_calls(
 
     register_litellm_callbacks()
     _wrap_litellm_completion()
+    # Ground-truth edit capture: patch aider's apply_edits ONCE so the trajectory
+    # uses the edits aider actually applied, not a heuristic re-parse of the
+    # model's text. Idempotent + best-effort; installed here (the one shared
+    # choke point all languages wrap agent.run with) so there's no per-language
+    # wiring. A hook failure must never break the run.
+    try:
+        from agent.edit_capture import install_edit_capture, install_reflection_capture
+
+        # Mark capture active ONLY if the patch is really in place, so a turn whose
+        # apply_edits is skipped by an aider early-return (add-files reflection /
+        # max_tokens / interrupted) reads as "0 edits applied" instead of falling
+        # back to the phantom-producing text parser. If aider is unavailable
+        # (install returns False), leave it inactive so the parser fallback applies.
+        if install_edit_capture() and thinking_capture is not None:
+            thinking_capture.edit_capture_active = True
+        # Reflection capture: accumulate aider's per-module reflection count so
+        # get_module_metrics can report num_reflections + num_agent_turns. Class-
+        # level patch on Coder.run_one (all languages), idempotent + best-effort.
+        install_reflection_capture()
+    except Exception:  # noqa: BLE001
+        _logger.debug("edit capture install skipped", exc_info=True)
     log = LlmCallLog(model_short=model_short)
     token = _current_log.set(log)
+    _wall_t0 = time.monotonic()
     try:
         yield log
     finally:
+        log.wall_seconds = time.monotonic() - _wall_t0
         _drain_summarizer_threads()
         _current_log.reset(token)
         if thinking_capture is not None:

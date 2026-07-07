@@ -72,33 +72,94 @@ def _make_names_only_test_cmd(base_cmd: str) -> str:
 
 _CPP_PROMPT_PATH = Path(__file__).parent / "prompts" / "cpp_system_prompt.md"
 
+_MAX_FILE_CONTEXT_CHARS = 50_000
+_MAX_PER_FILE_CONTEXT_CHARS = 20_000
+_MAX_FUNCTION_LIST_CHARS = 30_000
+
 
 def get_cpp_message(
     agent_config: AgentConfig,
     repo_path: str,
     target_files: list[str],
+    test_files: list[str] | None = None,
 ) -> tuple[str, list[SummarizerCost]]:
     """Build the C++ system prompt from ``cpp_system_prompt.md``, filling
     ``{repo_name}``, ``{function_list}``, and ``{file_context}`` placeholders.
+
+    Args:
+        agent_config: Agent configuration.
+        repo_path: Absolute path to the repo's working directory.
+        target_files: The stub files this invocation should focus on. Must be
+            scoped to ONE file (or a small set) in per-file callers — passing
+            every stub in the crate produces megabyte-scale prompts that
+            exceed model context windows on large C++ codebases (e.g. LLVM,
+            gRPC, Boost).
+        test_files: Optional list of test file paths (absolute or repo-relative).
+            When provided AND ``agent_config.use_unit_tests_info`` is True, the
+            test bodies are concatenated and appended (capped at
+            ``agent_config.max_unit_tests_info_length`` chars). Previously the
+            caller never passed this, so ``use_unit_tests_info`` was silently
+            a no-op.
+
     """
     repo_name = Path(repo_path).name
 
     function_list_parts: list[str] = []
+    fl_chars = 0
+    fl_truncated = 0
     for tf in target_files:
         full_path = Path(repo_path) / tf
-        if full_path.exists():
-            stubs = extract_cpp_function_stubs(str(full_path))
-            if stubs:
-                function_list_parts.append(f"// {tf}\n{stubs}")
+        if not full_path.exists():
+            continue
+        stubs = extract_cpp_function_stubs(str(full_path))
+        if not stubs:
+            continue
+        block = f"// {tf}\n{stubs}"
+        if fl_chars + len(block) > _MAX_FUNCTION_LIST_CHARS:
+            fl_truncated += 1
+            continue
+        function_list_parts.append(block)
+        fl_chars += len(block)
+    if fl_truncated:
+        function_list_parts.append(
+            f"// ... {fl_truncated} additional file(s)' stubs elided to stay under "
+            f"function_list cap of {_MAX_FUNCTION_LIST_CHARS} chars ..."
+        )
 
     function_list = "\n\n".join(function_list_parts)
 
     file_context_parts: list[str] = []
+    running_chars = 0
+    truncated_files = 0
     for tf in target_files:
+        if running_chars >= _MAX_FILE_CONTEXT_CHARS:
+            truncated_files += 1
+            continue
         full_path = Path(repo_path) / tf
-        if full_path.exists():
+        if not full_path.exists():
+            continue
+        try:
             content = full_path.read_text(errors="replace")
-            file_context_parts.append(f"```cpp\n// {tf}\n{content}\n```")
+        except OSError as exc:
+            logger.warning("Could not read %s for context: %s", full_path, exc)
+            continue
+        if len(content) > _MAX_PER_FILE_CONTEXT_CHARS:
+            content = (
+                content[:_MAX_PER_FILE_CONTEXT_CHARS]
+                + f"\n// ... truncated ({len(content) - _MAX_PER_FILE_CONTEXT_CHARS} chars elided) ...\n"
+            )
+        block = f"```cpp\n// {tf}\n{content}\n```"
+        remaining = _MAX_FILE_CONTEXT_CHARS - running_chars
+        if len(block) > remaining:
+            block = block[:remaining] + "\n// ... file_context cap reached ...\n```"
+        file_context_parts.append(block)
+        running_chars += len(block)
+
+    if truncated_files:
+        file_context_parts.append(
+            f"\n// ... {truncated_files} additional file(s) elided to stay under "
+            f"file_context cap of {_MAX_FILE_CONTEXT_CHARS} chars ...\n"
+        )
 
     file_context = "\n\n".join(file_context_parts)
 
@@ -116,6 +177,24 @@ def get_cpp_message(
         function_list=function_list,
         file_context=file_context,
     )
+
+    if agent_config.use_unit_tests_info and test_files:
+        unit_tests_section = "\n\n>>> Here is the Unit Tests Information:\n"
+        for tf in test_files:
+            tf_path = Path(tf) if os.path.isabs(tf) else Path(repo_path) / tf
+            if tf_path.exists():
+                try:
+                    unit_tests_section += (
+                        f"\n### {tf_path.name}\n```cpp\n"
+                        + tf_path.read_text(errors="replace")
+                        + "\n```\n"
+                    )
+                except OSError as exc:
+                    logger.warning("Could not read test file %s: %s", tf_path, exc)
+        max_unit = max(0, int(getattr(agent_config, "max_unit_tests_info_length", 10000)))
+        if len(unit_tests_section) > max_unit:
+            unit_tests_section = unit_tests_section[:max_unit] + "\n... (truncated)\n"
+        message += unit_tests_section
 
     return message, []
 
@@ -182,13 +261,13 @@ def run_cpp_agent_for_repo(
     stable_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
 
     if not override_previous_changes and _is_module_done(stable_log_dir):
-        logger.info(f"Skipping {repo_name} - already completed")
+        logger.info("Skipping %s - already completed", repo_name)
         return
 
     target_files = get_target_edit_files_cpp(repo_path)
 
     if not target_files:
-        logger.warning(f"No target files found for {repo_name}")
+        logger.warning("No target files found for %s", repo_name)
         _mark_module_done(stable_log_dir)
         return
 
@@ -213,7 +292,7 @@ def run_cpp_agent_for_repo(
         local_repo = Repo(repo_path)
         create_branch(local_repo, branch, example.get("base_commit", ""))
     except Exception as e:
-        logger.error(f"Failed to create branch for {repo_name}: {e}")
+        logger.error("Failed to create branch for %s: %s", repo_name, e)
         return
 
     # Write agent config snapshot — mirrors Java's .agent.yaml
@@ -222,10 +301,14 @@ def run_cpp_agent_for_repo(
         with open(agent_config_log_file, "w") as f:
             yaml.dump(agent_config, f)
     except Exception as e:
-        logger.warning(f"Failed to write .agent.yaml for {repo_name}: {e}")
+        logger.warning("Failed to write .agent.yaml for %s: %s", repo_name, e)
 
     lint_cmd = get_cpp_lint_cmd(repo_path)
-    test_cmd = "ctest --test-dir build --output-on-failure"
+    dataset_test_cmd = example.get("test", {}).get("test_cmd", "") if isinstance(example, dict) else ""
+    if dataset_test_cmd:
+        test_cmd = dataset_test_cmd.replace("/testbed/", f"{repo_path}/")
+    else:
+        test_cmd = "cmake -B build && cmake --build build -j$(nproc) && ctest --test-dir build --output-on-failure"
 
     _test_files_ro = [
         str(p) for p in Path(repo_path).rglob("*.cpp")
@@ -278,7 +361,12 @@ def run_cpp_agent_for_repo(
         file_log_dir = stable_log_dir / stem
         file_log_dir.mkdir(parents=True, exist_ok=True)
 
-        message, summarizer_costs = get_cpp_message(agent_config, repo_path, [tf])
+        message, summarizer_costs = get_cpp_message(
+            agent_config,
+            repo_path,
+            [tf],
+            test_files=_test_files_ro,
+        )
 
         if thinking_capture is not None:
             for c in summarizer_costs:
@@ -317,7 +405,7 @@ def run_cpp_agent_for_repo(
                         branch, backend, commit0_config_file
                     )
             except Exception as e:
-                logger.error(f"Agent failed for {repo_name}/{tf}: {e}")
+                logger.error("Agent failed for %s/%s: %s", repo_name, tf, e)
                 (file_log_dir / "error.log").write_text(str(e))
 
         elif agent_config.use_lint_info:
@@ -342,7 +430,7 @@ def run_cpp_agent_for_repo(
                             test_files_readonly=_test_files_ro,
                     _kaiju_log_dir=file_log_dir,)
             except Exception as e:
-                logger.error(f"Agent failed for {repo_name}/{tf} (lint mode): {e}")
+                logger.error("Agent failed for %s/%s (lint mode): %s", repo_name, tf, e)
                 (file_log_dir / "error.log").write_text(str(e))
 
         else:
@@ -368,7 +456,7 @@ def run_cpp_agent_for_repo(
             except Exception as e:
                 import traceback as _tb
                 tb_str = _tb.format_exc()
-                logger.error(f"Agent failed for {repo_name}/{tf} (draft mode): {e}\n{tb_str}")
+                logger.error("Agent failed for %s/%s (draft mode): %s\n%s", repo_name, tf, e, tb_str)
                 (file_log_dir / "error.log").write_text(f"{e}\n\n{tb_str}")
 
         # Per-module .done marker — mirrors Java structure
@@ -394,7 +482,7 @@ def run_cpp_agent_for_repo(
                     metadata=metadata,
                     metrics=thinking_capture.get_module_metrics(stem),
                     stage=stage,
-                    stage_runtime_seconds=module_elapsed,
+                    module_runtime_seconds=module_elapsed,
                 )
 
     # Write eval_results.json — mirrors Java structure
@@ -402,7 +490,7 @@ def run_cpp_agent_for_repo(
         with open(stable_log_dir / "eval_results.json", "w") as f:
             json.dump(eval_results, f)
     except Exception as e:
-        logger.warning(f"Failed to write eval_results.json for {repo_name}: {e}")
+        logger.warning("Failed to write eval_results.json for %s: %s", repo_name, e)
 
     # Write trajectory.md when thinking capture is enabled
     if thinking_capture is not None:
@@ -420,10 +508,10 @@ def run_cpp_agent_for_repo(
                     f"{len(thinking_capture.turns)} turns"
                 )
         except Exception as e:
-            logger.warning(f"Failed to write trajectory.md for {repo_name}: {e}")
+            logger.warning("Failed to write trajectory.md for %s: %s", repo_name, e)
 
     _mark_module_done(stable_log_dir)
-    logger.info(f"Completed {repo_name}")
+    logger.info("Completed %s", repo_name)
 
 
 def run_cpp_agent(
@@ -456,7 +544,7 @@ def run_cpp_agent(
         "and the dataset contains C++ repositories."
     )
 
-    logger.info(f"Found {len(cpp_examples)} C++ repositories to process")
+    logger.info("Found %d C++ repositories to process", len(cpp_examples))
 
     repo_base_dir = commit0_config.get("base_dir", "repos")
 

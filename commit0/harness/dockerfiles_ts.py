@@ -153,7 +153,12 @@ def get_dockerfile_repo_ts(
         lines.append("")
 
     lines.append(
-        'RUN test -d node_modules && echo "node_modules OK: $(ls node_modules | wc -l) packages" || echo "WARN: node_modules missing after setup"'
+        'RUN if [ -d node_modules ] && [ "$(ls -A node_modules 2>/dev/null | wc -l)" -gt 0 ]; then '
+        'echo "node_modules OK: $(ls node_modules | wc -l) packages"; '
+        'else '
+        'echo "ERROR: node_modules missing or empty after install — refusing to publish broken image" >&2; '
+        'exit 1; '
+        'fi'
     )
     lines.append("")
     lines.append("RUN ls node_modules > /testbed/.dep-manifest.txt 2>/dev/null || true")

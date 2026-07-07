@@ -15,8 +15,8 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from commit0.harness.constants import (
-    BASE_IMAGE_BUILD_DIR,
-    REPO_IMAGE_BUILD_DIR,
+    base_image_build_dir,
+    repo_image_build_dir,
     OCI_IMAGE_DIR,
 )
 from commit0.harness.docker_build import (
@@ -83,7 +83,7 @@ def build_base_images_rust(
         dockerfile=dockerfile,
         platform=platform,
         client=client,
-        build_dir=BASE_IMAGE_BUILD_DIR / image_name.replace(":", "__"),
+        build_dir=base_image_build_dir() / image_name.replace(":", "__"),
         mitm_ca_cert=mitm_ca_cert,
     )
     _logger.info("Rust base image built successfully.")
@@ -215,7 +215,7 @@ def build_rust_repo_images(
                     config["dockerfile"],
                     config["platform"],
                     client,
-                    REPO_IMAGE_BUILD_DIR / image_name.replace(":", "__"),
+                    repo_image_build_dir() / image_name.replace(":", "__"),
                     False,
                     mitm_ca_cert,
                 ): image_name

@@ -4,6 +4,7 @@ Uses ``run_cpp_tests.main`` as the per-repo test runner and parses
 C++ test framework output for result aggregation.
 """
 
+import bz2
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,10 +16,25 @@ from tqdm import tqdm
 from commit0.harness.constants import RepoInstance
 from commit0.harness.constants_cpp import (
     CPP_SPLIT,
+    CPP_TEST_IDS_DIR,
     RUN_CPP_TESTS_LOG_DIR,
 )
+
+
+def _expected_test_count(name: str) -> int:
+    cache_path = CPP_TEST_IDS_DIR / f"{name}.bz2"
+    if not cache_path.exists():
+        return 0
+    try:
+        raw = bz2.decompress(cache_path.read_bytes()).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return 0
+    return sum(1 for line in raw.splitlines() if line.strip())
 from commit0.harness.run_cpp_tests import main as run_cpp_tests
-from commit0.harness.cpp_test_parser import parse_cpp_test_output
+from commit0.harness.cpp_test_parser import (
+    parse_cmake_build_attribution,
+    parse_cpp_test_output,
+)
 from commit0.harness.utils import (
     get_hash_string,
     get_active_branch,
@@ -198,11 +214,51 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
     report = parse_cpp_test_output(content, exit_code)
     tests = report.get("tests", [])
     summary = report.get("summary", {})
+    build_attr = parse_cmake_build_attribution(content)
+    tests_built = build_attr.get("tests_built", [])
+    tests_failed_build = build_attr.get("tests_failed", [])
+    total_test_binaries = len(tests_built) + len(tests_failed_build)
 
     num_passed = summary.get("passed", 0)
     num_tests = summary.get("total", 0)
+    framework = summary.get("framework", "unknown")
+    # Reward-hacking guard: C++ counts from RAW STDOUT (GTest `[ OK ]`, Catch2,
+    # doctest, ...), so a model whose code prints fake pass lines could inflate
+    # num_passed. Anchor to the canonical test inventory + the process exit code
+    # (both unforgeable by stdout) and flag forged output as CHEAT_DETECTED.
+    expected = _expected_test_count(name)
+    if framework == "unknown" and num_tests <= 1 and expected > 0:
+        num_tests = expected
+    cheat_reason = ""
+    if expected > 0 and num_passed > expected:
+        # More reported passes than the canonical suite even has -> injected.
+        cheat_reason = (f"observed {num_passed} passes > {expected} canonical "
+                        f"tests (forged test output)")
+    elif exit_code not in (0, None) and num_tests > 0 and num_passed >= num_tests:
+        # Claims everything passed, yet the build+test process exited non-zero.
+        cheat_reason = (f"claimed {num_passed}/{num_tests} passed but the run "
+                        f"exited {exit_code} (a genuine all-pass exits 0)")
+    if expected > 0:
+        num_tests = max(num_tests, expected)  # canonical denominator (ceiling)
+        num_passed = min(num_passed, num_tests)
     total_runtime = sum(t.get("duration", 0) for t in tests)
+    status = "TESTS_RAN"
+    if cheat_reason:
+        status = "CHEAT_DETECTED"
+        num_passed = 0
+        logger.warning("%s: CHEAT_DETECTED — forged C++ test output: %s",
+                       name, cheat_reason)
     passed_rate = num_passed / num_tests if num_tests > 0 else 0.0
+
+    if total_test_binaries > 0:
+        logger.info(
+            "%s build attribution: %d/%d test binaries built (%d failed: %s)",
+            name,
+            len(tests_built),
+            total_test_binaries,
+            len(tests_failed_build),
+            ", ".join(tests_failed_build[:5]) + ("..." if len(tests_failed_build) > 5 else ""),
+        )
 
     out.append(
         {
@@ -211,6 +267,7 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
             "passed": passed_rate,
             "num_passed": num_passed,
             "num_tests": num_tests,
+            "status": status,
         }
     )
 

@@ -232,11 +232,22 @@ def test_pool_snapshot_shape():
     assert all("available" in s for s in snap)
 
 
-def test_pool_force_reload_clears_state():
+def test_pool_force_reload_preserves_exhaustion():
+    # B8: force_reload() now only drops cached creds; it must NOT clear cap state
+    # (clearing it made the bridge immediately re-hammer a still-capped account).
     p = _pool("aaa")
     p.mark_account_exhausted("aaa", time.time() + 3600)
     assert p.snapshot()[0]["available"] is False
     p.force_reload()
+    assert p.snapshot()[0]["available"] is False  # still exhausted
+
+
+def test_pool_reset_account_state_clears_exhaustion():
+    # The explicit operator action still clears everything.
+    p = _pool("aaa")
+    p.mark_account_exhausted("aaa", time.time() + 3600)
+    assert p.snapshot()[0]["available"] is False
+    p.reset_account_state()
     assert p.snapshot()[0]["available"] is True
 
 
@@ -537,3 +548,59 @@ def test_healthz_multi_account_includes_snapshot(isolated_env):
     assert body["ok"] is True
     assert "accounts" in body
     assert len(body["accounts"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Option D — bridge buffer-and-retry: a mid-stream drop is recovered
+# transparently; the client only ever sees ONE complete stream.
+# ---------------------------------------------------------------------------
+def test_buffered_stream_recovers_midstream_drop(monkeypatch):
+    import asyncio, httpx
+    import agent.claude_code.bridge as B
+
+    class _Ctx:
+        def __init__(self, chunks, status=200, drop=False):
+            self._chunks, self.status_code, self.headers, self._drop = chunks, status, {}, drop
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def aiter_bytes(self):
+            for c in self._chunks:
+                yield c
+            if self._drop:
+                raise httpx.RemoteProtocolError(
+                    "peer closed connection without sending complete message body (incomplete chunked read)")
+
+    class _Client:
+        def __init__(self, script): self._script, self._i = script, 0
+        def stream(self, *a, **k):
+            item = self._script[min(self._i, len(self._script) - 1)]; self._i += 1
+            return _Ctx(*item)
+        async def aclose(self): pass
+
+    class _Prov:
+        def __init__(self): self.n = 0
+        def get_access_token(self): self.n += 1; return "sk-ant-oat01-tok"
+
+    partial = [b"event: message_start\ndata: {}\n\n"]
+    complete = [b"event: message_start\ndata: {}\n\n",
+                b"event: content_block_delta\ndata: {\"x\":1}\n\n",
+                b"\nevent: message_stop\ndata: {}\n\n"]
+    script = [(partial, 200, True), (complete, 200, False)]
+
+    prov = _Prov(); shared = _Client(script)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: shared)
+
+    async def _run():
+        real_sleep = asyncio.sleep
+        monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(0))
+        resp = await B._stream_buffered_with_retry(prov, "POST", "http://x/v1/messages", b"{}", {}, {})
+        out = b""
+        async for ch in resp.body_iterator:
+            out += ch
+        return out
+
+    out = asyncio.run(_run())
+    assert b"event: message_stop" in out                 # complete stream delivered
+    assert b'"x":1' in out                               # attempt-2 content, not the dropped one
+    assert out.count(b"message_start") == 1              # not both attempts concatenated
+    assert prov.n >= 2                                   # a retry happened

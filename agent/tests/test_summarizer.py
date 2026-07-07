@@ -1051,3 +1051,96 @@ class TestThinkingCaptureWithSummarizerCosts:
         assert metrics["total_completion_tokens"] == 200
         assert metrics["summarizer_cost"] == 0.0
         assert metrics["summarizer_call_count"] == 0
+
+
+class TestSummarizerCostAccounting:
+    """Regression: summarizer costs must be counted EXACTLY once.
+
+    - SPEC summarizer runs OUTSIDE the module capture window, so it's only in
+      thinking_capture.summarizer_costs -> get_metrics re-adds it once.
+    - TEST summarizer runs INSIDE the capture window (wrapped cmd_test during
+      agent.run), so it's already in the per-module call-log; it must NOT also be
+      added to summarizer_costs (that double-counted it in get_metrics).
+    """
+
+    def _log_with(self, source, cost):
+        from agent.llm_cost_capture import LlmCallLog, LlmCallRecord
+        log = LlmCallLog()
+        log.add(LlmCallRecord(model="m", source=source, cost_usd=cost, provider="anthropic"))
+        return log
+
+    def test_spec_summarizer_counted_once(self):
+        from agent.thinking_capture import ThinkingCapture, SummarizerCost
+        from agent.llm_cost_capture import SRC_MAIN_LOOP
+        tc = ThinkingCapture()
+        tc.module_llm_calls["mod"] = self._log_with(SRC_MAIN_LOOP, 2.00)   # edit calls
+        sc = SummarizerCost(); sc.cost = 0.30                              # spec (outside capture)
+        tc.summarizer_costs.add(sc)
+        assert tc.get_metrics()["total_cost"] == pytest.approx(2.30)
+
+    def test_test_summarizer_not_double_counted(self):
+        from agent.thinking_capture import ThinkingCapture
+        from agent.llm_cost_capture import LlmCallLog, LlmCallRecord, SRC_MAIN_LOOP, SRC_OUR_SUMMARIZER
+        tc = ThinkingCapture()
+        log = LlmCallLog()
+        log.add(LlmCallRecord(model="m", source=SRC_MAIN_LOOP, cost_usd=2.00, provider="anthropic"))
+        log.add(LlmCallRecord(model="m", source=SRC_OUR_SUMMARIZER, cost_usd=0.50, provider="anthropic"))
+        tc.module_llm_calls["mod"] = log
+        # Fixed behavior: test cost is NOT also added to summarizer_costs.
+        m = tc.get_metrics()
+        assert m["total_cost"] == pytest.approx(2.50)          # not 3.00
+        assert "our_summarizer" in m.get("by_source", {})
+
+    def test_classifier_matches_all_language_test_summarizers(self):
+        # mirrors _classify_source's condition for our-summarizer frames
+        def is_our(name):
+            return ("summarize" in name and "test_output" in name) or "summarize_specification" in name
+        for n in ("summarize_test_output", "summarize_rust_test_output",
+                  "summarize_cpp_test_output", "summarize_specification"):
+            assert is_our(n), n
+        for n in ("main_loop", "cmd_run", "get_commit_message"):
+            assert not is_our(n), n
+
+
+class TestModuleMetricsReconciliation:
+    """Regression: get_module_metrics must derive num_turns / total_llm_calls /
+    thinking_tokens_estimated from the call-log (source of truth), consistently."""
+
+    def _tc_with(self, calls):
+        from agent.thinking_capture import ThinkingCapture
+        from agent.llm_cost_capture import LlmCallLog, LlmCallRecord
+        tc = ThinkingCapture(); log = LlmCallLog()
+        for src, cost, thinking, est in calls:
+            log.add(LlmCallRecord(source=src, model="m", prompt_tokens=100,
+                                  completion_tokens=10, thinking_tokens=thinking,
+                                  thinking_tokens_estimated=est, cost_usd=cost, provider="anthropic"))
+        tc.module_llm_calls["mod"] = log
+        return tc
+
+    def test_num_turns_is_main_loop_calls_and_total_llm_calls_is_all(self):
+        from agent.llm_cost_capture import SRC_MAIN_LOOP, SRC_AIDER_COMMIT_MSG
+        # 2 main-loop turns + 1 commit-msg + 1 summarizer = 4 calls, 2 turns
+        from agent.llm_cost_capture import SRC_OUR_SUMMARIZER
+        tc = self._tc_with([
+            (SRC_MAIN_LOOP, 0.2, 5, True), (SRC_MAIN_LOOP, 0.2, 4, True),
+            (SRC_AIDER_COMMIT_MSG, 0.05, 0, False), (SRC_OUR_SUMMARIZER, 0.03, 0, False),
+        ])
+        m = tc.get_module_metrics("mod")
+        assert m["num_turns"] == 2                                   # main-loop only
+        assert m["total_llm_calls"] == 4                            # all sources
+        assert m["num_turns"] == m["by_source"]["main_loop"]["calls"]  # internally consistent
+
+    def test_thinking_estimated_flag_true_when_any_call_estimated(self):
+        from agent.llm_cost_capture import SRC_MAIN_LOOP
+        assert self._tc_with([(SRC_MAIN_LOOP, 0.1, 5, True)]).get_module_metrics("mod")["thinking_tokens_estimated"] is True
+        assert self._tc_with([(SRC_MAIN_LOOP, 0.1, 5, False)]).get_module_metrics("mod")["thinking_tokens_estimated"] is False
+
+    def test_fallback_path_without_calllog_still_has_scalars(self):
+        from agent.thinking_capture import ThinkingCapture
+        tc = ThinkingCapture()
+        tc.add_user_turn("hi", "draft", "mod", turn_number=0)
+        tc.add_assistant_turn("ok", None, 3, 100, 10, 0, 0, 0.1, "draft", "mod", turn_number=0)
+        m = tc.get_module_metrics("mod")
+        assert m["num_turns"] == 1
+        assert m["total_llm_calls"] == 1
+        assert "thinking_tokens_estimated" in m

@@ -10,6 +10,7 @@ from commit0.harness.constants import (
     RepoInstance,
 )
 from commit0.harness.constants_go import GoRepoInstance
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.spec import Spec
 
 
@@ -82,14 +83,22 @@ class Commit0GoSpec(Spec):
         diff_path = "/patch.diff" if self.absolute else "../patch.diff"
         test_cmd = self.instance["test"].get("test_cmd", "go test -json -count=1 ./...")
         base_commit = self.instance["base_commit"]
-        revert_test_paths = (
-            f"git checkout {base_commit} -- "
-            f"'*_test.go' '**/*_test.go' "
-            f"testdata/ '**/testdata/' "
-            f"'**/test/' '**/tests/' "
-            f"Makefile '**/Makefile' go.mod go.sum "
-            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
-            f"2>/dev/null || true"
+        # Robust per-pathspec revert + delete model-added test/build files
+        # (*_test.go added by the model, go.work, Makefile). See eval_hardening.
+        revert_lines = revert_and_clean_lines(
+            base_commit,
+            revert_targets=[
+                "*_test.go", "testdata/", "test/", "tests/",
+                "Makefile", "go.mod", "go.sum", "go.work",
+                "sitecustomize.py", "usercustomize.py",
+                ".env", ".gitmodules", ".gitattributes",
+            ],
+            delete_added_globs=[
+                "*_test.go", "**/*_test.go",
+                "go.work", "**/go.work",
+                "sitecustomize.py", "**/sitecustomize.py",
+                "usercustomize.py", "**/usercustomize.py",
+            ],
         )
 
         eval_script_list = [
@@ -104,7 +113,7 @@ class Commit0GoSpec(Spec):
             "    exit 0",
             "  fi",
             "fi",
-            revert_test_paths,
+            *revert_lines,
             "find . -name '*.go' -not -name '*_test.go' -not -path '*/vendor/*' | xargs goimports -w",
             "git status",
             f"{test_cmd} > test_output.json 2> test_stderr.txt",

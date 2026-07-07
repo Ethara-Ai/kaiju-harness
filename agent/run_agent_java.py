@@ -352,6 +352,7 @@ def run_java_agent(
             dataset_path="",
             max_iterations=agent_config.max_iteration,
             model_short=agent_config.model_short,
+            dataset_id=example.get("id"),
         )
 
     from agent.openhands_formatter import write_module_output_json
@@ -441,7 +442,7 @@ def run_java_agent(
                                 metadata=metadata,
                                 metrics=thinking_capture.get_module_metrics(test_log_name),
                                 stage="test",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
                         _flush_trajectory()
 
@@ -524,7 +525,7 @@ def run_java_agent(
                                 metadata=metadata,
                                 metrics=thinking_capture.get_module_metrics(file_log_name),
                                 stage="draft",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
                         _flush_trajectory()
 

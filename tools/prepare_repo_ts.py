@@ -12,7 +12,7 @@ Reuses git helpers from tools.prepare_repo -- ZERO modifications to existing fil
 """
 
 from __future__ import annotations
-
+import uuid as _uuid_mod
 import json
 import logging
 import os
@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -589,9 +590,9 @@ def detect_package_manager(repo_dir: Path) -> str:
 def detect_test_framework(repo_dir: Path) -> str:
     """Detect the test framework from package.json and config files.
 
-    Priority: vitest > jest (vitest wins if both present).
+    Priority: vitest > jest > node_test.
 
-    Returns: "jest" | "vitest"
+    Returns: "jest" | "vitest" | "node_test"
     """
     pkg_path = repo_dir / "package.json"
     if not pkg_path.exists():
@@ -635,7 +636,55 @@ def detect_test_framework(repo_dir: Path) -> str:
     if "jest" in test_script:
         return "jest"
 
+    if _detect_node_test_signals(pkg, repo_dir):
+        return "node_test"
+
     return "jest"
+
+
+_NODE_TEST_IMPORT_PATTERNS = (
+    "from 'node:test'",
+    'from "node:test"',
+    "from 'node:test/reporters'",
+    "@paulmillr/jsbt/test",
+    "require('node:test'",
+    'require("node:test"',
+)
+
+
+def _detect_node_test_signals(pkg: dict, repo_dir: Path) -> bool:
+    dev_deps = pkg.get("devDependencies", {})
+    deps = pkg.get("dependencies", {})
+    all_deps = {**deps, **dev_deps}
+    if "@paulmillr/jsbt" in all_deps:
+        return True
+
+    scripts = pkg.get("scripts", {})
+    if isinstance(scripts, dict):
+        for cmd in scripts.values():
+            if isinstance(cmd, str) and "--test" in cmd and "node" in cmd:
+                return True
+
+    test_globs = ("**/*.test.ts", "**/*.test.tsx", "**/*.test.mts", "**/*.test.cts",
+                  "**/*.test.js", "**/*.test.mjs", "**/*.test.cjs")
+    scanned = 0
+    for pattern in test_globs:
+        for path in repo_dir.glob(pattern):
+            if "node_modules" in path.parts:
+                continue
+            scanned += 1
+            if scanned > 25:
+                break
+            try:
+                head = path.read_text(errors="ignore")[:2000]
+            except OSError:
+                continue
+            for sig in _NODE_TEST_IMPORT_PATTERNS:
+                if sig in head:
+                    return True
+        if scanned > 25:
+            break
+    return False
 
 
 _BLOCKED_HOMEPAGE_DOMAINS = (
@@ -772,6 +821,8 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
     prefix = _exec_prefix(pkg_manager)
     if test_framework == "vitest":
         test_cmd = f"{prefix} vitest run"
+    elif test_framework == "node_test":
+        test_cmd = "node --test"
     else:
         test_cmd = f"{prefix} jest"
 
@@ -1167,6 +1218,7 @@ def prepare_ts_repo(
 
     return {
         "instance_id": f"commit-0/{full_name.split('/')[-1]}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,
@@ -1239,8 +1291,26 @@ def main() -> None:
         default="./specs",
         help="Directory to save scraped spec PDFs (default: ./specs)",
     )
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
 
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     setup_git_credentials(dry_run=args.dry_run)
     _validate_stubber_deps()
@@ -1307,7 +1377,28 @@ def main() -> None:
             min(len(candidates), args.max_repos or len(candidates)),
         )
 
-    if args.output:
+    if _consolidated and entries and entries[0].get("id"):
+        _uuid = entries[0]["id"]
+        _out_dir = datasets_dir(_uuid)
+        _entries_path = _out_dir / "entries.json"
+        with open(_entries_path, "w") as f:
+            json.dump(entries, f, indent=2)
+        logger.info("Wrote %d entries to %s (consolidated)", len(entries), _entries_path)
+        for _entry in entries:
+            _short = _entry.get("original_repo", "").split("/")[-1]
+            _candidates = [args.clone_dir / _short / "spec.pdf.bz2"]
+            for _src in _candidates:
+                if _src.exists():
+                    _dest = consolidated_spec_path(_entry["id"])
+                    shutil.copy2(str(_src), str(_dest))
+                    logger.info("  Snapshotted spec.pdf.bz2 → %s", _dest)
+                    break
+        if args.output:
+            _legacy_path = Path(args.output)
+            with open(_legacy_path, "w") as f:
+                json.dump(entries, f, indent=2)
+            logger.info("Also wrote legacy copy to %s", _legacy_path)
+    elif args.output:
         output_path = Path(args.output)
         with open(output_path, "w") as f:
             json.dump(entries, f, indent=2)

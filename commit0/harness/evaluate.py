@@ -152,7 +152,10 @@ def main(
     )
 
     # Pre-flight: validate all required Docker images exist before launching parallel eval
-    if not rebuild_image:
+    # local_inplace eval runs in a git worktree (no docker image needed),
+    # so the image preflight is skipped — this is what lets the pipeline run
+    # entirely inside a container.
+    if not rebuild_image and str(backend).lower() != "local_inplace":
         missing_images = _preflight_check_images(dataset_name, dataset_split, backend)
         if missing_images:
             logger.error(

@@ -138,7 +138,7 @@ class TsAiderAgents(AiderAgents):
                     "\n\nTest files are UNAVAILABLE. NEVER ask to see them. NEVER request paths under tests/. "
                     "If aider prompts you to add a test file, the request will be REFUSED \u2014 do not retry."
                     "\n\nYour job is SPEC-DRIVEN implementation:"
-                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`throw new Error(\"STUB\")`).",
+                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`throw new Error(\"STUB\")`)."
                     "\n  2. Infer expected behavior from function signatures, type hints, docstrings, and the library specification."
                     "\n  3. Implement from first principles \u2014 do NOT reverse-engineer from test outputs."
                     "\n  4. Test feedback is intentionally minimal (counts only). Use it as a yes/no signal, not as a debugging aid."
@@ -295,8 +295,12 @@ class TsAiderAgents(AiderAgents):
         agent_return = AiderReturn(log_file)
         agent_return.test_summarizer_cost = sum(c.cost for c in _test_summarizer_costs)
 
-        if thinking_capture is not None:
-            for c in _test_summarizer_costs:
-                thinking_capture.summarizer_costs.add(c)
+        # NOTE: do NOT add _test_summarizer_costs to
+        # thinking_capture.summarizer_costs. The test-output summarizer runs
+        # INSIDE the module capture window (wrapped cmd_test during agent.run),
+        # so its litellm call is already recorded in the per-module call-log
+        # (grand_cost). Adding it here too double-counts it in get_metrics
+        # (grand_cost + summarizer_costs). It is still reported via
+        # agent_return.test_summarizer_cost and shows in by_source['our_summarizer'].
 
         return agent_return

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Union, cast
 
 from commit0.harness.spec import Spec
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.constants import (
     RepoInstance,
     SimpleInstance,
@@ -83,11 +84,10 @@ class Commit0TsSpec(Spec):
         setup = self._get_setup_dict()
         install_cmd = setup.get("install", "npm install")
 
-        _SHELL_DANGER = set(";&|`$(){}!><")
+        _SHELL_DANGER = set(";&|`$(){}!><\\\n\r")
         if any(c in _SHELL_DANGER for c in install_cmd):
-            logger.warning(
-                "install_cmd contains shell metacharacters: %r — potential injection risk",
-                install_cmd,
+            raise ValueError(
+                f"install_cmd contains shell metacharacters (injection risk): {install_cmd!r}"
             )
 
         steps = [
@@ -103,7 +103,7 @@ class Commit0TsSpec(Spec):
         steps.extend(self._package_manager_install(install_cmd))
         steps.extend(
             [
-                f"{install_cmd} --ignore-scripts 2>/dev/null || {install_cmd} 2>/dev/null || true",
+                f"{install_cmd} --ignore-scripts 2>/dev/null || {install_cmd} --ignore-scripts 2>/dev/null || (echo 'INSTALL_FAILED' >&2; exit 1)",
                 f"{prefix}{' --yes' if prefix == 'npx' else ''} node-gyp rebuild 2>/dev/null || true",
                 f"git reset --hard {shlex.quote(base_commit)}",
             ]
@@ -126,31 +126,35 @@ class Commit0TsSpec(Spec):
             else default_test
         )
 
-        _SHELL_DANGER = set(";&|`$(){}!><")
+        _SHELL_DANGER = set(";&|`$(){}!><\\\n\r")
         if any(c in _SHELL_DANGER for c in test_cmd):
-            logger.warning(
-                "test_cmd contains shell metacharacters: %r — potential injection risk",
-                test_cmd,
+            raise ValueError(
+                f"test_cmd contains shell metacharacters (injection risk): {test_cmd!r}"
             )
 
-        # Detect framework and add JSON report flags.
-        # Tokenise the command and look for 'vitest'/'jest' as an argv token so that
-        # a jest invocation referencing a file named 'vitest-compat.test.ts' is not
-        # misclassified as vitest.
         try:
             _tokens = shlex.split(test_cmd)
         except ValueError:
             _tokens = test_cmd.split()
         _basenames = {t.rsplit("/", 1)[-1] for t in _tokens}
         is_vitest = "vitest" in _basenames
-        if is_vitest:
+        is_node_test = (
+            "--test" in _tokens
+            and any(b == "node" for b in _basenames)
+        )
+        if is_node_test:
+            json_flags = (
+                "--test-reporter=tap --test-reporter-destination=report.tap"
+            )
+        elif is_vitest:
             json_flags = "--reporter=json --outputFile=report.json"
         else:
-            # Jest
             json_flags = "--json --outputFile=report.json"
 
-        # --forceExit and --detectOpenHandles are Jest-only; Vitest rejects unknown flags
-        force_flags = "" if is_vitest else " --forceExit --detectOpenHandles"
+        force_flags = (
+            "" if (is_vitest or is_node_test)
+            else " --forceExit --detectOpenHandles"
+        )
 
         base_commit = (
             self.instance["base_commit"]
@@ -158,25 +162,71 @@ class Commit0TsSpec(Spec):
             else self.instance.base_commit
         )
 
-        revert_test_paths = (
-            f"git checkout {shlex.quote(base_commit)} -- "
-            f"test/ tests/ __tests__/ "
-            f"jest.config.js jest.config.ts jest.config.mjs jest.config.cjs "
-            f"vitest.config.js vitest.config.ts vitest.config.mjs "
-            f"vitest.workspace.js vitest.workspace.ts "
-            f"babel.config.js babel.config.json .mocharc.js .mocharc.json "
-            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
-            f"2>/dev/null || true"
+        _pathspecs = [
+            "test/", "tests/", "__tests__/",
+            ":(glob)**/test/**", ":(glob)**/tests/**", ":(glob)**/__tests__/**",
+            ":(icase,glob)Test/**", ":(icase,glob)Tests/**",
+            ":(glob)**/*.test.js", ":(glob)**/*.test.jsx",
+            ":(glob)**/*.test.mjs", ":(glob)**/*.test.cjs",
+            ":(glob)**/*.test.ts", ":(glob)**/*.test.tsx",
+            ":(glob)**/*.test.mts", ":(glob)**/*.test.cts",
+            ":(glob)**/*.spec.js", ":(glob)**/*.spec.jsx",
+            ":(glob)**/*.spec.mjs", ":(glob)**/*.spec.cjs",
+            ":(glob)**/*.spec.ts", ":(glob)**/*.spec.tsx",
+            "e2e/", "cypress/", "playwright/", "integration/",
+            ":(glob)**/e2e/**", ":(glob)**/cypress/**", ":(glob)**/playwright/**",
+            "jest.config.js", "jest.config.ts", "jest.config.mjs", "jest.config.cjs",
+            ":(glob)**/jest.config.js", ":(glob)**/jest.config.ts",
+            ":(glob)**/jest.config.mjs", ":(glob)**/jest.config.cjs",
+            "vitest.config.js", "vitest.config.ts", "vitest.config.mjs",
+            "vitest.workspace.js", "vitest.workspace.ts",
+            ":(glob)**/vitest.config.js", ":(glob)**/vitest.config.ts",
+            ":(glob)**/vitest.config.mjs", ":(glob)**/vitest.workspace.js",
+            ":(glob)**/vitest.workspace.ts",
+            "cypress.config.js", "cypress.config.ts", "cypress.config.mjs",
+            "playwright.config.js", "playwright.config.ts", "playwright.config.mjs",
+            "karma.conf.js", "karma.conf.ts", "wallaby.conf.js",
+            "babel.config.js", "babel.config.json", ".mocharc.js", ".mocharc.json",
+            "tsconfig.test.json", "tsconfig.spec.json",
+            ":(glob)**/tsconfig.test.json", ":(glob)**/tsconfig.spec.json",
+            "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb",
+            "pnpm-workspace.yaml",
+            "sitecustomize.py", "usercustomize.py",
+            ".env", ".gitmodules", ".gitattributes",
+        ]
+        # Per-pathspec revert (the list already carries root + nested :(glob)
+        # forms, so nested=False) + delete model-added test/config files.
+        revert_lines = revert_and_clean_lines(
+            shlex.quote(base_commit),
+            revert_targets=[shlex.quote(p) for p in _pathspecs],
+            delete_added_globs=[
+                "*.test.ts", "**/*.test.ts", "*.spec.ts", "**/*.spec.ts",
+                "*.test.js", "**/*.test.js", "*.spec.js", "**/*.spec.js",
+                "jest.config.*", "**/jest.config.*",
+                "vitest.config.*", "**/vitest.config.*",
+                "babel.config.*", "**/babel.config.*",
+                ".mocharc.*", "**/.mocharc.*",
+            ],
+            nested=False,
         )
-        return [
+        steps: list[str] = [
             f"cd {shlex.quote(self.repo_directory)}",
             f"git reset --hard {shlex.quote(base_commit)}",
             f"git apply --allow-empty -v {shlex.quote(diff_path)}",
-            revert_test_paths,
+            *revert_lines,
             "git status",
-            f"{test_cmd} {json_flags}{force_flags} > test_output.txt 2>&1",
-            "echo $? > test_exit_code.txt",
         ]
+        if is_node_test:
+            steps.append("npm install --no-save --silent tsx 2>/dev/null || true")
+            steps.append(
+                f"NODE_OPTIONS='--import tsx' {test_cmd} {json_flags}{force_flags} > test_output.txt 2>&1"
+            )
+        else:
+            steps.append(
+                f"{test_cmd} {json_flags}{force_flags} > test_output.txt 2>&1"
+            )
+        steps.append("echo $? > test_exit_code.txt")
+        return steps
 
 
 def make_ts_spec(

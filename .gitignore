@@ -223,3 +223,4 @@ audit/.venv/
 jobs/
 harbor-tasks/
 *.yaml
+/outputs

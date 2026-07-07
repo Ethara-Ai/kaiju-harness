@@ -287,6 +287,7 @@ def create_container(
     nano_cpus: Optional[int] = None,
     environment: Optional[dict[str, str]] = None,
     sandbox_hardening: Optional[dict] = None,
+    extra_hosts: Optional[dict[str, str]] = None,
 ) -> Container:
     """Start a Docker container using the specified image.
 
@@ -326,7 +327,17 @@ def create_container(
             nano_cpus=nano_cpus,
             environment=environment,
             detach=True,
+            # C6: tag every harness container so the orchestrator can reap
+            # orphans (`docker ps -aq --filter label=kaiju.harness=1`) when an
+            # eval is killed by `timeout` — the container is a child of dockerd,
+            # not of the killed python process, so it survives otherwise.
+            labels={"kaiju.harness": "1"},
         )
+        # host.docker.internal mapping for Linux (Docker Desktop/Mac resolves it
+        # automatically; on Linux it must be mapped to the host gateway so a
+        # container can reach a host-side bridge). Default None => unchanged.
+        if extra_hosts:
+            run_kwargs["extra_hosts"] = extra_hosts
         # Opt-in hardening flags only (default: none -> identical to prior behavior).
         if sandbox_hardening:
             run_kwargs.update(sandbox_hardening)

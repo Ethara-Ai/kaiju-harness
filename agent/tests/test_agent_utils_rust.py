@@ -451,14 +451,21 @@ class TestGetRustFileDependencies:
 # 5. get_rust_test_ids
 # ======================================================================
 class TestGetRustTestIds:
+    @staticmethod
+    def _popen_mock(stdout: str, returncode: int = 0, stderr: str = ""):
+        # E3: _run_cargo_with_retry now uses subprocess.Popen (+ pgid kill on
+        # timeout) instead of subprocess.run, so success-path tests mock Popen.
+        proc = MagicMock()
+        proc.communicate.return_value = (stdout, stderr)
+        proc.returncode = returncode
+        proc.pid = 4242
+        return proc
+
     def test_success_parsing(self, tmp_path):
         from agent.agent_utils_rust import get_rust_test_ids
 
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "tests::test_one: test\ntests::test_two: test\n"
-        mock_result.stderr = ""
-        with patch("subprocess.run", return_value=mock_result):
+        proc = self._popen_mock("tests::test_one: test\ntests::test_two: test\n")
+        with patch("subprocess.Popen", return_value=proc):
             result = get_rust_test_ids(str(tmp_path))
         assert "tests::test_one" in result
         assert "tests::test_two" in result
@@ -466,11 +473,8 @@ class TestGetRustTestIds:
     def test_benchmark_skipped(self, tmp_path):
         from agent.agent_utils_rust import get_rust_test_ids
 
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "mod::my_test: test\nmod::my_bench: benchmark\n"
-        mock_result.stderr = ""
-        with patch("subprocess.run", return_value=mock_result):
+        proc = self._popen_mock("mod::my_test: test\nmod::my_bench: benchmark\n")
+        with patch("subprocess.Popen", return_value=proc):
             result = get_rust_test_ids(str(tmp_path))
         assert "mod::my_test" in result
         assert "mod::my_bench" not in result

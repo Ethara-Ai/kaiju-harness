@@ -568,6 +568,36 @@ fn should_skip_fn(sig: &syn::Signature, attrs: &[syn::Attribute]) -> bool {
         || has_test_gate(attrs)
         || has_proc_macro_attr(attrs)
         || has_ctor_or_dtor_attr(attrs)
+        || return_type_has_impl_trait(sig)
+}
+
+/// A function returning return-position `impl Trait` (RPIT) — at the top level
+/// OR nested (e.g. `Result<impl Iterator, E>`, `Option<impl Trait>`) — CANNOT be
+/// stubbed with a divergent body. `impl Trait` is an opaque type that needs a
+/// concrete *defining use*; rustc infers the hidden type of `{ panic!() }` /
+/// `{ loop {} }` as `()`, which doesn't implement the trait, so the stubbed base
+/// fails to compile (`error[E0277]: () is not an iterator`). There is no
+/// trait-agnostic body that satisfies an arbitrary opaque return, so we LEAVE
+/// these functions unstubbed (their real body is retained) to keep the base
+/// compilable. This is a deliberate, narrow leak — RPIT functions are usually a
+/// small fraction of a crate — traded for a valid, buildable task.
+fn return_type_has_impl_trait(sig: &syn::Signature) -> bool {
+    struct ImplTraitFinder {
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for ImplTraitFinder {
+        fn visit_type_impl_trait(&mut self, _node: &'ast syn::TypeImplTrait) {
+            self.found = true;
+        }
+    }
+    match &sig.output {
+        syn::ReturnType::Type(_, ty) => {
+            let mut finder = ImplTraitFinder { found: false };
+            visit::visit_type(&mut finder, ty);
+            finder.found
+        }
+        syn::ReturnType::Default => false,
+    }
 }
 
 fn doc_attr_edit_bounded(attr: &syn::Attribute, source_len: usize) -> Option<Edit> {
@@ -696,11 +726,42 @@ mod tests {
     }
 
     #[test]
-    fn impl_iterator_return_unified_to_loop() {
+    fn impl_trait_return_left_unstubbed_so_base_compiles() {
+        // RPIT (return-position impl Trait) cannot be stubbed with a divergent
+        // body — the opaque return type needs a concrete defining use, so
+        // `{ panic!() }` infers the hidden type as `()` and fails to compile
+        // (`error[E0277]: () is not an iterator`). We therefore leave the real
+        // body intact rather than emit a non-compiling stub.
         let src = "fn it() -> impl Iterator<Item=i32> { vec![1,2,3].into_iter() }\n";
         let out = stub(src);
-        assert!(out.contains(r#"{ panic!("STUB: not implemented") }"#), "got: {}", out);
-        assert!(!out.contains("iter::empty"), "should not use trait-specific stub");
+        assert!(out.contains("vec![1,2,3].into_iter()"), "real body must be retained; got: {}", out);
+        assert!(!out.contains("panic!"), "must NOT emit a non-compiling stub; got: {}", out);
+    }
+
+    #[test]
+    fn nested_impl_trait_return_also_left_unstubbed() {
+        // impl Trait nested inside Result/Option/Box/tuple has the same problem.
+        for ret in [
+            "Result<impl Iterator<Item=i32>, ()>",
+            "Option<impl Iterator<Item=i32>>",
+            "Box<impl Iterator<Item=i32>>",
+            "(impl Iterator<Item=i32>, i32)",
+        ] {
+            let src = format!("fn it() -> {ret} {{ real_body() }}\n");
+            let out = stub(&src);
+            assert!(out.contains("real_body()"), "body must be retained for {ret}; got: {out}");
+            assert!(!out.contains("panic!"), "must not stub RPIT return {ret}; got: {out}");
+        }
+    }
+
+    #[test]
+    fn dyn_trait_return_is_still_stubbed() {
+        // `Box<dyn Trait>` is a concrete type — a divergent stub compiles fine,
+        // so it SHOULD still be stubbed (don't over-skip).
+        let src = "fn it() -> Box<dyn Iterator<Item=i32>> { real_body() }\n";
+        let out = stub(src);
+        assert!(out.contains(r#"panic!("STUB: not implemented")"#), "dyn return should be stubbed; got: {out}");
+        assert!(!out.contains("real_body()"), "real body must be removed; got: {out}");
     }
 
     #[test]

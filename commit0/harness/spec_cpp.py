@@ -11,6 +11,7 @@ from commit0.harness.constants import (
     SimpleInstance,
 )
 from commit0.harness.spec import Spec
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.dockerfiles.__init__cpp import (
     get_dockerfile_base_cpp,
     get_dockerfile_repo_cpp,
@@ -95,26 +96,37 @@ class CppSpec(Spec):
         build_system = self._get_build_system()
         build_cmd = BUILD_CMD_MAP.get(build_system, "make -j$(nproc)")
         base_commit = self.instance["base_commit"]
-        revert_test_paths = (
-            f"git checkout {base_commit} -- "
-            f"tests/ '**/tests/' test/ '**/test/' "
-            f"'test_*.cpp' '**/test_*.cpp' '*_test.cpp' '**/*_test.cpp' "
-            f"'test_*.cc' '**/test_*.cc' '*_test.cc' '**/*_test.cc' "
-            f"'test_*.h' '**/test_*.h' "
-            f"googletest/ gtest/ "
-            f"CMakeLists.txt '**/CMakeLists.txt' Makefile '**/Makefile' meson.build '**/meson.build' "
-            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
-            f"2>/dev/null || true"
+        # Per-pathspec revert + delete model-added build/test files. C++ counts
+        # from raw stdout (GTest/Catch2/...), so evaluate_cpp also gets a
+        # stdout-injection guard; here we make sure the build/test files and
+        # framework dirs can't be swapped for a fake harness. See eval_hardening.
+        revert_lines = revert_and_clean_lines(
+            base_commit,
+            revert_targets=[
+                "tests/", "test/",
+                "test_*.cpp", "*_test.cpp", "test_*.cc", "*_test.cc", "test_*.h",
+                "googletest/", "gtest/", "catch2/", "Catch2/", "doctest/",
+                "CMakeLists.txt", "Makefile", "GNUmakefile", "meson.build",
+                "meson_options.txt", "CMakePresets.json",
+                "sitecustomize.py", "usercustomize.py",
+                ".env", ".gitmodules", ".gitattributes",
+            ],
+            delete_added_globs=[
+                "test_*.cpp", "**/test_*.cpp", "*_test.cpp", "**/*_test.cpp",
+                "test_*.cc", "**/test_*.cc", "*_test.cc", "**/*_test.cc",
+                "CMakeLists.txt", "**/CMakeLists.txt",
+                "Makefile", "**/Makefile", "GNUmakefile", "**/GNUmakefile",
+                "meson.build", "**/meson.build", "CMakePresets.json",
+            ],
         )
 
         return [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
             f"git apply -v {diff_path} || git apply {diff_path} || true",
-            revert_test_paths,
+            *revert_lines,
             "git status",
-            f"{build_cmd}",
-            f"{test_cmd} {{test_ids}} > test_output.txt 2>&1",
+            f"{{{{ {build_cmd} && {test_cmd} {{test_ids}}; }}}} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",
         ]
 

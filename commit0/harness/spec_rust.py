@@ -69,7 +69,10 @@ class RustSpec(Spec):
             "git submodule update --init --recursive 2>/dev/null || true",
             "git remote remove origin",
             f"git reset --hard {base_commit}",
-            "timeout 600 cargo fetch 2>/dev/null || true",
+            # A10: don't fully MASK a fetch failure. Setup stays tolerant (deps
+            # may still resolve at build/test time), but we record the failure to
+            # a log so it's diagnosable rather than silently swallowed by `|| true`.
+            "timeout 600 cargo fetch 2>cargo_fetch.log || echo 'CARGO_FETCH_FAILED (setup-time; see cargo_fetch.log)' >> cargo_fetch.log",
         ]
 
     def make_eval_script_list(self) -> list[str]:
@@ -89,6 +92,15 @@ class RustSpec(Spec):
         # aborted -- silently leaving model-edited tests in place. Revert each
         # pathspec independently so a miss can't poison the rest, then VERIFY the
         # security-critical test dirs actually match base.
+        # Anti-cheat revert allowlist. Beyond test dirs + manifests we also reset
+        # every file that can change WHAT or HOW tests run at build/run time, so a
+        # model can't neuter the suite without editing a scored source file:
+        #   build.rs / */build.rs   -> arbitrary build-time code (cargo auto-runs it)
+        #   .cargo/                  -> rustflags, custom test runner, target dir
+        #   .config/nextest.toml     -> nextest filters / skip / retry / slow-timeout
+        #   rust-toolchain(.toml)    -> pin a toolchain that skips/passes tests
+        #   xtask/                   -> a `cargo xtask test` shim some crates use
+        #   .cargo/config(.toml)     -> alias `test` to a no-op
         revert_targets = [
             "tests/",
             "benches/",
@@ -97,6 +109,12 @@ class RustSpec(Spec):
             ".env",
             ".gitmodules",
             ".gitattributes",
+            "build.rs",
+            ".cargo/",
+            ".config/",
+            "rust-toolchain",
+            "rust-toolchain.toml",
+            "xtask/",
         ]
         revert_lines = []
         for tgt in revert_targets:
@@ -106,11 +124,45 @@ class RustSpec(Spec):
             revert_lines.append(
                 f"git checkout {base_commit} -- '**/{tgt}' 2>>revert_stderr.log || true"
             )
+        # Also DELETE any build.rs / .cargo / .config / xtask the model ADDED that
+        # did not exist at base (git checkout only restores tracked paths; a newly
+        # added, untracked build.rs would survive the revert and still run).
+        revert_lines.append(
+            f"for _p in $(git diff --name-only --diff-filter=A {base_commit} -- "
+            "'**/build.rs' 'build.rs' '.cargo/**' '.config/**' 'xtask/**' 2>/dev/null); do "
+            'rm -rf "$_p" 2>/dev/null || true; done'
+        )
         # Fail loudly (and force a non-passing result) if tests still differ.
         revert_lines.append(
             f"if ! git diff --quiet {base_commit} -- tests/ '**/tests/' 2>/dev/null; then "
             f"echo 'CHEAT-GUARD: tests/ still differs from base after revert' >&2; fi"
         )
+
+        # In-src `#[cfg(test)]` restore. Unit tests living INSIDE src/*.rs are not
+        # covered by the tests/ revert, yet the model only ever needs to implement
+        # stubs — never touch test code. For each src file that has an in-src test
+        # module at base, keep the model's impl but reset the test module (from the
+        # first `#[cfg(test)]` to EOF — the universal Rust convention) to base. If
+        # the model changed a signature the base tests need, this yields a genuine
+        # COMPILE_FAILED (correct — signatures must not change).
+        insrc_restore = (
+            f"for f in $(git diff --name-only {base_commit} -- 'src/*.rs' 'src/**/*.rs' 2>/dev/null); do\n"
+            '  [ -f "$f" ] || continue\n'
+            f'  base_ln=$(git show {base_commit}:"$f" 2>/dev/null | '
+            "grep -nE '^[[:space:]]*#\\[cfg\\(test\\)\\]' | head -1 | cut -d: -f1)\n"
+            '  [ -z "$base_ln" ] && continue\n'
+            "  model_ln=$(grep -nE '^[[:space:]]*#\\[cfg\\(test\\)\\]' \"$f\" | head -1 | cut -d: -f1)\n"
+            '  if [ -n "$model_ln" ] && [ "$model_ln" -gt 1 ]; then\n'
+            '    head -n $((model_ln-1)) "$f" > "$f.kaiju_impl" 2>/dev/null || continue\n'
+            '  else\n'
+            '    : > "$f.kaiju_impl"\n'
+            '    [ -z "$model_ln" ] && cp "$f" "$f.kaiju_impl"\n'
+            '  fi\n'
+            f'  git show {base_commit}:"$f" 2>/dev/null | tail -n +"$base_ln" >> "$f.kaiju_impl"\n'
+            '  mv "$f.kaiju_impl" "$f"\n'
+            "done"
+        )
+        revert_lines.append(insrc_restore)
         revert_test_paths = "\n".join(revert_lines)
 
         return [
@@ -133,6 +185,10 @@ class RustSpec(Spec):
             "fi",
             revert_test_paths,
             "git status",
+            # Force serial test execution (A4): async/UDP crates bind real sockets on
+            # fixed ports; parallel libtest threads collide -> spurious, nondeterministic
+            # failures unrelated to the model. RUST_TEST_THREADS=1 makes runs reproducible.
+            "export RUST_TEST_THREADS=1",
             # Per-suite hard cap. Without this a single hung test (e.g. a fake-socket
             # listener that never wakes) blocks until the outer Docker timeout fires,
             # which kills the process before the partial test_output.txt is flushed.
@@ -146,6 +202,33 @@ class RustSpec(Spec):
             + test_cmd
             + " __TEST_IDS__ > test_output.txt 2>&1",
             "echo $? > cargo_test_exit_code.txt",
+            # A10: a network/registry fetch failure makes `cargo test` fail with a
+            # download error that is NOT the model's fault. The setup-time
+            # `cargo fetch` is intentionally tolerant (deps may resolve at build
+            # time), so we detect the failure HERE and mark it INFRA so the
+            # evaluator scores it as infrastructure-broken, not a real 0%.
+            # IMPORTANT: anchor to cargo's OWN diagnostic prefix (`error:` at line
+            # start) so a test name / panic / asserted string that merely CONTAINS
+            # "failed to download" can't false-trigger an INFRA classification on a
+            # legitimately passing/failing run.
+            "if grep -qE '^error: (failed to (download|fetch|get|load source)|"
+            "could not resolve host|network failure|spurious network error)' test_output.txt 2>/dev/null; then "
+            "echo 'INFRA_FETCH_FAILED: cargo could not fetch dependencies (network/registry)' >> test_output.txt; fi",
+            # CHEAT-GUARD (A3) — runs AFTER cargo test (which truncates test_output.txt
+            # via `>`), so we APPEND. Many crates keep tests inside src/ as
+            # `#[cfg(test)]` modules that the tests/ revert above never touches. At base
+            # the impl is stubbed, so `#[test]`/`#[cfg(test)]`/removed `assert!` lines
+            # exist ONLY in test code — any such change in the model's diff is tampering.
+            # (Adding an assert! in impl is legitimate, so we flag only removed/changed
+            # asserts and any toggled test attribute.)
+            # Only flag REMOVED (`^-`) test attributes / asserts. The agent may
+            # legitimately ADD test code or impl asserts (those are `^+`); flagging
+            # additions false-positived on real implementations and zeroed valid
+            # runs. Removing/altering an existing `#[test]`/`#[cfg(test)]`/`assert!`
+            # — all of which exist only in test code at base — is the real cheat.
+            f"if git diff {base_commit} -- src/ 2>/dev/null | "
+            r"grep -qE '^-[[:space:]]*#\[(tokio::)?test\]|^-[[:space:]]*#\[cfg\(test\)\]|^-[[:space:]]*assert(_eq|_ne)?!'; then "
+            "echo 'CHEAT_DETECTED: model removed/altered in-src test code' >> test_output.txt; fi",
         ]
 
 

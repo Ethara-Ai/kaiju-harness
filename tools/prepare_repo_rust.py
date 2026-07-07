@@ -44,6 +44,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
+import uuid as _uuid_mod
 
 from tools._git_auth import (
     git,
@@ -59,7 +61,49 @@ logger = logging.getLogger(__name__)
 TOOLS_DIR = Path(__file__).parent
 PROJECT_ROOT = TOOLS_DIR.parent
 RUSTSTUBBER = TOOLS_DIR / "ruststubber" / "target" / "release" / "ruststubber"
+RUSTSTUBBER_CRATE = TOOLS_DIR / "ruststubber"
 SPECS_DIR = PROJECT_ROOT / "specs"
+
+
+def _ensure_stubber_fresh() -> None:
+    """Rebuild the ruststubber if its binary is missing or STALE relative to the
+    crate source.
+
+    A stale binary silently corrupts the benchmark: e.g. a doc-strip fix that
+    lives in the source but not the compiled artifact leaves the agent looking at
+    the crate's full documentation (answer leak) while the run looks normal. We
+    compare the binary mtime against the newest `.rs`/`Cargo.toml` under the
+    crate and `cargo build --release` when the source is newer (or the binary is
+    absent). Raises RuntimeError if the rebuild fails — better to stop than to
+    prep a whole dataset with a broken stubber.
+    """
+    src_root = RUSTSTUBBER_CRATE
+    newest_src = 0.0
+    for f in list(src_root.rglob("*.rs")) + [src_root / "Cargo.toml", src_root / "Cargo.lock"]:
+        try:
+            if "target" in f.parts:
+                continue
+            newest_src = max(newest_src, f.stat().st_mtime)
+        except OSError:
+            continue
+    bin_mtime = RUSTSTUBBER.stat().st_mtime if RUSTSTUBBER.exists() else -1.0
+    if RUSTSTUBBER.exists() and bin_mtime >= newest_src:
+        return  # up to date
+    reason = "missing" if not RUSTSTUBBER.exists() else "stale (source newer than binary)"
+    logger.info("ruststubber binary %s — rebuilding (cargo build --release)…", reason)
+    try:
+        r = subprocess.run(
+            ["cargo", "build", "--release"],
+            cwd=str(src_root), capture_output=True, text=True, timeout=900,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"failed to invoke cargo to rebuild ruststubber: {e}") from e
+    if r.returncode != 0 or not RUSTSTUBBER.exists():
+        raise RuntimeError(
+            "ruststubber rebuild failed — refusing to prep with a stale/missing "
+            f"stubber.\nstderr:\n{r.stderr[-2000:]}"
+        )
+    logger.info("ruststubber rebuilt: %s", RUSTSTUBBER)
 
 DEFAULT_ORG = "Zahgon"
 
@@ -96,8 +140,30 @@ def clone_repo(full_name: str, clone_dir: Path) -> Path:
     repo_dir = clone_dir / repo_name
 
     if repo_dir.exists():
-        logger.info("Clone already exists: %s", repo_dir)
-        return repo_dir
+        # A reused staging clone is left on the stubbed `commit0_all` branch from
+        # a prior prep. If we return it as-is, `reference_commit = HEAD` records a
+        # STUB as the gold solution, and each re-prep chains its reference off the
+        # previous stubbed base (observed: ref SHAs walking forward every run).
+        # Reset it to a PRISTINE upstream default-branch state so reference_commit
+        # is always the real implementation, making re-prep idempotent.
+        logger.info("Clone already exists: %s — resetting to pristine default branch", repo_dir)
+        try:
+            git(repo_dir, "fetch", "origin", "--prune")
+            default_branch = get_default_branch(repo_dir)
+            git(repo_dir, "checkout", "-f", default_branch)
+            git(repo_dir, "reset", "--hard", f"origin/{default_branch}")
+            git(repo_dir, "clean", "-fdx")
+            # Drop any local commit0_all so the later checkout -b starts clean.
+            try:
+                git(repo_dir, "branch", "-D", "commit0_all")
+            except subprocess.CalledProcessError:
+                pass
+        except subprocess.CalledProcessError as e:
+            # If the reset fails, a stale clone is worse than a fresh one — re-clone.
+            logger.warning("Could not reset reused clone (%s); re-cloning fresh.", e)
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        else:
+            return repo_dir
 
     url = f"https://github.com/{full_name}.git"
     logger.info("Cloning %s...", full_name)
@@ -136,6 +202,27 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, strip_docs: bool = Tr
 
     logger.info("Running ruststubber --in-place on %s (strip_docs=%s)", src_dir_relative, strip_docs)
 
+    def _doc_comment_count(d: Path) -> int:
+        n = 0
+        for f in d.rglob("*.rs"):
+            if "target" in f.parts:
+                continue
+            try:
+                for ln in f.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    s = ln.lstrip()
+                    if s.startswith("///") or s.startswith("//!") or s.startswith("#[doc"):
+                        n += 1
+            except OSError:
+                pass
+        return n
+
+    # Guarantee we run a FRESH stubber: a stale binary silently leaks the crate's
+    # docs (answer leak) even though the source + tests are correct. Rebuild if
+    # the binary is older than the crate source.
+    _ensure_stubber_fresh()
+
+    docs_before = _doc_comment_count(src_dir) if strip_docs else 0
+
     try:
         result = subprocess.run(
             [str(RUSTSTUBBER), "--input-dir", str(src_dir), "--in-place"] + ([] if strip_docs else ["--keep-docs"]),
@@ -165,7 +252,87 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, strip_docs: bool = Tr
         )
 
     logger.info("Stubbed %d files (%d errors)", ok, fail)
+
+    # A2: verify strip_docs actually stripped. A silent no-strip (observed on
+    # rust-raknet: 179 doc comments before AND after) hands the agent upstream
+    # docs + examples it was meant to be denied, changing task difficulty with no
+    # flag. Fail prep loudly so the dataset is never built on a mis-stubbed tree.
+    if strip_docs and docs_before > 0:
+        docs_after = _doc_comment_count(src_dir)
+        if docs_after >= docs_before:
+            raise RuntimeError(
+                f"strip_docs requested but doc comments were NOT removed in {src_dir_relative} "
+                f"({docs_before} before, {docs_after} after). The ruststubber binary at "
+                f"{RUSTSTUBBER} may be stale or built without --keep-docs support. "
+                f"Rebuild it (cd tools/ruststubber && cargo build --release) and re-run, "
+                f"or pass --keep-docs intentionally."
+            )
+        if docs_after > 0:
+            remaining_frac = docs_after / docs_before
+            # A near-total no-op (the stale-binary symptom, e.g. mdns-sd's
+            # 1191/1192) should be LOUD even though it's technically > 0 stripped.
+            # We don't hard-fail on a partial strip because docs inside unknown
+            # macros can legitimately survive, but >50% remaining after a fresh
+            # rebuild is almost always a real bug worth surfacing at ERROR.
+            level = logging.ERROR if remaining_frac > 0.5 else logging.WARNING
+            logger.log(
+                level,
+                "strip_docs: %d/%d doc comments REMAIN (%.0f%%) in %s after a fresh "
+                "stubber build. >50%% remaining usually means a stubbing bug (docs on "
+                "item kinds the visitor misses, or docs inside unknown macros). The "
+                "agent will see these docs — task difficulty is reduced.",
+                docs_after, docs_before, remaining_frac * 100, src_dir_relative,
+            )
+
     return ok, fail
+
+
+def _stubbed_base_compiles(repo_dir: Path, timeout: int = 600) -> "bool | None":
+    """A11: check whether the STUBBED base tree compiles.
+
+    A correctly-stubbed crate replaces function bodies with `todo!()`/
+    `unimplemented!()`, which still TYPECHECK — so the base should compile. If it
+    does not, the agent starts from a broken tree and any 0% score is an
+    impossible-task / infra artifact, not a model failure.
+
+    Returns True (compiles), False (does not), or None (couldn't determine —
+    cargo missing, timeout, etc.) so the caller can record provenance.
+    """
+    import shutil as _shutil
+    if _shutil.which("cargo") is None:
+        logger.info("A11: cargo not on PATH; skipping stubbed-base compile check.")
+        return None
+    try:
+        proc = subprocess.run(
+            ["cargo", "check", "--tests", "--all-features", "--message-format=short"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("A11: stubbed-base compile check could not run (%s); recording unknown.", e)
+        return None
+    if proc.returncode == 0:
+        return True
+    # A non-zero exit is NOT necessarily "base doesn't compile" — a network/
+    # registry failure (deps not yet fetched at prep time) also exits non-zero.
+    # Distinguish that as "unknown" (None) so a transient prep-time network blip
+    # doesn't permanently brand a perfectly good crate as impossible-to-solve.
+    _combined = (proc.stderr or "") + (proc.stdout or "")
+    _net_markers = (
+        "failed to download", "failed to fetch", "failed to get",
+        "could not resolve host", "network failure", "spurious network error",
+        "failed to load source for dependency", "error: failed to load source",
+        "unable to get packages", "no matching package",
+    )
+    if any(m in _combined.lower() for m in _net_markers):
+        logger.warning(
+            "A11: stubbed-base compile check hit a fetch/network error (not a real "
+            "compile failure); recording unknown for %s.", repo_dir,
+        )
+        return None
+    return False
 
 
 # ─── Spec Scraping ───────────────────────────────────────────────────────────
@@ -289,6 +456,9 @@ def create_dataset_entry(
     specification: str = "",
     version_source: str = "default",
     version_conflicts: list[str] | None = None,
+    spec_source: str = "unknown",
+    repo_dir: "Path | None" = None,
+    base_compiles: "bool | None" = None,
 ) -> dict:
     """Create a dataset entry compatible with RustRepoInstance."""
     # Derive test_dir from src_dir layout:
@@ -300,11 +470,28 @@ def create_dataset_entry(
     # and break workspace-member assumptions.
     if "/src" in src_dir:
         test_dir = src_dir.rsplit("/src", 1)[0]
+        crate_root = test_dir
     else:
         test_dir = "tests"
+        crate_root = "."
+    # A6: don't FABRICATE test_dir="tests" for an in-src crate (tests live in
+    # src/*.rs as `#[cfg(test)]`, no tests/ dir exists). A non-existent cd target
+    # silently breaks test runs / log paths. When we can see the repo, probe for a
+    # real integration-test dir and fall back to the crate root if it's absent.
+    if repo_dir is not None:
+        candidate = (repo_dir / test_dir) if test_dir != "tests" else (repo_dir / "tests")
+        if not candidate.is_dir():
+            logger.info(
+                "A6: no '%s' directory in repo — tests are likely in-src; "
+                "using crate root %r as test_dir instead of a fabricated 'tests'.",
+                candidate.name, crate_root,
+            )
+            test_dir = crate_root
+
 
     return {
         "instance_id": f"commit-0/{crate}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": upstream,
         "base_commit": base_commit,
@@ -316,8 +503,17 @@ def create_dataset_entry(
             "pre_install": [],
             "install": "cargo fetch",
             "specification": specification,
+            # A9: provenance of the spec. A silent docs.rs->README fallback
+            # materially changes task difficulty; record it so the dataset (and
+            # any cross-crate comparison) makes the difference visible instead of
+            # pretending every instance got full API docs.
+            "spec_source": spec_source,
             "version_source": version_source,
             "version_conflicts": version_conflicts or [],
+            # A11: provenance of the stubbed-base compile check. None = not checked
+            # (cargo missing/timeout); False = base does NOT compile (task likely
+            # impossible — a 0% here is infra, not a model failure); True = clean.
+            "base_compiles": base_compiles,
         },
         "test": {
             "test_cmd": test_cmd,
@@ -481,9 +677,23 @@ def prepare_rust_repo(
     base_commit = get_head_sha(repo_dir)
     logger.info("Base commit (stubbed): %s", base_commit[:12])
 
+    # Step 7.1: A11 — verify the stubbed base compiles. A broken base makes the
+    # task impossible; record provenance so a resulting 0% isn't read as a real
+    # model failure.
+    base_compiles = _stubbed_base_compiles(repo_dir)
+    if base_compiles is False:
+        logger.warning(
+            "A11: STUBBED BASE DOES NOT COMPILE for %s — the agent would start from a "
+            "broken tree; recording base_compiles=false (any 0%% here is infra, not model).",
+            crate,
+        )
+    elif base_compiles is True:
+        logger.info("A11: stubbed base compiles cleanly for %s.", crate)
+
     # Step 7.5: Scrape spec PDF
     spec_filename = ""
     readme_spec_url = ""
+    spec_path = None
     if not skip_spec:
         spec_path = scrape_spec(crate, repo_dir)
         if spec_path:
@@ -555,6 +765,9 @@ def prepare_rust_repo(
         version_conflicts=version_conflicts,
         packages=packages,
         specification=readme_spec_url or f"https://docs.rs/{crate}",
+        spec_source=("readme" if readme_spec_url else ("docs.rs" if spec_path else "none")),
+        repo_dir=repo_dir,
+        base_compiles=base_compiles,
     )
 
     if not dry_run:
@@ -728,7 +941,26 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     if args.repo is None:
         args.repo = args.upstream
@@ -781,7 +1013,17 @@ def main() -> None:
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps([entry], indent=2))
+    if _consolidated and entry.get("id"):
+        _uuid = entry["id"]
+        _out_dir = datasets_dir(_uuid)
+        _entries_path = _out_dir / "entries.json"
+        _entries_path.write_text(json.dumps([entry], indent=2))
+        _dataset_path = _out_dir / "dataset.json"
+        _dataset_path.write_text(json.dumps([entry], indent=2))
+        logger.info("Wrote consolidated entries+dataset to %s", _out_dir)
+        out_path.write_text(json.dumps([entry], indent=2))
+    else:
+        out_path.write_text(json.dumps([entry], indent=2))
     logger.info("Wrote dataset entry to %s", out_path)
 
 

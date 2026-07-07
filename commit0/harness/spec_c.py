@@ -16,6 +16,7 @@ from commit0.harness.constants import (
     RepoInstance,
 )
 from commit0.harness.constants_c import CRepoInstance
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.spec import Spec
 
 
@@ -118,14 +119,25 @@ class Commit0CSpec(Spec):
             "--output-junit /testbed/test_report.xml"
         )
         base_commit = self.instance["base_commit"]
-        revert_test_paths = (
-            f"git checkout {base_commit} -- "
-            f"tests/ '**/tests/' test/ '**/test/' "
-            f"'test_*.c' '**/test_*.c' '*_test.c' '**/*_test.c' "
-            f"'test_*.h' '**/test_*.h' "
-            f"CMakeLists.txt '**/CMakeLists.txt' Makefile '**/Makefile' meson.build '**/meson.build' "
-            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
-            f"2>/dev/null || true"
+        # Per-pathspec revert + delete model-added build/test files (CMakeLists /
+        # Makefile / meson.build can redefine the test target to a no-op). See
+        # eval_hardening.
+        revert_lines = revert_and_clean_lines(
+            base_commit,
+            revert_targets=[
+                "tests/", "test/",
+                "test_*.c", "*_test.c", "test_*.h",
+                "CMakeLists.txt", "Makefile", "GNUmakefile", "meson.build",
+                "meson_options.txt", "configure", "configure.ac", "CMakePresets.json",
+                "sitecustomize.py", "usercustomize.py",
+                ".env", ".gitmodules", ".gitattributes",
+            ],
+            delete_added_globs=[
+                "test_*.c", "**/test_*.c", "*_test.c", "**/*_test.c",
+                "CMakeLists.txt", "**/CMakeLists.txt",
+                "Makefile", "**/Makefile", "GNUmakefile", "**/GNUmakefile",
+                "meson.build", "**/meson.build", "CMakePresets.json",
+            ],
         )
 
         return [
@@ -136,7 +148,7 @@ class Commit0CSpec(Spec):
             "echo PATCH_APPLY_FAILED > compile_errors.txt; "
             "echo 1 > test_exit_code.txt; exit 0; }",
             "fi",
-            revert_test_paths,
+            *revert_lines,
             "git status",
             "cmake -S . -B build -G Ninja -DBUILD_TESTING=ON "
             f"-DCMAKE_BUILD_TYPE=Debug {quoted_cmake_flags} "

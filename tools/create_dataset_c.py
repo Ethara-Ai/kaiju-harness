@@ -12,7 +12,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
+from kaiju.paths import datasets_dir
+import uuid as _uuid_mod
 
 from commit0.harness.constants_c import ALLOWED_APT_PACKAGES
 
@@ -133,11 +136,19 @@ def validate_dataset(entries: list[dict]) -> tuple[list[dict], list[str]]:
 
 
 def create_hf_dataset_dict(entries: list[dict]) -> list[dict]:
+    """Convert entries to HuggingFace-compatible format.
+
+    Assigns a fresh UUID4 to each entry's ``id`` field — each dataset build
+    represents a distinct experiment instance, so the id is generated here
+    (not in prepare_repo_c.py where entries.json is a reusable source).
+    """
+
     hf_entries: list[dict] = []
     for entry in entries:
         hf_entries.append(
             {
                 "instance_id": entry["instance_id"],
+                "id": entry.get("id") or str(_uuid_mod.uuid4()),
                 "repo": entry["repo"],
                 "original_repo": entry["original_repo"],
                 "base_commit": entry["base_commit"],
@@ -209,8 +220,12 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=str,
-        default="c_dataset.json",
-        help="Output dataset JSON file",
+        default=None,
+        help=(
+            "Output dataset JSON file. Default: auto-generated from the "
+            "first entry's 'id' field (<uuid>.json), or 'c_dataset.json' "
+            "if no id present."
+        ),
     )
     parser.add_argument(
         "--split-name",
@@ -241,7 +256,26 @@ def main() -> None:
         help="Exit non-zero if any entry fails validation",
     )
 
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     entries = json.loads(Path(args.entries_file).read_text())
     logger.info("Loaded %d entries from %s", len(entries), args.entries_file)
@@ -257,7 +291,14 @@ def main() -> None:
         raise SystemExit(1)
 
     hf_entries = create_hf_dataset_dict(valid)
-    output_path = Path(args.output)
+    if _consolidated and hf_entries and hf_entries[0].get("id"):
+        output_path = datasets_dir(hf_entries[0]["id"]) / "dataset.json"
+    elif args.output:
+        output_path = Path(args.output)
+    elif hf_entries and hf_entries[0].get("id"):
+        output_path = Path(f"{hf_entries[0]['id']}.json")
+    else:
+        output_path = Path("c_dataset.json")
     output_path.write_text(json.dumps(hf_entries, indent=2))
     logger.info("Saved dataset to %s", output_path)
 

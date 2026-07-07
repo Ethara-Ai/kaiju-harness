@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import shlex
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Union, cast, Optional
@@ -165,19 +166,31 @@ class Commit0Spec(Spec):
     def make_eval_script_list(self) -> list[str]:
         """Run the tests."""
         diff_path = "/patch.diff" if self.absolute else "../patch.diff"
-        revert_test_paths = (
-            f"git checkout {self.instance['base_commit']} -- "
-            f"tests/ test/ conftest.py "
-            f"pytest.ini setup.cfg tox.ini pyproject.toml .coveragerc "
-            f"sitecustomize.py usercustomize.py noxfile.py Makefile "
-            f".env .gitmodules .gitattributes "
-            f"2>/dev/null || true"
+        base = self.instance["base_commit"]
+        # Robust per-pathspec revert + delete model-added interpreter/pytest hook
+        # files (conftest.py / sitecustomize.py / usercustomize.py / setup.py /
+        # *.pth can force-pass or monkeypatch the suite). See eval_hardening.
+        revert_lines = revert_and_clean_lines(
+            base,
+            revert_targets=[
+                "tests/", "test/", "conftest.py",
+                "pytest.ini", "setup.cfg", "setup.py", "tox.ini",
+                "pyproject.toml", ".coveragerc",
+                "sitecustomize.py", "usercustomize.py", "noxfile.py", "Makefile",
+                ".env", ".gitmodules", ".gitattributes",
+            ],
+            delete_added_globs=[
+                "conftest.py", "**/conftest.py",
+                "sitecustomize.py", "**/sitecustomize.py",
+                "usercustomize.py", "**/usercustomize.py",
+                "setup.py", "*.pth", "**/*.pth",
+            ],
         )
         eval_script_list = [
             f"cd {self.repo_directory}",
-            f"git reset --hard {self.instance['base_commit']}",
+            f"git reset --hard {base}",
             f"git apply --allow-empty -v {diff_path}",
-            revert_test_paths,
+            *revert_lines,
             "git status",
             f"{shlex.quote(self.instance['test']['test_cmd'])} --json-report --json-report-file=report.json --continue-on-collection-errors{{coverage}} {{test_ids}} > test_output.txt 2>&1",
             "echo $? > pytest_exit_code.txt",

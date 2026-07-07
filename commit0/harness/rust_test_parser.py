@@ -152,27 +152,50 @@ def _detect_format(content: str) -> str:
     return "unknown"
 
 
+def _dedupe_by_name(results: List[RustTestResult]) -> List[RustTestResult]:
+    """A7: collapse only ADJACENT exact-duplicate result lines (a literal
+    re-print of the same `name`+`status` back-to-back, from stream interleaving).
+
+    We deliberately do NOT collapse ALL same-named entries: the canonical
+    inventory (`cargo test --list`) is name-based and does NOT dedupe, so two
+    GENUINELY-DISTINCT tests that share a `module::path::name` across different
+    test binaries are counted as two there. Collapsing them here would make the
+    observed count SMALLER than canonical and cap a perfect solution below 1.0 —
+    the opposite of the intended fix. Binary-separated occurrences are never
+    adjacent (other tests sit between them), so the adjacent-only rule removes
+    true re-prints without touching legitimately-distinct same-named tests."""
+    deduped: List[RustTestResult] = []
+    for r in results:
+        prev = deduped[-1] if deduped else None
+        if prev is not None and prev.name == r.name and prev.status == r.status:
+            continue  # adjacent literal re-print — skip
+        deduped.append(r)
+    return deduped
+
+
 def parse_test_output(content: str) -> List[RustTestResult]:
     """Auto-detect format (JSON vs libtest text) and dispatch.
 
     Use this for cargo test output of unknown origin. Falls back to libtest
-    text if format sniffing is ambiguous (text is the stable cargo default)."""
+    text if format sniffing is ambiguous (text is the stable cargo default).
+    Results are de-duplicated by name (A7) so repeated/multi-binary output can't
+    inflate the test count."""
     fmt = _detect_format(content)
     if fmt == "json":
         results = parse_nextest_json(content)
         # Some test runs emit interleaved JSON + plain text (e.g. when --message-format=json
         # is combined with non-cargo wrappers). If JSON parsing yielded nothing, fall
         # back to libtest so partial signal is recoverable.
-        if results:
-            return results
-        return parse_libtest_text(content)
+        if not results:
+            results = parse_libtest_text(content)
+        return _dedupe_by_name(results)
     if fmt == "libtest":
-        return parse_libtest_text(content)
+        return _dedupe_by_name(parse_libtest_text(content))
     # Unknown: try both, prefer whichever returns non-empty.
     json_results = parse_nextest_json(content)
     if json_results:
-        return json_results
-    return parse_libtest_text(content)
+        return _dedupe_by_name(json_results)
+    return _dedupe_by_name(parse_libtest_text(content))
 
 def parse_nextest_report(report_path: str) -> Dict:
     empty: Dict = {

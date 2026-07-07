@@ -44,7 +44,7 @@ agent = "agent.__main__:main"
 kaiju-stage-runner = "agent.cli_stage_runner:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["commit0", "agent", "kaiju_harbor"]
+packages = ["commit0", "agent", "kaiju_harbor", "kaiju"]
 
 [project.optional-dependencies]
 agent = [

@@ -367,28 +367,112 @@ class CredentialProvider:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # B14: a SEPARATE lock for the slow refresh (network + backoff sleeps).
+        # Holding `_lock` across `refresh_credentials` would serialize every
+        # token read — even threads whose cached token is still valid — behind
+        # one in-flight refresh. We hold `_lock` only for the brief field
+        # read/write and `_refresh_lock` (which dedupes concurrent refreshes)
+        # during the network call.
+        self._refresh_lock = threading.Lock()
         self._creds: Optional[OAuthCredentials] = None
+
+    def _load(self) -> OAuthCredentials:
+        """Load creds from this provider's source. Overridden by subclasses."""
+        return load_credentials()
+
+    def _persist_after_refresh(self, creds: OAuthCredentials) -> None:
+        """Persist a freshly-refreshed token. Overridden by subclasses."""
+        try:
+            write_cache(creds)
+        except OSError as e:
+            _LOG.warning("Could not persist refreshed creds to cache: %s", e)
+        # The default provider's canonical source is the Keychain item; keep it
+        # in sync (or warn) so the claude CLI isn't logged out.
+        wrote_back = (
+            _keychain_write_back(_KEYCHAIN_SERVICE, creds)
+            if _keychain_write_back_enabled()
+            else False
+        )
+        _warn_refresh_rotation(f"keychain {_KEYCHAIN_SERVICE!r}", wrote_back)
+
+    def _refresh_flock_path(self) -> Optional[Path]:
+        """B4: cross-process lock file path so multiple bridge processes don't
+        refresh (and rotate the refresh token) simultaneously. Default provider
+        guards the shared cache; subclasses override per-account."""
+        return _CACHE_PATH.with_suffix(".lock")
+
+    def _reload_from_persist(self) -> Optional[OAuthCredentials]:
+        """B4: re-read creds from the durable post-refresh store so a peer
+        process's refresh is picked up instead of refreshing again."""
+        raw = _read_cache_file()
+        if not raw:
+            return None
+        try:
+            return OAuthCredentials.from_claude_payload(json.loads(raw))
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    def _refresh_locked(self, creds: OAuthCredentials) -> str:
+        """Perform the refresh while holding ``_refresh_lock`` (in-process dedupe)
+        and, if configured, a cross-process flock (B4). Stores + returns token."""
+        flock_path = self._refresh_flock_path()
+        if flock_path is None:
+            new_creds = refresh_credentials(creds)
+            self._persist_after_refresh(new_creds)
+            with self._lock:
+                self._creds = new_creds
+            return new_creds.access_token
+
+        import fcntl
+        try:
+            flock_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        with open(flock_path, "w") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except OSError as e:
+                _LOG.warning("flock failed on %s: %s; proceeding unlocked", flock_path, e)
+            # A peer process may have refreshed while we waited on the flock.
+            peer = self._reload_from_persist()
+            if peer is not None and not peer.is_expired():
+                _LOG.info("picked up peer-refreshed token (no re-refresh)")
+                with self._lock:
+                    self._creds = peer
+                return peer.access_token
+            new_creds = refresh_credentials(creds)
+            self._persist_after_refresh(new_creds)
+            with self._lock:
+                self._creds = new_creds
+            return new_creds.access_token
 
     def get_access_token(self) -> str:
         with self._lock:
             if self._creds is None:
-                self._creds = load_credentials()
-            if self._creds.is_expired():
-                _LOG.info("Refreshing Claude Code OAuth token")
-                self._creds = refresh_credentials(self._creds)
-                try:
-                    write_cache(self._creds)
-                except OSError as e:
-                    _LOG.warning("Could not persist refreshed creds to cache: %s", e)
-                # The default provider's canonical source is the Keychain item;
-                # keep it in sync (or warn) so the claude CLI isn't logged out.
-                wrote_back = (
-                    _keychain_write_back(_KEYCHAIN_SERVICE, self._creds)
-                    if _keychain_write_back_enabled()
-                    else False
-                )
-                _warn_refresh_rotation(f"keychain {_KEYCHAIN_SERVICE!r}", wrote_back)
-            return self._creds.access_token
+                self._creds = self._load()
+            creds = self._creds
+        if not creds.is_expired():
+            return creds.access_token
+        # Refresh OUTSIDE `_lock` so valid-token readers don't block (B14).
+        with self._refresh_lock:
+            # Double-check: another thread may have refreshed while we waited.
+            with self._lock:
+                creds = self._creds
+            if creds is not None and not creds.is_expired():
+                return creds.access_token
+            # A concurrent force_reload() may have nulled _creds in the window
+            # between the outer read and here. Reload before refreshing so we
+            # never call refresh_credentials(None) -> AttributeError (which would
+            # escape as an unhandled 500 rather than a clean CredentialsError).
+            if creds is None:
+                with self._lock:
+                    if self._creds is None:
+                        self._creds = self._load()
+                    creds = self._creds
+                if not creds.is_expired():
+                    return creds.access_token
+            _LOG.info("Refreshing Claude Code OAuth token")
+            return self._refresh_locked(creds)
 
     def force_reload(self) -> None:
         with self._lock:
@@ -425,12 +509,21 @@ class _FileCredentialProvider(CredentialProvider):
         with self._lock:
             if self._creds is None:
                 self._creds = self._load()
-            if not self._creds.is_expired():
-                return self._creds.access_token
+            creds = self._creds
+        if not creds.is_expired():
+            return creds.access_token
+        # B14: refresh OUTSIDE `_lock` so valid-token readers don't block on the
+        # flock-wait + network call. `_refresh_lock` dedupes in-process refreshes;
+        # the flock serializes across processes.
+        with self._refresh_lock:
+            with self._lock:
+                creds = self._creds
+            if creds is not None and not creds.is_expired():
+                return creds.access_token
             # Cross-process serialization: only one bridge process should hit
-            # the refresh endpoint; others wait, then re-read the rotated
-            # token. Without this, concurrent harness runs sharing the same
-            # pool file race on refresh and lose tokens (last-writer-wins).
+            # the refresh endpoint; others wait, then re-read the rotated token.
+            # Without this, concurrent harness runs sharing the same pool file
+            # race on refresh and lose tokens (last-writer-wins).
             import fcntl
             lock_path = self._path.with_suffix(self._path.suffix + ".lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -443,17 +536,29 @@ class _FileCredentialProvider(CredentialProvider):
                 try:
                     fresh = self._load()
                     if not fresh.is_expired():
-                        self._creds = fresh
-                        return self._creds.access_token
+                        with self._lock:
+                            self._creds = fresh
+                        return fresh.access_token
+                    # Not expired-check passed but stale: use the re-loaded creds
+                    # as the refresh source so we never refresh from None.
+                    creds = fresh
                 except CredentialsError:
                     pass
+                # A concurrent force_reload() could have left creds None while the
+                # disk re-load also failed; refuse rather than refresh_credentials(None).
+                if creds is None:
+                    raise CredentialsError(
+                        f"credentials unavailable for {self._path} (nulled + re-load failed)"
+                    )
                 _LOG.info("Refreshing OAuth token from %s", self._path)
-                self._creds = refresh_credentials(self._creds)
+                new_creds = refresh_credentials(creds)
                 try:
-                    _atomic_write_creds(self._path, self._creds)
+                    _atomic_write_creds(self._path, new_creds)
                 except OSError as e:
                     _LOG.warning("Could not persist refreshed creds to %s: %s", self._path, e)
-            return self._creds.access_token
+            with self._lock:
+                self._creds = new_creds
+            return new_creds.access_token
 
     def token_prefix(self) -> Optional[str]:
         with self._lock:
@@ -489,30 +594,39 @@ class _KeychainCredentialProvider(CredentialProvider):
             raise CredentialsError(f"invalid JSON in keychain {self._service}: {e}") from e
         return OAuthCredentials.from_claude_payload(payload)
 
-    def get_access_token(self) -> str:
-        with self._lock:
-            if self._creds is None:
-                self._creds = self._load()
-            if self._creds.is_expired():
-                _LOG.info("Refreshing OAuth token from keychain %s", self._service)
-                self._creds = refresh_credentials(self._creds)
-                try:
-                    # Per-service cache, NOT the shared write_cache() — otherwise
-                    # multiple pooled keychain accounts clobber one another (and
-                    # a `default` slot reading the shared cache could load the
-                    # wrong account's token).
-                    _atomic_write_creds(
-                        _service_cache_path(self._service), self._creds
-                    )
-                except OSError as e:
-                    _LOG.warning("Could not persist refreshed creds to cache: %s", e)
-                wrote_back = (
-                    _keychain_write_back(self._service, self._creds)
-                    if _keychain_write_back_enabled()
-                    else False
-                )
-                _warn_refresh_rotation(f"keychain {self._service!r}", wrote_back)
-            return self._creds.access_token
+    def _persist_after_refresh(self, creds: OAuthCredentials) -> None:
+        # B14: runs OUTSIDE `_lock` (held only by the base's `_refresh_lock`).
+        try:
+            # Per-service cache, NOT the shared write_cache() — otherwise
+            # multiple pooled keychain accounts clobber one another (and a
+            # `default` slot reading the shared cache could load the wrong
+            # account's token).
+            _atomic_write_creds(_service_cache_path(self._service), creds)
+        except OSError as e:
+            _LOG.warning("Could not persist refreshed creds to cache: %s", e)
+        wrote_back = (
+            _keychain_write_back(self._service, creds)
+            if _keychain_write_back_enabled()
+            else False
+        )
+        _warn_refresh_rotation(f"keychain {self._service!r}", wrote_back)
+
+    def _refresh_flock_path(self) -> Optional[Path]:
+        # B4: per-service cross-process lock so pooled keychain accounts each
+        # serialize their own refresh independently.
+        return _service_cache_path(self._service).with_suffix(".lock")
+
+    def _reload_from_persist(self) -> Optional[OAuthCredentials]:
+        # B4: a peer process writes the rotated token to this per-service cache.
+        p = _service_cache_path(self._service)
+        try:
+            raw = p.read_text(encoding="utf-8")
+            return OAuthCredentials.from_claude_payload(json.loads(raw))
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    # get_access_token inherited from CredentialProvider (uses our _load +
+    # _persist_after_refresh, refreshing without holding the read lock).
 
     def token_prefix(self) -> Optional[str]:
         with self._lock:
@@ -578,7 +692,9 @@ class MultiAccountCredentialProvider:
     than a single shared "last used" pointer.
     """
 
-    def __init__(self, slots: list[_AccountSlot]) -> None:
+    def __init__(
+        self, slots: list[_AccountSlot], state_path: Optional[Path] = None
+    ) -> None:
         if not slots:
             raise CredentialsError("MultiAccountCredentialProvider needs >= 1 slot")
         self._slots = slots
@@ -618,11 +734,22 @@ class MultiAccountCredentialProvider:
         )
 
     def force_reload(self) -> None:
+        # B8: ONLY drop cached creds (force a token re-read). Do NOT clear
+        # exhausted_until / invalid — wiping cap timers makes the bridge
+        # immediately re-hammer accounts that are still capped. Use
+        # reset_account_state() explicitly if you really want to clear it.
+        with self._lock:
+            for slot in self._slots:
+                slot.provider.force_reload()
+
+    def reset_account_state(self) -> None:
+        """Explicitly clear all exhaustion/invalid flags (operator action only)."""
         with self._lock:
             for slot in self._slots:
                 slot.provider.force_reload()
                 slot.exhausted_until = 0.0
                 slot.invalid = False
+            self._persist_state_locked()
 
     def mark_account_exhausted(self, token_prefix: str, until_unix: float) -> None:
         with self._lock:
@@ -630,6 +757,7 @@ class MultiAccountCredentialProvider:
             if slot is None:
                 return
             slot.exhausted_until = max(slot.exhausted_until, until_unix)
+            self._persist_state_locked()
             _LOG.info(
                 "account %s marked exhausted until %s (in %.0fs)",
                 slot.label, until_unix, max(0.0, until_unix - time.time()),
@@ -641,6 +769,7 @@ class MultiAccountCredentialProvider:
             if slot is None:
                 return
             slot.invalid = True
+            self._persist_state_locked()
             _LOG.warning("account %s marked invalid (will not be retried)", slot.label)
 
     def next_reset_at(self) -> Optional[float]:
@@ -785,4 +914,10 @@ def load_account_pool(spec: str) -> Optional[MultiAccountCredentialProvider]:
         i += 1
     if not slots:
         return None
-    return MultiAccountCredentialProvider(slots)
+    # B13: production pools persist cap state across bridge restarts. An explicit
+    # KAIJU_CC_POOL_STATE_PATH overrides the default cache location.
+    env_path = os.environ.get("KAIJU_CC_POOL_STATE_PATH")
+    state_path = Path(env_path) if env_path else (
+        _CACHE_PATH.parent / "account_pool_state.json"
+    )
+    return MultiAccountCredentialProvider(slots, state_path=state_path)

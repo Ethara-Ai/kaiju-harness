@@ -401,6 +401,7 @@ def run_agent_for_repo(
             dataset_path=commit0_config_file,
             max_iterations=agent_config.max_iteration,
             model_short=getattr(agent_config, "model_short", agent_config.model_name),
+            dataset_id=example.get("id"),
         )
 
         modules_seen: set[str] = set()

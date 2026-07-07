@@ -19,6 +19,12 @@ import json, os
 
 meta = {}
 
+# D6: Bedrock Claude deployments advertise a 200K context window, whereas the
+# SAME model family is 1M on Anthropic-direct and Vertex (see the anthropic/ and
+# vertex_ai/ entries below). This asymmetry is INTENTIONAL and per-deployment:
+# under-claiming on Bedrock is the safe direction — aider truncates the repo map
+# to fit rather than sending an over-length request that Bedrock would 400. Do
+# NOT bump Bedrock to 1M without confirming the deployment actually accepts it.
 # Always included — no ARN required
 meta["bedrock/converse/global.anthropic.claude-opus-4-6-v1"] = {
     "max_input_tokens": 200000,
@@ -398,6 +404,10 @@ meta["openai/gpt-5.5-2026-04-23"] = {
     "supports_minimal_reasoning_effort": False,
 }
 
+# D7: the YAML settings file carries a GENERATED banner (a comment). We do NOT
+# add a sentinel KEY to this metadata JSON — aider treats every top-level value
+# as a model-info dict, so a non-dict marker could break parsing. The settings
+# banner + this generator's provenance are sufficient.
 print(json.dumps(meta, indent=2))
 PYEOF
 
@@ -504,9 +514,17 @@ for env_var, cfg in ARN_SETTINGS.items():
 # Opus 4.7/4.8 the accepted ceiling is 'high'. Adaptive thinking remains unbounded
 # (no fixed budget_tokens), so reasoning depth is still high. Using 'max' here makes
 # litellm raise before the request is sent (0 tokens, $0 cost, empty trajectory).
+# num_retries (Option A): litellm re-issues the whole completion transparently on
+# a transient failure — including a mid-stream drop ("peer closed connection /
+# incomplete chunked read") — BEFORE aider ever sees an error. This is the
+# primary handler for the connection-drop we hit on the large service_info turn:
+# the module can't be left half-implemented because the failed call is retried at
+# the call level. cache_control:true makes each retry cheap (the big context is
+# served from the prompt cache).
 _ANTHROPIC_OPUS_BLOCK = """\
   extra_params:
     max_tokens: 128000
+    num_retries: 3
     thinking:
       type: adaptive
       display: summarized
@@ -519,6 +537,7 @@ _ANTHROPIC_OPUS_BLOCK = """\
 _ANTHROPIC_SONNET_BLOCK = """\
   extra_params:
     max_tokens: 64000
+    num_retries: 3
     thinking:
       type: adaptive
       display: summarized
@@ -646,7 +665,72 @@ if os.environ.get("OPENAI_API_KEY", "").strip():
     reasoning_effort: high
     num_retries: 3""")
 
-print("\n\n".join(out))
+# D7: prepend a GENERATED banner so a human who hand-edits this file realizes it
+# is machine-owned and regenerated on every pipeline launch (silently discarding
+# manual hot-patches otherwise). Edits belong in scripts/generate_aider_config.sh.
+_BANNER = (
+    "# ===========================================================================\n"
+    "# GENERATED FILE — DO NOT EDIT BY HAND.\n"
+    "# Regenerated on every pipeline launch by scripts/generate_aider_config.sh.\n"
+    "# Any manual edits here are SILENTLY OVERWRITTEN. Change the generator instead.\n"
+    "# ===========================================================================\n"
+)
+print(_BANNER + "\n" + "\n\n".join(out))
 PYEOF
+
+# D2: validate the generated Anthropic settings against the INSTALLED litellm's
+# transformation rules BEFORE any run. Both prior outages were a config that the
+# installed litellm rejected (effort=max only on opus-4-6; thinking shapes). This
+# fails config-generation loudly instead of 3 hours into a run with 0/N output.
+python3 - "${ROOT}/.aider.model.settings.yml" <<'VALEOF' || { echo "FATAL: aider config failed litellm-invariant validation (see above)" >&2; exit 1; }
+import sys, yaml
+path = sys.argv[1]
+try:
+    import yaml as _y
+    entries = _y.safe_load(open(path)) or []
+except Exception as e:
+    print(f"VALIDATION: could not read {path}: {e}", file=sys.stderr); sys.exit(0)
+try:
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+    cfg = AnthropicConfig()
+except Exception as e:
+    # Don't silently pass — this is the guard that prevents an outage. We can't
+    # hard-fail (it would block every run on a litellm refactor), but make it LOUD
+    # so it's visible; the representative preflight (resolve_model.sh) is the
+    # runtime backstop that still catches a bad param set.
+    print(f"VALIDATION WARNING: litellm AnthropicConfig unavailable ({e}); could NOT "
+          f"validate effort/thinking at config-gen — relying on the preflight probe.",
+          file=sys.stderr)
+    sys.exit(0)
+problems = []
+# Validate every Claude entry, not just anthropic/ — bedrock/converse and
+# vertex_ai claude entries also carry output_config.effort.
+def _is_claude(n):
+    nl = n.lower()
+    return ("claude" in nl) or n.startswith("anthropic/")
+for e in entries:
+    if not isinstance(e, dict):
+        continue
+    name = e.get("name", "")
+    if not _is_claude(name):
+        continue
+    ep = e.get("extra_params") or {}
+    eff = (ep.get("output_config") or {}).get("effort")
+    if eff is None:
+        continue
+    accepted = ["high", "medium", "low", "max"]
+    if eff not in accepted:
+        problems.append(f"{name}: effort={eff!r} not in {accepted} (this litellm build rejects it)")
+    if eff == "max":
+        is46 = getattr(cfg, "_is_opus_4_6_model", lambda m: "opus-4-6" in m or "opus-4.6" in m)(name)
+        if not is46:
+            problems.append(f"{name}: effort='max' only supported on Opus 4.6 by this litellm build")
+if problems:
+    print("VALIDATION FAILED:", file=sys.stderr)
+    for p in problems:
+        print("  -", p, file=sys.stderr)
+    sys.exit(1)
+print("VALIDATION: anthropic effort/thinking settings OK for installed litellm", file=sys.stderr)
+VALEOF
 
 echo "aider configs regenerated in ${ROOT}" >&2

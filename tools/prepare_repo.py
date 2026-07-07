@@ -36,7 +36,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 from urllib.parse import urlparse
+import uuid as _uuid_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -878,6 +880,7 @@ def create_dataset_entry(
 
     entry = {
         "instance_id": f"commit-0/{repo_name}",
+        "id": str(_uuid_mod.uuid4()),
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,
@@ -1342,7 +1345,26 @@ def main() -> None:
         help="Write detection results to this JSON/CSV file (CSV if path ends in .csv).",
     )
 
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     setup_git_credentials(dry_run=args.dry_run)
 
@@ -1391,9 +1413,20 @@ def main() -> None:
     )
 
     # Save entries
-    output_path = Path(args.output)
-    output_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
-    logger.info("Saved %d entries to %s", len(entries), output_path)
+    if _consolidated and entries and entries[0].get("id"):
+        _uuid = entries[0]["id"]
+        _out_dir = datasets_dir(_uuid)
+        _entries_path = _out_dir / "entries.json"
+        _entries_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        logger.info("Wrote %d entries to %s (consolidated)", len(entries), _entries_path)
+        if args.output:
+            output_path = Path(args.output)
+            output_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+            logger.info("Also wrote legacy copy to %s", output_path)
+    else:
+        output_path = Path(args.output)
+        output_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        logger.info("Saved %d entries to %s", len(entries), output_path)
 
     print_entries_summary(entries)
 

@@ -66,6 +66,11 @@ class Turn:
     timestamp: str = ""
     llm_response_id: str | None = None
     provider: str = ""
+    # Ground-truth edits aider ACTUALLY applied in this turn, captured from
+    # EditBlockCoder.apply_edits (see agent.edit_capture). Each entry is
+    # {"path", "old_str", "new_str"}. None = not captured (fall back to
+    # re-parsing `content`); [] = captured and the turn applied zero edits.
+    applied_edits: Optional[list] = None
 
 
 @dataclass
@@ -78,6 +83,56 @@ class ThinkingCapture:
     )
     module_llm_calls: dict[str, "LlmCallLog"] = field(default_factory=dict)
     capture_mismatches: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-module count of aider reflection continuations (add-files / lint / test /
+    # edit-format retries). Accumulated from aider's own coder.num_reflections after
+    # each run_one (which resets it per user message), via agent.edit_capture. A
+    # reflection is an auto-injected continuation of the SAME turn, not a new agent
+    # turn — so num_agent_turns = num_turns(main_loop calls) - num_reflections.
+    module_reflections: dict[str, int] = field(default_factory=dict)
+    # True once ground-truth edit-capture is installed (agent.edit_capture, wired
+    # from capture_module_calls). While active, a captured assistant turn starts
+    # with applied_edits=[] instead of None, so a turn whose apply_edits is skipped
+    # by an aider send_message early-return (add-files reflection / max_tokens /
+    # interrupted) reads as "0 edits applied" — NOT as "uncaptured", which would
+    # make the formatter fabricate phantom edits from the model's text. None still
+    # means "capture inactive" (legacy / non-EditBlock coder) -> text-parser fallback.
+    edit_capture_active: bool = False
+    # E6: when set, each turn is appended to this JSONL file AS IT HAPPENS, and a
+    # sibling `.heartbeat` is touched. A worker killed mid-module (timeout, cap,
+    # crash) then still leaves a recoverable per-turn trajectory + a liveness
+    # signal, instead of losing everything because output.json is only written on
+    # clean completion. Set via `set_live_path()` at the start of each module.
+    live_path: "Optional[Any]" = None
+
+    def set_live_path(self, path: "Any") -> None:
+        """Point live per-turn flushing at *path* (a pathlib.Path or str)."""
+        self.live_path = path
+
+    def _flush_turn_live(self, turn: "Turn") -> None:
+        if self.live_path is None:
+            return
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            p = _Path(self.live_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(_json.dumps({
+                    "role": turn.role,
+                    "stage": turn.stage,
+                    "module": turn.module,
+                    "turn_number": turn.turn_number,
+                    "timestamp": turn.timestamp,
+                    "cost": getattr(turn, "cost", 0.0),
+                    "content": turn.content,
+                    "thinking": getattr(turn, "thinking", None),
+                }, ensure_ascii=False) + "\n")
+                fh.flush()
+            # Heartbeat: a mid-module liveness marker (mtime advances per turn).
+            (p.parent / ".heartbeat").touch()
+        except OSError:
+            # Live flush is best-effort; never let it break the run.
+            pass
 
     def add_user_turn(
         self,
@@ -91,16 +146,22 @@ class ThinkingCapture:
         if not timestamp:
             from datetime import datetime, timezone
             timestamp = datetime.now(timezone.utc).isoformat()
-        self.turns.append(
-            Turn(
-                role="user",
-                content=content,
-                stage=stage,
-                module=module,
-                turn_number=turn_number,
-                timestamp=timestamp,
-            )
+        # E16: number turns by their APPEND POSITION, not the caller-supplied
+        # value. Callers historically used two divergent schemes (a
+        # `coder._turn_counter` and `len(turns)`, plus a hardcoded 0), which
+        # interleaved into one list and produced non-monotonic turn numbers.
+        # Deriving it here makes the sequence strictly monotonic by construction.
+        turn_number = len(self.turns)
+        _t = Turn(
+            role="user",
+            content=content,
+            stage=stage,
+            module=module,
+            turn_number=turn_number,
+            timestamp=timestamp,
         )
+        self.turns.append(_t)
+        self._flush_turn_live(_t)
 
     def add_assistant_turn(
         self,
@@ -123,25 +184,33 @@ class ThinkingCapture:
         if not timestamp:
             from datetime import datetime, timezone
             timestamp = datetime.now(timezone.utc).isoformat()
-        self.turns.append(
-            Turn(
-                role="assistant",
-                content=content,
-                thinking=thinking,
-                thinking_tokens=thinking_tokens,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cache_hit_tokens=cache_hit_tokens,
-                cache_write_tokens=cache_write_tokens,
-                cost=cost,
-                stage=stage,
-                module=module,
-                turn_number=turn_number,
-                timestamp=timestamp,
-                llm_response_id=llm_response_id,
-                provider=provider,
-            )
+        # E16: authoritative, monotonic numbering by append position (see add_user_turn).
+        turn_number = len(self.turns)
+        _t = Turn(
+            role="assistant",
+            content=content,
+            thinking=thinking,
+            thinking_tokens=thinking_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cost=cost,
+            stage=stage,
+            module=module,
+            turn_number=turn_number,
+            timestamp=timestamp,
+            llm_response_id=llm_response_id,
+            provider=provider,
+            # Under active ground-truth capture, start at [] (authoritative "no
+            # edits applied yet"); record_applied_edits extends it if apply_edits
+            # fires. A turn whose apply_edits is skipped (early-return) then stays
+            # [] and the formatter emits no edits — instead of the None -> parser
+            # -> phantom path. Legacy/inactive capture keeps None (parser fallback).
+            applied_edits=[] if self.edit_capture_active else None,
         )
+        self.turns.append(_t)
+        self._flush_turn_live(_t)
 
     def to_history(self) -> list[dict]:
         """Convert to output.jsonl history format."""
@@ -165,46 +234,97 @@ class ThinkingCapture:
     def get_module_metrics(self, module: str) -> dict:
         """Aggregate metrics for a single module.
 
-        When llm_cost_capture recorded calls for this module, totals come from
-        the full call log (main loop + aider auxiliaries + our summarizers) so
-        the numbers reconcile against provider billing. Otherwise fall back to
-        turn-derived totals which only see the main loop.
+        The per-module LLM call-log (``llm_cost_capture``) is the SOURCE OF TRUTH:
+        it records every litellm call (main loop + aider auxiliaries like
+        commit-msg/repomap + our summarizers) and reconciles against provider
+        billing. When it's present ALL scalar counts below are derived from it, so
+        they are mutually consistent:
+
+          - ``total_llm_calls``  = every captured call (all sources).
+          - ``num_turns``        = MAIN-LOOP calls only, i.e. the number of
+            assistant coding turns. This deliberately excludes auxiliary calls
+            (commit-msg, summarizer, repomap) which are not conversational turns.
+            Deriving it from the same call-log as ``by_source`` means
+            ``num_turns == by_source['main_loop']['calls']`` ALWAYS — the previous
+            code took it from a separate turn-capture patch that desynced from the
+            call-log in ~72% of modules (sometimes exceeding the captured call
+            count, which is impossible for a real turn).
+          - ``total_thinking_tokens`` + ``thinking_tokens_estimated``: the flag is
+            True when any contributing call's thinking count was ESTIMATED from
+            (possibly summarized) reasoning text rather than a provider-exact
+            usage field — so consumers don't treat the proxy as a billed figure.
+
+        Only when the call-log is ABSENT (degraded capture) do we fall back to
+        turn-derived totals, which see the main loop only.
         """
+        from agent.llm_cost_capture import SRC_MAIN_LOOP
+
         module_turns = [
             t for t in self.turns if t.role == "assistant" and t.module == module
         ]
-        is_vertex_module = bool(module_turns) and all(
-            getattr(t, "provider", "") == "vertex_ai_gemini" for t in module_turns
-        )
-        metrics: dict = {
-            "total_cost": sum(t.cost for t in module_turns),
-            "total_prompt_tokens": sum(t.prompt_tokens for t in module_turns),
-            "total_completion_tokens": sum(t.completion_tokens for t in module_turns),
-            "total_thinking_tokens": sum(t.thinking_tokens for t in module_turns),
-            "num_turns": len(module_turns),
-        }
-        if is_vertex_module:
-            metrics["cached_content_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
-        else:
-            metrics["cache_hit_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
-            metrics["cache_write_tokens"] = sum(t.cache_write_tokens for t in module_turns)
 
         call_log = self.module_llm_calls.get(module)
         if call_log is not None and call_log.calls:
+            # --- Source of truth: the call-log. All scalars derive from here. ---
             totals = call_log.grand_totals()
-            metrics["total_cost"] = totals["cost_usd"]
-            metrics["total_prompt_tokens"] = totals["prompt_tokens"]
-            metrics["total_completion_tokens"] = totals["completion_tokens"]
-            metrics["total_thinking_tokens"] = totals["thinking_tokens"]
-            for k in ("cache_hit_tokens", "cache_write_tokens", "cached_content_tokens"):
-                metrics.pop(k, None)
+            by_source = call_log.by_source()
+            metrics: dict = {
+                "total_cost": totals["cost_usd"],
+                "total_prompt_tokens": totals["prompt_tokens"],
+                "total_completion_tokens": totals["completion_tokens"],
+                "total_thinking_tokens": totals["thinking_tokens"],
+                "thinking_tokens_estimated": any(
+                    getattr(c, "thinking_tokens_estimated", False) for c in call_log.calls
+                ),
+                # num_turns == main-loop assistant coding turns (reconciled).
+                "num_turns": (by_source.get(SRC_MAIN_LOOP, {}) or {}).get("calls", 0),
+                # total_llm_calls == every captured call across all sources.
+                "total_llm_calls": totals["calls"],
+                # Per-module agent.run wall-clock, measured by capture_module_calls.
+                # This is the fallback runtime for languages (go/c) that don't pass
+                # an explicit module_elapsed; write_module_output_json prefers the
+                # explicit value when the caller provides one.
+                "module_runtime_seconds": round(getattr(call_log, "wall_seconds", 0.0), 2),
+            }
             if "cached_content_tokens" in totals:
                 metrics["cached_content_tokens"] = totals["cached_content_tokens"]
             else:
                 metrics["cache_hit_tokens"] = totals["cache_read_tokens"]
                 metrics["cache_write_tokens"] = totals["cache_write_tokens"]
-            metrics["by_source"] = call_log.by_source()
+            metrics["by_source"] = by_source
             metrics["llm_calls"] = [c.to_dict() for c in call_log.calls]
+        else:
+            # --- Degraded fallback: no call-log, use turn-capture (main loop only). ---
+            is_vertex_module = bool(module_turns) and all(
+                getattr(t, "provider", "") == "vertex_ai_gemini" for t in module_turns
+            )
+            total_thinking = sum(t.thinking_tokens for t in module_turns)
+            metrics = {
+                "total_cost": sum(t.cost for t in module_turns),
+                "total_prompt_tokens": sum(t.prompt_tokens for t in module_turns),
+                "total_completion_tokens": sum(t.completion_tokens for t in module_turns),
+                "total_thinking_tokens": total_thinking,
+                # No call-log to confirm exactness; a non-zero thinking count in
+                # this path is almost always the text-estimate cascade.
+                "thinking_tokens_estimated": total_thinking > 0,
+                "num_turns": len(module_turns),
+                # Without a call-log the only visible calls are the main-loop turns.
+                "total_llm_calls": len(module_turns),
+            }
+            if is_vertex_module:
+                metrics["cached_content_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
+            else:
+                metrics["cache_hit_tokens"] = sum(t.cache_hit_tokens for t in module_turns)
+                metrics["cache_write_tokens"] = sum(t.cache_write_tokens for t in module_turns)
+
+        # Reflection accounting (additive; leaves num_turns untouched). num_turns
+        # counts main-loop LLM calls, which INCLUDES aider's auto-injected reflection
+        # continuations (add-files / lint / test / edit-format retries). Those are
+        # continuations of the same turn, not new agent turns. num_reflections is
+        # aider's own exact count; num_agent_turns is the substantive rounds.
+        num_reflections = int(self.module_reflections.get(module, 0) or 0)
+        metrics["num_reflections"] = num_reflections
+        metrics["num_agent_turns"] = max(0, metrics.get("num_turns", 0) - num_reflections)
 
         mismatch = self.capture_mismatches.get(module)
         if mismatch is not None:
@@ -283,9 +403,13 @@ class ThinkingCapture:
                 if totals["calls"] > 0:
                     any_calls = True
 
-            result["total_cost"] = grand_cost
-            result["total_prompt_tokens"] = grand_prompt
-            result["total_completion_tokens"] = grand_completion
+            # E10: the spec-summarizer's calls bypass the per-module call-log
+            # (they're tracked separately in summarizer_costs). The call-log path
+            # overwrites total_cost, so WITHOUT re-adding the summarizer cost here
+            # it would be silently dropped — under-reporting the run's true spend.
+            result["total_cost"] = grand_cost + self.summarizer_costs.total_cost
+            result["total_prompt_tokens"] = grand_prompt + self.summarizer_costs.total_prompt_tokens
+            result["total_completion_tokens"] = grand_completion + self.summarizer_costs.total_completion_tokens
             result["total_thinking_tokens"] = grand_thinking
             if any_calls and all_vertex:
                 result["cached_content_tokens"] = grand_cached_content

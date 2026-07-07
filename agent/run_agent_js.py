@@ -277,6 +277,7 @@ def _run_agent_for_repo_js_impl(
                 dataset_path=commit0_config_for_meta.get("dataset_name", ""),
                 max_iterations=agent_config.max_iteration,
                 model_short=agent_config.model_short,
+                dataset_id=example.get("id"),
             )
 
         with DirContext(repo_path):
@@ -372,7 +373,7 @@ def _run_agent_for_repo_js_impl(
                                     test_file_name
                                 ),
                                 stage="test",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
 
             elif agent_config.run_entire_dir_lint:
@@ -456,7 +457,7 @@ def _run_agent_for_repo_js_impl(
                                     lint_file_name
                                 ),
                                 stage="lint",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
             else:
                 message, spec_costs = get_message_js(
@@ -532,7 +533,7 @@ def _run_agent_for_repo_js_impl(
                                 metadata=metadata,
                                 metrics=thinking_capture.get_module_metrics(file_name),
                                 stage="draft",
-                                stage_runtime_seconds=module_elapsed,
+                                module_runtime_seconds=module_elapsed,
                             )
 
         if thinking_capture is not None:

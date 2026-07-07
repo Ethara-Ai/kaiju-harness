@@ -6,6 +6,7 @@ Analogue of run_pytest_ids.py — runs Jest/Vitest tests inside Docker container
 import git
 import logging
 import os
+import shlex
 import sys
 import traceback
 from pathlib import Path
@@ -32,6 +33,7 @@ from commit0.harness.utils import (
 from commit0.harness.execution_context import (
     ExecutionBackend,
     Docker,
+    LocalInplace,
 )
 
 
@@ -46,16 +48,23 @@ def _inject_test_ids(eval_script: str, test_ids: str) -> str:
     if not test_ids:
         return eval_script
 
-    # Defensive: strip newlines and NUL bytes so a tampered test id cannot inject
-    # extra lines into the generated bash script.
-    sanitized = test_ids.replace("\n", " ").replace("\r", " ").replace("\x00", "")
+    # Tokenize test_ids and shlex-quote each so shell metacharacters in a
+    # dataset-supplied id cannot escape argv into a new shell command.
+    tokens = [
+        t for t in test_ids.replace("\r", " ").replace("\x00", "").split()
+        if t
+    ]
+    quoted = " ".join(shlex.quote(t) for t in tokens)
 
     lines = eval_script.split("\n")
     new_lines: list[str] = []
     for line in lines:
-        if "--forceExit" in line or "vitest" in line:
-            # Append test_ids (space-separated) to the test command
-            line = line.rstrip() + " " + sanitized
+        stripped = line.strip()
+        is_jest_line = "--forceExit" in line
+        is_vitest_line = " vitest " in " " + stripped + " "
+        is_node_test_line = "--test-reporter=tap" in line and " node " in " " + stripped + " "
+        if (is_jest_line or is_vitest_line or is_node_test_line) and ">" in line:
+            line = line.rstrip() + " " + quoted
         new_lines.append(line)
     return "\n".join(new_lines)
 
@@ -93,9 +102,8 @@ def main(
         if repo_or_repo_dir.endswith("/"):
             repo_or_repo_dir = repo_or_repo_dir[:-1]
         repo_name = example["repo"].split("/")[-1]
-        if repo_name in os.path.basename(repo_or_repo_dir) or repo_or_repo_dir.endswith(
-            repo_name
-        ):
+        target_basename = os.path.basename(repo_or_repo_dir)
+        if target_basename == repo_name or repo_or_repo_dir.endswith("/" + repo_name):
             spec = make_ts_spec(cast(RepoInstance, example), absolute=absolute)
             break
 
@@ -171,13 +179,17 @@ def main(
     eval_file.write_text(eval_script)
 
     backend = backend.upper()
-    if ExecutionBackend(backend) != ExecutionBackend.LOCAL:
+    if ExecutionBackend(backend) == ExecutionBackend.LOCAL:
+        _ctx = Docker
+        logger.info("Running locally via Docker")
+    elif ExecutionBackend(backend) == ExecutionBackend.LOCAL_INPLACE:
+        _ctx = LocalInplace
+        logger.info("Running locally in-place (git worktree, no new container)")
+    else:
         raise ValueError(
-            f"TS pipeline only supports LOCAL (Docker) backend, got {backend}. "
+            f"TS pipeline supports LOCAL (Docker) or local_inplace, got {backend}. "
             f"Valid backends: {', '.join(EVAL_BACKENDS)}"
         )
-
-    logger.info("Running locally via Docker")
 
     files_to_copy = Files(
         eval_script={
@@ -191,13 +203,14 @@ def main(
     )
     files_to_collect = [
         "report.json",
+        "report.tap",
         "test_exit_code.txt",
         "test_output.txt",
     ]
 
     eval_command = "/bin/bash /eval.sh"
     try:
-        with Docker(
+        with _ctx(
             spec,
             logger,
             timeout,

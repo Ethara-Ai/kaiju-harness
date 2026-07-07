@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
+from kaiju.paths import datasets_dir
 from typing import Dict, List
+import uuid as _uuid_mod
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,18 @@ def validate_cpp_entry(entry: dict) -> List[str]:
         issues.append("'test' must be a dict")
     elif not test.get("test_cmd"):
         issues.append("test.test_cmd is required")
+    elif isinstance(test, dict):
+        repo_root = Path(__file__).resolve().parents[1]
+        scripts_dir = repo_root / "scripts"
+        import sys as _sys
+        if str(scripts_dir) not in _sys.path:
+            _sys.path.insert(0, str(scripts_dir))
+        try:
+            from validate_cpp_dataset import lint_cmd
+            for label, hint in lint_cmd(test["test_cmd"]):
+                issues.append(f"test.test_cmd: {label} -- {hint.splitlines()[0]}")
+        except ImportError:
+            pass
 
     if not entry.get("src_dir"):
         issues.append("src_dir is required")
@@ -66,7 +81,10 @@ def create_cpp_dataset(
 ) -> None:
     """Write validated entries to a JSON dataset file.
 
-    Invalid entries are logged and skipped.
+    Invalid entries are logged and skipped. Caller may pre-assign each entry
+    an ``id`` (uuid4); this function preserves ids passed in but does NOT
+    generate them — the UUID lifecycle belongs to the create-dataset step
+    (once per experiment), not this write helper.
     """
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -144,8 +162,12 @@ def main() -> None:
     create_p.add_argument("entries", help="Path to JSON entries file")
     create_p.add_argument(
         "--output",
-        default="cpp_dataset.json",
-        help="Output dataset file (default: cpp_dataset.json)",
+        default=None,
+        help=(
+            "Output dataset file. Default: auto-generated from the first "
+            "entry's 'id' field (<uuid>.json), or 'cpp_dataset.json' if no "
+            "id present."
+        ),
     )
 
     # validate
@@ -161,16 +183,43 @@ def main() -> None:
         help="Output file (default: merged_cpp_dataset.json)",
     )
 
+    parser.add_argument(
+        "--outputs-root",
+        type=str,
+        default=None,
+        help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["flat", "consolidated"],
+        default=None,
+        help="Output layout: 'flat' (legacy) or 'consolidated' (outputs/<uuid>/…). Overrides $KAIJU_LOG_LAYOUT.",
+    )
+
     args = parser.parse_args()
+
+    if args.outputs_root is not None:
+        os.environ["KAIJU_OUTPUTS_ROOT"] = args.outputs_root
+    if args.layout is not None:
+        os.environ["KAIJU_LOG_LAYOUT"] = args.layout
+    _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if args.command == "create":
+
         raw = Path(args.entries).read_text()
         entries = json.loads(raw)
         if isinstance(entries, dict):
             entries = [entries]
-        create_cpp_dataset(entries, args.output)
+        annotated = [dict(e, id=e.get("id") or str(_uuid_mod.uuid4())) for e in entries]
+        if args.output:
+            output = args.output
+        elif annotated:
+            output = f"{annotated[0]['id']}.json"
+        else:
+            output = "cpp_dataset.json"
+        create_cpp_dataset(annotated, output)
 
     elif args.command == "validate":
         raw = Path(args.dataset).read_text()
