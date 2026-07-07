@@ -1565,6 +1565,12 @@ PYEOF
 
 format_pct() {
     local val="$1"
+    # Guard empty / non-numeric input: a 0/0 eval (e.g. COMPILE_FAILED) leaves
+    # the pass rate unset, which would make `bc` print
+    # "(standard_in) 1: syntax error" and render a blank %.
+    if ! [[ "$val" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
+        val=0
+    fi
     printf "%.1f%%" "$(echo "$val * 100" | bc)"
 }
 
@@ -2261,7 +2267,7 @@ for e in rows: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null)
         RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg err "$pipeline_error" '.error = $err')
     fi
 
-    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg end "$(ts)" '.end_time = $end')
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg end_ts "$(ts)" '.end_time = $end_ts')
 
     print_summary_table
     save_results
