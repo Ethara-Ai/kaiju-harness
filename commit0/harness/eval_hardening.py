@@ -25,6 +25,7 @@ Callers pass the language-specific ``revert_targets`` (dirs/files/globs) and
 
 from __future__ import annotations
 
+import shlex
 from typing import Sequence
 
 
@@ -49,35 +50,37 @@ def revert_and_clean_lines(
     lines: list[str] = []
     # (1) Independent per-pathspec revert, so a pathspec that matches zero
     # tracked files can't abort the reverts for the others (git checkout is
-    # all-or-nothing per invocation).
+    # all-or-nothing per invocation). Each target is SINGLE-QUOTED so a glob like
+    # `*_test.go` reaches git as a pathspec instead of being expanded by the
+    # shell — otherwise a model-added sibling (`evil_test.go`) would be included
+    # in the expansion and, being absent at base, abort the whole checkout and
+    # leave the real test unreverted. TS passes git `:(glob)` magic pathspecs
+    # (raw); shlex.quote keeps them intact and we skip the `**/` doubling.
     for tgt in revert_targets:
-        lines.append(f"git checkout {base_commit} -- {tgt} 2>/dev/null || true")
+        lines.append(f"git checkout {base_commit} -- {shlex.quote(tgt)} 2>/dev/null || true")
         if nested and not tgt.startswith(":("):
-            lines.append(f"git checkout {base_commit} -- '**/{tgt}' 2>/dev/null || true")
-    # (2) Delete model-ADDED files under the delete globs (checkout can't remove
-    # a path that didn't exist at base).
+            lines.append(
+                f"git checkout {base_commit} -- {shlex.quote('**/' + tgt)} "
+                "2>/dev/null || true"
+            )
+    # (2) Delete model-ADDED hook/config files. The patch is applied with plain
+    # `git apply` (no --index), so added files are UNTRACKED — `git diff` cannot
+    # see them, which made the old `git diff --diff-filter=A` a silent no-op.
+    # Enumerate untracked adds with `ls-files --others`; also cover the
+    # tracked-added case for any flow that stages. `-z` + `read -d ''` is safe
+    # for paths containing spaces.
     if delete_added_globs:
-        globs = " ".join("'" + g + "'" for g in delete_added_globs)
+        globs = " ".join(shlex.quote(g) for g in delete_added_globs)
         lines.append(
-            f"for _kp in $(git diff --name-only --diff-filter=A {base_commit} -- "
-            f"{globs} 2>/dev/null); do rm -rf \"$_kp\" 2>/dev/null || true; done"
+            f"git ls-files --others --exclude-standard -z -- {globs} 2>/dev/null | "
+            'while IFS= read -r -d "" _kp; do rm -rf "$_kp" 2>/dev/null || true; done'
+        )
+        lines.append(
+            f"git diff --name-only -z --diff-filter=A {base_commit} -- {globs} "
+            '2>/dev/null | while IFS= read -r -d "" _kp; do '
+            'rm -rf "$_kp" 2>/dev/null || true; done'
         )
     return lines
 
 
-def cheat_guard_line(base_commit: str, verify_globs: Sequence[str],
-                     output_file: str = "test_output.txt") -> str:
-    """A belt-and-suspenders check: if any protected path STILL differs from base
-    after the revert, append a CHEAT_DETECTED sentinel to ``output_file`` (which
-    the language's evaluator greps). Prevention (revert+clean) is primary; this
-    only catches a revert that somehow failed.
-    """
-    globs = " ".join(verify_globs)
-    return (
-        f"if ! git diff --quiet {base_commit} -- {globs} 2>/dev/null; then "
-        f"echo 'CHEAT_DETECTED: protected test/build paths still differ from base "
-        f"after revert' >> {output_file}; fi"
-    )
-
-
-__all__ = ["revert_and_clean_lines", "cheat_guard_line"]
+__all__ = ["revert_and_clean_lines"]

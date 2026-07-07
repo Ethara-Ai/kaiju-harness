@@ -195,10 +195,11 @@ class Commit0TsSpec(Spec):
             ".env", ".gitmodules", ".gitattributes",
         ]
         # Per-pathspec revert (the list already carries root + nested :(glob)
-        # forms, so nested=False) + delete model-added test/config files.
+        # forms, so nested=False) + delete model-added test/config files. Pass
+        # raw pathspecs — revert_and_clean_lines shlex-quotes each itself.
         revert_lines = revert_and_clean_lines(
-            shlex.quote(base_commit),
-            revert_targets=[shlex.quote(p) for p in _pathspecs],
+            base_commit,
+            revert_targets=list(_pathspecs),
             delete_added_globs=[
                 "*.test.ts", "**/*.test.ts", "*.spec.ts", "**/*.spec.ts",
                 "*.test.js", "**/*.test.js", "*.spec.js", "**/*.spec.js",
