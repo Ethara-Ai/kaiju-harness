@@ -82,6 +82,48 @@ _FETCH_FAIL_SENTINEL = "INFRA_FETCH_FAILED"
 _DOCTEST_INVENTORY_RE = re.compile(r"^\S+\.rs\s+-\s+.+\(line\s+\d+\)")
 
 
+# A model whose code runs during `cargo test` can print to the same stdout the
+# parser reads. It could forge `test <name> ... ok` lines or a fake
+# `test result: N passed` summary to inflate the score. These are the invariants
+# a genuine libtest run always satisfies; a violation means the output was
+# tampered with -> the run is scored 0 (CHEAT_DETECTED), never trusted.
+_SUMMARY_PASSED_RE = re.compile(r"test\s+result:.*?(\d+)\s+passed", re.IGNORECASE)
+_RUNNING_BIN_RE = re.compile(r"^\s*Running\b", re.MULTILINE)
+_DOCTESTS_RE = re.compile(r"^\s*Doc-tests\b", re.MULTILINE)
+
+
+def _detect_result_injection(
+    content: str, exit_code: int | None, parsed_passed: int, parsed_total: int
+) -> str:
+    """Return a reason string if the test output looks forged, else ''.
+
+    Genuine libtest guarantees, per run:
+      (1) the number of `test ... ok` lines equals the sum of the per-binary
+          `test result: N passed` summaries — injected `ok` lines break this;
+      (2) the process exit code is 0 iff every test passed — a claimed all-pass
+          with a non-zero exit is impossible for a real run;
+      (3) there is exactly one `test result:` summary per test binary / doc-test
+          run — an extra summary line is a forged one.
+    """
+    text = content or ""
+    summaries = [int(m) for m in _SUMMARY_PASSED_RE.findall(text)]
+    summary_passed = sum(summaries)
+    # (1) more per-line "ok" than libtest actually summarised.
+    if summary_passed and parsed_passed > summary_passed:
+        return (f"per-line passed={parsed_passed} exceeds libtest summary "
+                f"total={summary_passed} (injected 'test ... ok' lines)")
+    # (2) claims everything passed, yet the process failed.
+    if exit_code not in (None, 0) and parsed_total > 0 and parsed_passed >= parsed_total:
+        return (f"claimed {parsed_passed}/{parsed_total} passed but cargo exited "
+                f"{exit_code} (a genuine all-pass exits 0)")
+    # (3) more summaries than test binaries + doc-test runs.
+    n_bins = len(_RUNNING_BIN_RE.findall(text)) + len(_DOCTESTS_RE.findall(text))
+    if n_bins and len(summaries) > n_bins:
+        return (f"{len(summaries)} 'test result:' summaries but only {n_bins} test "
+                f"binaries ran (forged summary line)")
+    return ""
+
+
 def _read_exit_code(log_dir: str) -> int | None:
     """Return cargo exit code if `cargo_test_exit_code.txt` is readable, else None."""
     p = os.path.join(log_dir, "cargo_test_exit_code.txt")
@@ -266,6 +308,12 @@ def _aggregate_rust_results(
         elif _CHEAT_SENTINEL in _raw:
             status = "CHEAT_DETECTED"
             logger.warning("%s: CHEAT_DETECTED — model edited in-src test code; flagging", name)
+        elif _detect_result_injection(_raw, exit_code, num_passed, observed_total):
+            status = "CHEAT_DETECTED"
+            logger.warning(
+                "%s: CHEAT_DETECTED — forged test output: %s", name,
+                _detect_result_injection(_raw, exit_code, num_passed, observed_total),
+            )
         elif _FETCH_FAIL_SENTINEL in _raw:
             status = OUTCOME_INFRA_FETCH_FAILED
             logger.warning("%s: INFRA_FETCH_FAILED — cargo couldn't fetch deps; NOT scored as a model failure", name)
