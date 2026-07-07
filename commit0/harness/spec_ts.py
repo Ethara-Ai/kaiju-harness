@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Union, cast
 
 from commit0.harness.spec import Spec
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.constants import (
     RepoInstance,
     SimpleInstance,
@@ -193,17 +194,26 @@ class Commit0TsSpec(Spec):
             "sitecustomize.py", "usercustomize.py",
             ".env", ".gitmodules", ".gitattributes",
         ]
-        _quoted_pathspecs = " ".join(shlex.quote(p) for p in _pathspecs)
-        revert_test_paths = (
-            f"git checkout {shlex.quote(base_commit)} -- "
-            f"{_quoted_pathspecs} "
-            f"2>/dev/null || true"
+        # Per-pathspec revert (the list already carries root + nested :(glob)
+        # forms, so nested=False) + delete model-added test/config files.
+        revert_lines = revert_and_clean_lines(
+            shlex.quote(base_commit),
+            revert_targets=[shlex.quote(p) for p in _pathspecs],
+            delete_added_globs=[
+                "*.test.ts", "**/*.test.ts", "*.spec.ts", "**/*.spec.ts",
+                "*.test.js", "**/*.test.js", "*.spec.js", "**/*.spec.js",
+                "jest.config.*", "**/jest.config.*",
+                "vitest.config.*", "**/vitest.config.*",
+                "babel.config.*", "**/babel.config.*",
+                ".mocharc.*", "**/.mocharc.*",
+            ],
+            nested=False,
         )
         steps: list[str] = [
             f"cd {shlex.quote(self.repo_directory)}",
             f"git reset --hard {shlex.quote(base_commit)}",
             f"git apply --allow-empty -v {shlex.quote(diff_path)}",
-            revert_test_paths,
+            *revert_lines,
             "git status",
         ]
         if is_node_test:

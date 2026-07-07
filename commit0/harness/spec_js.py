@@ -21,6 +21,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 from commit0.harness.spec import Spec
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.dockerfiles_js import (
     get_dockerfile_base as _get_node_dockerfile_base,
     get_dockerfile_repo as _get_node_dockerfile_repo,
@@ -87,6 +88,32 @@ class Commit0JsSpec(Spec):
         base_sha = shlex.quote(base_commit)
         target = shlex.quote(self.repo_directory)
         expected_node_major = shlex.quote(str(self._get_node_version()))
+        # Robust per-pathspec revert + delete model-added test/config files.
+        # babel.config.* was previously NOT reverted — a Babel plugin can
+        # intercept Jest and forge results, so it (and lockfiles/.env/.npmrc) are
+        # now covered. See eval_hardening.
+        revert_lines = revert_and_clean_lines(
+            base_sha,
+            revert_targets=[
+                "*.test.js", "*.test.mjs", "*.test.cjs", "*.test.jsx",
+                "*.spec.js", "*.spec.mjs", "*.spec.cjs", "*.spec.jsx",
+                "__tests__/", "test/", "tests/",
+                "jest.config.*", "vitest.config.*", ".mocharc.*",
+                "babel.config.js", "babel.config.cjs", "babel.config.mjs",
+                ".babelrc", ".babelrc.js", ".babelrc.json",
+                "package.json", "package-lock.json", "npm-shrinkwrap.json",
+                "yarn.lock", "pnpm-lock.yaml", ".npmrc",
+                ".env", ".gitmodules", ".gitattributes",
+            ],
+            delete_added_globs=[
+                "*.test.js", "**/*.test.js", "*.spec.js", "**/*.spec.js",
+                "jest.config.*", "**/jest.config.*",
+                "vitest.config.*", "**/vitest.config.*",
+                ".mocharc.*", "**/.mocharc.*",
+                "babel.config.*", "**/babel.config.*",
+                ".babelrc*", "**/.babelrc*",
+            ],
+        )
         steps: list[str] = [
             "set -uo pipefail",
             f"cd {target}",
@@ -110,14 +137,7 @@ class Commit0JsSpec(Spec):
                 "fi"
             ),
             f"git apply --allow-empty -v {diff_path}",
-            (
-                "git checkout HEAD -- "
-                "'**/*.test.js' '**/*.test.mjs' '**/*.test.cjs' '**/*.test.jsx' "
-                "'**/*.spec.js' '**/*.spec.mjs' '**/*.spec.cjs' '**/*.spec.jsx' "
-                "'**/__tests__/**' 'test/' 'tests/' "
-                "'jest.config.*' 'vitest.config.*' '.mocharc.*' "
-                "2>/dev/null || true"
-            ),
+            *revert_lines,
             self._install_cmd(),
             "echo $? > /tmp/install_exit_code.txt",
             "rm -f /tmp/_node_check_max_rc; : > /tmp/_node_check_max_rc",

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 from commit0.harness.spec import Spec
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.constants import ABSOLUTE_REPO_DIR, RELATIVE_REPO_DIR
 from commit0.harness.constants_java import (
     JAVA_BASE_IMAGE_PREFIX,
@@ -205,17 +206,28 @@ class Commit0JavaSpec(Spec):
             raise ValueError(
                 f"'base_commit' is required in instance data for repo '{repo}'"
             )
-        revert_test_paths = (
-            f"git checkout {base_commit} -- "
-            f"src/test/ '**/src/test/' src/androidTest/ '**/src/androidTest/' "
-            f"src/integrationTest/ '**/src/integrationTest/' "
-            f"'*Test.java' '**/*Test.java' '*Tests.java' '**/*Tests.java' "
-            f"'*IT.java' '**/*IT.java' '*Spec.groovy' '**/*Spec.groovy' "
-            f"pom.xml '**/pom.xml' build.gradle '**/build.gradle' "
-            f"build.gradle.kts '**/build.gradle.kts' "
-            f"settings.gradle '**/settings.gradle' settings.gradle.kts '**/settings.gradle.kts' "
-            f"sitecustomize.py usercustomize.py .env .gitmodules .gitattributes "
-            f"2>/dev/null || true"
+        # Per-pathspec revert + delete model-added build/test files. Adds the
+        # Maven/Gradle wrapper + settings (a wrapper or settings.xml can skip
+        # tests or point at a poisoned repo). See eval_hardening.
+        revert_lines = revert_and_clean_lines(
+            base_commit,
+            revert_targets=[
+                "src/test/", "src/androidTest/", "src/integrationTest/",
+                "*Test.java", "*Tests.java", "*IT.java", "*Spec.groovy",
+                "pom.xml", "build.gradle", "build.gradle.kts",
+                "settings.gradle", "settings.gradle.kts",
+                "gradle.properties", "gradlew", "gradlew.bat", "gradle/",
+                ".mvn/", "mvnw", "mvnw.cmd",
+                "sitecustomize.py", "usercustomize.py",
+                ".env", ".gitmodules", ".gitattributes",
+            ],
+            delete_added_globs=[
+                "*Test.java", "**/*Test.java", "*Tests.java", "**/*Tests.java",
+                "*IT.java", "**/*IT.java",
+                "pom.xml", "**/pom.xml", "build.gradle", "**/build.gradle",
+                "build.gradle.kts", "**/build.gradle.kts",
+                "settings.gradle*", "**/settings.gradle*",
+            ],
         )
         return [
             f"cd {self.repo_directory}",
@@ -225,7 +237,7 @@ class Commit0JavaSpec(Spec):
             f"git fetch --depth 1 origin {base_commit} && git tag -f {base_commit} FETCH_HEAD 2>/dev/null || true",
             f"git reset --hard {base_commit}",
             "if [ -s /patch.diff ]; then git apply -v /patch.diff; fi",
-            revert_test_paths,
+            *revert_lines,
             # Compile first — Java fails fast on compile errors
             f"{compile_cmd} 2>&1 | tee compile_output.txt",
             "COMPILE_EXIT=${PIPESTATUS[0]}",
