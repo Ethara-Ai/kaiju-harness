@@ -252,18 +252,30 @@ class SWEBenchSpec(Spec):
                 elif install.startswith("python setup.py"):
                     pass
                 results.append(install)
-        revert_test_paths = (
-            f"git checkout {self.instance['base_commit']} -- "
-            f"tests/ test/ conftest.py "
-            f"pytest.ini setup.cfg tox.ini pyproject.toml .coveragerc "
-            f"2>/dev/null || true"
+        base = self.instance["base_commit"]
+        # Robust per-pathspec revert + delete model-added pytest hook files
+        # (same hardening as Commit0Spec). See eval_hardening.
+        revert_lines = revert_and_clean_lines(
+            base,
+            revert_targets=[
+                "tests/", "test/", "conftest.py",
+                "pytest.ini", "setup.cfg", "setup.py", "tox.ini",
+                "pyproject.toml", ".coveragerc",
+                "sitecustomize.py", "usercustomize.py", "noxfile.py",
+            ],
+            delete_added_globs=[
+                "conftest.py", "**/conftest.py",
+                "sitecustomize.py", "**/sitecustomize.py",
+                "usercustomize.py", "**/usercustomize.py",
+                "setup.py", "*.pth", "**/*.pth",
+            ],
         )
         eval_script_list = (
             [
                 f"cd {self.repo_directory}",
-                f"git reset --hard {self.instance['base_commit']}",
+                f"git reset --hard {base}",
                 "git apply --allow-empty -v /patch.diff",
-                revert_test_paths,
+                *revert_lines,
             ]
             + results
             + [

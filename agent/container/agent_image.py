@@ -30,7 +30,6 @@ CONTEXT_INCLUDE = [
     "agent",
     "commit0",
     "kaiju",
-    "kaiju_harbor",
     "scripts",              # pipeline sources scripts/*.sh (_outputs_layout, etc.)
     # The full trajectory pipeline (per language) runs INSIDE the container.
     "run_pipeline.sh", "run_pipeline_rust.sh", "run_pipeline_go.sh",

@@ -82,7 +82,11 @@ class Commit0JsSpec(Spec):
 
     def make_eval_script_list(self) -> list[str]:
         framework = self._detect_test_framework()
-        results_path = "/tmp/test_results.json"
+        # Repo-relative (the eval has already `cd`ed into the repo). Absolute
+        # /tmp paths broke result collection: files_to_collect / the Docker
+        # copy_from_container / LocalInplace all key off {repo_dir}/{fname}, so
+        # /tmp artifacts never reached log_dir and the reader saw nothing.
+        results_path = "test_results.json"
         diff_path = shlex.quote("/patch.diff")
         base_commit = self._instance_str("base_commit")
         base_sha = shlex.quote(base_commit)
@@ -139,10 +143,10 @@ class Commit0JsSpec(Spec):
             f"git apply --allow-empty -v {diff_path}",
             *revert_lines,
             self._install_cmd(),
-            "echo $? > /tmp/install_exit_code.txt",
+            "echo $? > install_exit_code.txt",
             "rm -f /tmp/_node_check_max_rc; : > /tmp/_node_check_max_rc",
             "git ls-files -z '*.js' '*.mjs' '*.cjs' 2>/dev/null | xargs -0 -r -n 100 sh -c 'node --check \"$@\" || { rc=$?; cur=$(cat /tmp/_node_check_max_rc 2>/dev/null || echo 0); [ \"$rc\" -gt \"$cur\" ] && echo \"$rc\" > /tmp/_node_check_max_rc; }; true' _ || true",
-            "if [ -s /tmp/_node_check_max_rc ]; then echo $(cat /tmp/_node_check_max_rc) > /tmp/syntax_exit_code.txt; else echo 0 > /tmp/syntax_exit_code.txt; fi",
+            "if [ -s /tmp/_node_check_max_rc ]; then echo $(cat /tmp/_node_check_max_rc) > syntax_exit_code.txt; else echo 0 > syntax_exit_code.txt; fi",
         ]
         prefix = self._test_command_prefix(framework)
         test_cmd = {
@@ -153,7 +157,7 @@ class Commit0JsSpec(Spec):
         }[framework]
         steps += [
             test_cmd,
-            "echo $? > /tmp/test_exit_code.txt",
+            "echo $? > test_exit_code.txt",
             f"[ -s {results_path} ] || echo 'EMPTY_RESULTS' > {results_path}",
         ]
         return steps

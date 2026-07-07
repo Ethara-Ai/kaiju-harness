@@ -265,11 +265,14 @@ def main(
             eval_script={"src": eval_file, "dest": Path("/eval.sh")},
             patch={"src": patch_file, "dest": Path("/patch.diff")},
         )
+        # Repo-relative (spec_js now writes these in the repo cwd) so both the
+        # Docker copy_from_container and the LocalInplace collector land them in
+        # log_dir, where the reads + evaluate_js expect them.
         files_to_collect = [
-            "/tmp/test_results.json",
-            "/tmp/test_exit_code.txt",
-            "/tmp/install_exit_code.txt",
-            "/tmp/syntax_exit_code.txt",
+            "test_results.json",
+            "test_exit_code.txt",
+            "install_exit_code.txt",
+            "syntax_exit_code.txt",
             "test_output.txt",
         ]
 

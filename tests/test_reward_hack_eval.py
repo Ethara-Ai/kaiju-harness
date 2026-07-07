@@ -148,3 +148,34 @@ def test_cpp_more_tests_than_stale_canonical_not_flagged(tmp_path, monkeypatch):
     ecpp._aggregate_cpp_results(str(tmp_path), "widget", out)
     assert out and out[0].get("status") == "TESTS_RAN"
     assert out[0]["passed"] == 1.0  # not zeroed
+
+
+# --- Rust BUG F: a crashed binary (ok lines, no summary) must NOT be flagged ---
+_TWO_BINS_ONE_CRASHED = """\
+     Running unittests src/lib.rs (target/debug/deps/a-1)
+running 2 tests
+test t::a1 ... ok
+test t::a2 ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/it.rs (target/debug/deps/b-2)
+running 2 tests
+test t::b1 ... ok
+test t::b2 ... ok
+"""  # binary b-2 aborts before printing its summary
+
+
+def test_crashed_binary_missing_summary_not_flagged():
+    # per-line ok = 4, summary total = 2, but 2 'Running' lines vs 1 summary
+    # -> a binary crashed; benign, must NOT be flagged as injection.
+    assert _detect_result_injection(_TWO_BINS_ONE_CRASHED, exit_code=134,
+                                    parsed_passed=4, parsed_total=4) == ""
+
+
+def test_injected_ok_when_all_binaries_summarized_is_flagged():
+    forged = _TWO_BINS_ONE_CRASHED + \
+        "test result: ok. 2 passed; 0 failed; 0 ignored\n"  # b-2 now summarized
+    forged += "test t::evil ... ok\n"                        # + one injected ok
+    # now 2 summaries == 2 binaries, per-line(5) > summary(4) -> injection.
+    reason = _detect_result_injection(forged, exit_code=0,
+                                      parsed_passed=5, parsed_total=5)
+    assert "injected" in reason

@@ -114,15 +114,19 @@ def _detect_result_injection(
     text = content or ""
     summaries = [int(m) for m in _SUMMARY_PASSED_RE.findall(text)]
     summary_passed = sum(summaries)
-    # (1) more per-line "ok" than libtest actually summarised.
-    if summary_passed and parsed_passed > summary_passed:
-        return (f"per-line passed={parsed_passed} exceeds libtest summary "
-                f"total={summary_passed} (injected 'test ... ok' lines)")
-    # (2) more summaries than test binaries + doc-test runs.
     n_bins = len(_RUNNING_BIN_RE.findall(text)) + len(_DOCTESTS_RE.findall(text))
+    # (2) more summaries than test binaries + doc-test runs -> forged summary.
     if n_bins and len(summaries) > n_bins:
         return (f"{len(summaries)} 'test result:' summaries but only {n_bins} test "
                 f"binaries ran (forged summary line)")
+    # (1) more per-line "ok" than libtest actually summarised -> injected `ok`.
+    # BUT only when every binary that ran produced a summary. If a binary
+    # hard-aborts (SIGSEGV/abort) it prints its `ok` lines with NO summary, so
+    # per-line > summary is then benign (a crash, not injection) — don't flag it.
+    _binary_missing_summary = n_bins > 0 and len(summaries) < n_bins
+    if summary_passed and parsed_passed > summary_passed and not _binary_missing_summary:
+        return (f"per-line passed={parsed_passed} exceeds libtest summary "
+                f"total={summary_passed} (injected 'test ... ok' lines)")
     return ""
 
 
