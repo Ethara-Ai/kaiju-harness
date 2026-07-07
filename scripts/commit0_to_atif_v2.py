@@ -83,6 +83,12 @@ MODEL_SHORT_MAP: dict[str, str] = {
     "vertex_ai/claude-opus-4-7": "claude-opus-4.7",
     "claude-opus-4.8": "claude-opus-4.8",
     "vertex_ai/claude-opus-4-8": "claude-opus-4.8",
+    # Anthropic-direct / bridge slugs use hyphens (claude-opus-4-8), which the
+    # containerized pipeline passes as the model name -> map them too.
+    "claude-opus-4-8": "claude-opus-4.8",
+    "anthropic/claude-opus-4-8": "claude-opus-4.8",
+    "claude-opus-4-7": "claude-opus-4.7",
+    "anthropic/claude-opus-4-7": "claude-opus-4.7",
 }
 
 # Kaiju harness tool surface (from kaiju/agent/openhands_formatter.py).
