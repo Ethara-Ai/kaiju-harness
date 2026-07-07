@@ -738,6 +738,8 @@ run_evaluate_js() {
 
     log "  Evaluation finished in ${EVAL_ELAPSED}s (rc=${eval_rc})"
 
+    collect_eval_artifacts "${stage_label:-eval}"
+
     local combined_output
     combined_output=$(cat "$eval_log")
 
@@ -885,6 +887,38 @@ format_pct() {
         val=0
     fi
     printf "%.1f%%" "$(echo "$val * 100" | bc)"
+}
+
+# Preserve per-repo eval artifacts into the run's output tree. The eval writes
+# test_output.txt / exit codes / eval.sh / patch.diff / apply+revert stderr /
+# reports under logs/<lang>_test(s)/<repo>/<BRANCH_NAME>/<hash>/, which is NOT
+# under outputs/<uuid>/ and is lost on container teardown — leaving a
+# COMPILE_FAILED undebuggable. Copied per stage so each keeps its own snapshot.
+collect_eval_artifacts() {
+    local stage_label="${1:-eval}"
+    [[ -n "${LOG_BASE:-}" && -n "${BRANCH_NAME:-}" ]] || return 0
+    local dest="${LOG_BASE}/${stage_label}_eval_artifacts"
+    local bdir hdir repo out found=0
+    shopt -s nullglob
+    for bdir in logs/*_test*/*/"${BRANCH_NAME}" logs/pytest/*/"${BRANCH_NAME}"; do
+        [[ -d "$bdir" ]] || continue
+        repo=$(basename "$(dirname "$bdir")")
+        for hdir in "$bdir"/*/; do
+            [[ -d "$hdir" ]] || continue
+            out="${dest}/${repo}"
+            mkdir -p "$out"
+            find "$hdir" -maxdepth 1 -type f \( \
+                -name 'test_output.txt' -o -name 'test_output.json' \
+                -o -name '*_exit_code.txt' -o -name 'eval.sh' \
+                -o -name 'patch.diff' -o -name '*stderr.log' \
+                -o -name 'report.*' -o -name 'test_results.json' \
+                \) -exec cp -f {} "$out/" \; 2>/dev/null || true
+            found=1
+        done
+    done
+    shopt -u nullglob
+    [[ "$found" == "1" ]] && log "  Eval artifacts -> ${dest}" || true
+    return 0
 }
 
 # ============================================================

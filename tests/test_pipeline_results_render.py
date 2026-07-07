@@ -59,3 +59,15 @@ def test_format_pct_handles_empty_and_zero(pipeline):
             f"{pipeline}: format_pct({val!r}) -> bc error: {r.stderr}")
         assert r.stdout.strip() == expect, (
             f"{pipeline}: format_pct({val!r}) = {r.stdout.strip()!r}, want {expect!r}")
+
+
+@pytest.mark.parametrize("pipeline", PIPELINES)
+def test_eval_artifacts_are_collected(pipeline):
+    """Each pipeline must define + call collect_eval_artifacts so the eval's
+    test_output.txt / patch.diff / exit codes are preserved under outputs/
+    (the eval writes them to logs/, lost on container teardown)."""
+    import re
+    text = (ROOT / pipeline).read_text()
+    assert "collect_eval_artifacts() {" in text, f"{pipeline}: collector missing"
+    assert re.search(r'collect_eval_artifacts "\$\{stage_label', text), \
+        f"{pipeline}: collector never called after eval"
