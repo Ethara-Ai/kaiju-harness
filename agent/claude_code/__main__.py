@@ -8,8 +8,8 @@ import sys
 
 import uvicorn
 
-from agent.claude_code.bridge import build_app
-from agent.claude_code.credentials import CredentialProvider, CredentialsError
+from agent.claude_code.bridge import _resolve_provider, build_app
+from agent.claude_code.credentials import CredentialsError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,7 +29,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    provider = CredentialProvider()
+    # Resolve single- vs multi-account from KAIJU_CC_ACCOUNT_POOL so the pool
+    # activates on the CLI startup path (not just when build_app() is called
+    # with no provider). Passing the same instance to build_app() below keeps
+    # the pre-flight credential check and the served app in sync.
+    provider = _resolve_provider()
     try:
         token = provider.get_access_token()
     except CredentialsError as e:

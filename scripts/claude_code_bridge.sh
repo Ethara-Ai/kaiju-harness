@@ -20,6 +20,23 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load .env so config written by scripts/setup_multi_account.sh (notably
+# KAIJU_CC_ACCOUNT_POOL) reaches the bridge process. Anything already set in the
+# environment (e.g. `KAIJU_CC_ACCOUNT_POOL=... scripts/claude_code_bridge.sh
+# start`) WINS over the file, so inline overrides and the parallel-bridge recipe
+# keep working.
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+  while IFS='=' read -r _k _v; do
+    [[ "$_k" =~ ^[[:space:]]*# || -z "$_k" ]] && continue
+    _k="${_k//[[:space:]]/}"
+    [[ -z "${!_k+x}" ]] || continue        # already set in env -> don't override
+    _v="${_v%\"}"; _v="${_v#\"}"            # strip one layer of surrounding quotes
+    export "${_k}=${_v}"
+  done < "${REPO_ROOT}/.env"
+  unset _k _v
+fi
+
 PY="${KAIJU_CC_PYTHON:-${REPO_ROOT}/.venv/bin/python}"
 HOST="${KAIJU_CC_BRIDGE_HOST:-127.0.0.1}"
 PORT="${KAIJU_CC_BRIDGE_PORT:-8765}"

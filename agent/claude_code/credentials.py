@@ -41,7 +41,7 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -519,16 +519,37 @@ class _KeychainCredentialProvider(CredentialProvider):
             return self._creds.access_token[:20] if self._creds else None
 
 
+# How many recently-handed-out tokens to remember per slot for error
+# attribution. Keeping a small history (not just the single latest token)
+# survives a concurrent OAuth refresh: a request that was handed token T1 can
+# still be attributed to this slot after a later request rotated the slot to T2.
+_RECENT_TOKEN_HISTORY = 8
+
+
 @dataclass
 class _AccountSlot:
     provider: CredentialProvider
     label: str
     exhausted_until: float = 0.0
     invalid: bool = False
-    # The exact access token most recently handed out from this slot. Used to
-    # attribute upstream errors back to the right account without relying on a
-    # low-entropy 20-char prefix (all OAuth tokens share `sk-ant-oat01-`).
-    last_token: Optional[str] = None
+    # The access tokens most recently handed out from this slot (newest last).
+    # Used to attribute an upstream error back to the exact account that
+    # produced it, without relying on a low-entropy 20-char prefix (all OAuth
+    # tokens share the `sk-ant-oat01-` prefix). Bounded so a long-lived slot
+    # doesn't grow unbounded; a refresh race still can't lose attribution.
+    recent_tokens: list[str] = field(default_factory=list)
+
+    def remember_token(self, token: str) -> None:
+        """Record a token handed out from this slot (bounded history)."""
+        if not token or token in self.recent_tokens:
+            return
+        self.recent_tokens.append(token)
+        if len(self.recent_tokens) > _RECENT_TOKEN_HISTORY:
+            del self.recent_tokens[0]
+
+    def has_token(self, token: str) -> bool:
+        """True if ``token`` was recently handed out from this slot."""
+        return bool(token) and token in self.recent_tokens
 
     def is_available(self, now: Optional[float] = None) -> bool:
         if self.invalid:
@@ -547,6 +568,14 @@ class MultiAccountCredentialProvider:
 
     Selection policy: first available slot in insertion order. This makes the
     behavior predictable and lets a user put their "primary" account first.
+
+    Concurrency note: selection is intentionally a serial drain, NOT a
+    round-robin load balancer. Under many concurrent requests they all pick the
+    same first-available account and drain it before moving to the next. This is
+    deliberate -- it keeps the "primary first" contract and the /quota picture
+    easy to reason about. Error attribution is made concurrency-safe by
+    per-slot recent-token history (see ``_AccountSlot.remember_token``) rather
+    than a single shared "last used" pointer.
     """
 
     def __init__(self, slots: list[_AccountSlot]) -> None:
@@ -554,12 +583,15 @@ class MultiAccountCredentialProvider:
             raise CredentialsError("MultiAccountCredentialProvider needs >= 1 slot")
         self._slots = slots
         self._lock = threading.Lock()
-        self._last_used_index: int = 0
+
+    @property
+    def pool_size(self) -> int:
+        """Total number of account slots (available or not)."""
+        return len(self._slots)
 
     def get_access_token(self) -> str:
         with self._lock:
-            slot, idx = self._select_slot_locked()
-            self._last_used_index = idx
+            slot, _idx = self._select_slot_locked()
         try:
             token = slot.provider.get_access_token()
         except CredentialsError:
@@ -567,7 +599,7 @@ class MultiAccountCredentialProvider:
                 slot.invalid = True
             return self.get_access_token()
         with self._lock:
-            slot.last_token = token
+            slot.remember_token(token)
         return token
 
     def _select_slot_locked(self) -> tuple[_AccountSlot, int]:
@@ -611,23 +643,6 @@ class MultiAccountCredentialProvider:
             slot.invalid = True
             _LOG.warning("account %s marked invalid (will not be retried)", slot.label)
 
-    def mark_current_exhausted(self, until_unix: float) -> None:
-        with self._lock:
-            if 0 <= self._last_used_index < len(self._slots):
-                slot = self._slots[self._last_used_index]
-                slot.exhausted_until = max(slot.exhausted_until, until_unix)
-                _LOG.info(
-                    "account %s marked exhausted until %s (in %.0fs)",
-                    slot.label, until_unix, max(0.0, until_unix - time.time()),
-                )
-
-    def mark_current_invalid(self) -> None:
-        with self._lock:
-            if 0 <= self._last_used_index < len(self._slots):
-                slot = self._slots[self._last_used_index]
-                slot.invalid = True
-                _LOG.warning("account %s marked invalid", slot.label)
-
     def next_reset_at(self) -> Optional[float]:
         """Soonest Unix-time at which any exhausted account becomes available.
 
@@ -639,6 +654,18 @@ class MultiAccountCredentialProvider:
                 return None
             future = [s.exhausted_until for s in self._slots if not s.invalid]
             return min(future) if future else None
+
+    def has_available(self) -> bool:
+        """True iff at least one account is usable right now.
+
+        Distinct from ``next_reset_at() is None``: when every account is
+        *invalid* (not merely capped) there is no reset coming, yet
+        ``next_reset_at()`` still returns ``None``. Callers deciding whether a
+        failover target exists must use this, not the reset time.
+        """
+        with self._lock:
+            now = time.time()
+            return any(s.is_available(now) for s in self._slots)
 
     def snapshot(self) -> list[dict]:
         with self._lock:
@@ -654,21 +681,28 @@ class MultiAccountCredentialProvider:
             ]
 
     def _find_slot_by_prefix_locked(self, token: str) -> Optional[_AccountSlot]:
-        # Prefer an exact match against the token actually handed out (set in
-        # get_access_token). This is reliable even after a refresh changed the
-        # token, where prefix matching would silently fail and drop the state.
-        if token:
-            for slot in self._slots:
-                if slot.last_token and slot.last_token == token:
-                    return slot
-        # Fallback: low-entropy prefix match (legacy callers passing a prefix).
+        if not token:
+            return None
+        # Prefer an exact match against a token actually handed out from a slot
+        # (recorded in get_access_token). This stays correct even after a
+        # concurrent refresh rotated the slot to a newer token, because each
+        # slot remembers its recent tokens, not just the latest one.
         for slot in self._slots:
-            if not hasattr(slot.provider, "token_prefix"):
-                continue
-            sp = getattr(slot.provider, "token_prefix", lambda: None)()
-            if sp and token and (sp.startswith(token) or token.startswith(sp)):
+            if slot.has_token(token):
                 return slot
-        return None
+        # Fallback: low-entropy prefix match, for callers that mark a slot
+        # before any token has been handed out (e.g. an error attributed before
+        # first use, or the unit tests). Because all OAuth tokens share the
+        # `sk-ant-oat01-` prefix, a prefix can be ambiguous -- so attribute ONLY
+        # when exactly one slot matches, and refuse to guess (return None) when
+        # two or more match. Guessing here would mark the WRONG account.
+        matches = [
+            slot
+            for slot in self._slots
+            if (sp := getattr(slot.provider, "token_prefix", lambda: None)())
+            and (sp.startswith(token) or token.startswith(sp))
+        ]
+        return matches[0] if len(matches) == 1 else None
 
 
 def _add_token_prefix_to_provider(p: CredentialProvider) -> CredentialProvider:
@@ -688,38 +722,67 @@ def load_account_pool(spec: str) -> Optional[MultiAccountCredentialProvider]:
     """Parse a ``KAIJU_CC_ACCOUNT_POOL`` spec into a multi-account provider.
 
     Spec format: colon-separated entries, each one of:
-      - A file path (absolute or ``~``-relative) -> ``_FileCredentialProvider``
       - ``keychain:<service-name>``               -> ``_KeychainCredentialProvider``
+      - A file path (absolute or ``~``-relative)  -> ``_FileCredentialProvider``
       - ``default``                               -> default ``CredentialProvider``
                                                      (Keychain -> ~/.claude/.credentials.json -> cache)
+
+    Note that ``:`` separates entries AND appears inside ``keychain:<service>``.
+    We therefore parse by walking the colon-split tokens: a bare ``keychain``
+    token consumes the following token as its service name. This lets the
+    documented value
+    ``keychain:Claude Code-credentials:keychain:Claude Code-credentials-acct2``
+    parse into two keychain accounts. (A service name that itself contains a
+    ``:`` is not supported.)
 
     Empty entries are skipped. Returns ``None`` if the spec yields no slots.
     """
     if not spec:
         return None
+    tokens = spec.split(":")
     slots: list[_AccountSlot] = []
-    for raw in spec.split(":"):
-        entry = raw.strip()
+    i = 0
+    while i < len(tokens):
+        entry = tokens[i].strip()
         if not entry:
+            i += 1
             continue
         if entry == "default":
             slots.append(_AccountSlot(
                 provider=_add_token_prefix_to_provider(CredentialProvider()),
                 label="default",
             ))
+            i += 1
+            continue
+        if entry == "keychain" and i + 1 < len(tokens):
+            # Re-glue: the next token is this keychain entry's service name.
+            service = tokens[i + 1].strip()
+            if service:
+                slots.append(_AccountSlot(
+                    provider=_KeychainCredentialProvider(service),
+                    label=f"keychain:{service}",
+                ))
+                i += 2
+                continue
+            # Bare "keychain" with an empty service name -> drop the marker.
+            i += 1
             continue
         if entry.startswith("keychain:"):
+            # Defensive: an already-glued single token (won't arise from a
+            # ':'-split, but harmless to accept).
             service = entry[len("keychain:"):]
             slots.append(_AccountSlot(
                 provider=_KeychainCredentialProvider(service),
                 label=f"keychain:{service}",
             ))
+            i += 1
             continue
-        # Treat as file path.
+        # Treat as a file path.
         slots.append(_AccountSlot(
             provider=_FileCredentialProvider(Path(entry)),
             label=f"file:{entry}",
         ))
+        i += 1
     if not slots:
         return None
     return MultiAccountCredentialProvider(slots)

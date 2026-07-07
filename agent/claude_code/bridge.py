@@ -273,7 +273,8 @@ async def _forward_non_streaming(
     """Send a non-streaming request with retry + failover."""
     max_retries = _max_inline_retries()
     max_wait = _max_inline_wait_seconds()
-    attempt = 0
+    attempt = 0          # transient-throttle / 5xx retry counter
+    failover_count = 0   # account-rotation counter (separate budget)
     last_response: Union[httpx.Response, None] = None
 
     while True:
@@ -349,12 +350,17 @@ async def _forward_non_streaming(
         _apply_classification_to_provider(provider, access_token, classified)
 
         # Failover path: account problem + multi-account pool has another slot.
+        # Bounded by the POOL SIZE, not by max_retries: otherwise a pool larger
+        # than the (small) inline-retry budget would give up before trying every
+        # account and force a needless multi-minute pause in the agent-side
+        # recovery layer. Each account-problem permanently marks its slot, so
+        # this rotates through the whole pool at most once.
         if classified.kind.is_account_problem and isinstance(
             provider, MultiAccountCredentialProvider
         ):
-            if provider.next_reset_at() is None:
-                attempt += 1
-                if attempt > max_retries:
+            if provider.has_available():
+                failover_count += 1
+                if failover_count >= provider.pool_size:
                     break
                 continue  # retry with next account
 
@@ -405,7 +411,8 @@ async def _stream_with_failover(
     """
     max_retries = _max_inline_retries()
     max_wait = _max_inline_wait_seconds()
-    attempt = 0
+    attempt = 0          # transient-throttle / 5xx retry counter
+    failover_count = 0   # account-rotation counter (separate budget)
 
     while True:
         try:
@@ -498,12 +505,14 @@ async def _stream_with_failover(
         )
         _apply_classification_to_provider(provider, access_token, classified)
 
+        # Failover bounded by pool size, not max_retries (see
+        # _forward_non_streaming for the rationale).
         if classified.kind.is_account_problem and isinstance(
             provider, MultiAccountCredentialProvider
         ):
-            if provider.next_reset_at() is None:
-                attempt += 1
-                if attempt > max_retries:
+            if provider.has_available():
+                failover_count += 1
+                if failover_count >= provider.pool_size:
                     return _build_error_response(classified)
                 continue
 
@@ -555,6 +564,7 @@ def build_app(provider: ProviderLike | None = None) -> FastAPI:
                 "multi_account": True,
                 "accounts": prov.snapshot(),
                 "next_reset_at_unix": prov.next_reset_at(),
+                "any_available": prov.has_available(),
             }
         return {"multi_account": False, "accounts": [], "next_reset_at_unix": None}
 

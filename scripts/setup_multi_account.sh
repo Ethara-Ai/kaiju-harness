@@ -148,17 +148,30 @@ cmd_add_from_file() {
 cmd_enable() {
   [[ -f "$ENV_FILE" ]] || die ".env not found at $ENV_FILE"
 
-  # Idempotent: uncomment the line if commented, append if missing.
+  # Idempotent: respect a non-empty value, fill an empty one, uncomment a
+  # commented one, or append if missing. (An uncommented-but-empty line — as
+  # shipped by older .env.example — must be POPULATED, not treated as "active".)
   if grep -qE '^[[:space:]]*KAIJU_CC_ACCOUNT_POOL=' "$ENV_FILE"; then
-    green "KAIJU_CC_ACCOUNT_POOL is already active in $ENV_FILE."
+    local current
+    current=$(grep -E '^[[:space:]]*KAIJU_CC_ACCOUNT_POOL=' "$ENV_FILE" | head -1 | sed -E 's/^[^=]*=//')
+    current="${current%\"}"; current="${current#\"}"; current="${current//[[:space:]]/}"
+    if [[ -n "$current" ]]; then
+      green "KAIJU_CC_ACCOUNT_POOL is already set in $ENV_FILE."
+      grep -nE '^[[:space:]]*KAIJU_CC_ACCOUNT_POOL=' "$ENV_FILE"
+      return 0
+    fi
+    # Present but empty -> write the value in place.
+    sed -i '' -E "s|^[[:space:]]*KAIJU_CC_ACCOUNT_POOL=.*\$|KAIJU_CC_ACCOUNT_POOL=\"${POOL_SPEC}\"|" "$ENV_FILE"
+    green "✓ Set KAIJU_CC_ACCOUNT_POOL in $ENV_FILE"
     grep -nE '^[[:space:]]*KAIJU_CC_ACCOUNT_POOL=' "$ENV_FILE"
     return 0
   fi
 
   if grep -qE '^[[:space:]]*#[[:space:]]*KAIJU_CC_ACCOUNT_POOL=' "$ENV_FILE"; then
-    # Uncomment the existing commented line.
-    sed -i '' -E 's|^[[:space:]]*#[[:space:]]*(KAIJU_CC_ACCOUNT_POOL=.*)$|\1|' "$ENV_FILE"
-    green "✓ Uncommented KAIJU_CC_ACCOUNT_POOL in $ENV_FILE"
+    # Uncomment the commented line AND ensure it carries the value (the shipped
+    # example may be commented-and-empty).
+    sed -i '' -E "s|^[[:space:]]*#[[:space:]]*KAIJU_CC_ACCOUNT_POOL=.*\$|KAIJU_CC_ACCOUNT_POOL=\"${POOL_SPEC}\"|" "$ENV_FILE"
+    green "✓ Enabled KAIJU_CC_ACCOUNT_POOL in $ENV_FILE"
   else
     {
       echo ""
