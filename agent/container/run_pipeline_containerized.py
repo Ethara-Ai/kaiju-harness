@@ -125,8 +125,32 @@ def main(argv=None) -> int:
     spec = _make_spec(args.language, example)
 
     client = docker.from_env()
-    agent_tag = build_agent_image(
-        client, spec.repo_image_key, logger, rebuild=args.rebuild_agent_image)
+    # Capture the agent-image build into outputs/<id>/build_logs/ so it isn't
+    # empty: the in-container pipeline SKIPS the docker build (KAIJU_IN_CONTAINER
+    # guard), and host image builds otherwise log to the legacy
+    # logs/build_images/ (no experiment UUID). Written host-side before the
+    # container run so the later outputs copy-out merges around it.
+    build_logs = Path("outputs") / dataset_id / "build_logs"
+    build_logs.mkdir(parents=True, exist_ok=True)
+    (build_logs / "images.txt").write_text(
+        f"repo_image: {spec.repo_image_key}\n"
+        f"(built on host; its docker build log is under logs/build_images/)\n",
+        encoding="utf-8",
+    )
+    _bh = logging.FileHandler(build_logs / "agent_image_build.log")
+    _bh.setLevel(logging.DEBUG)
+    _blogger = logging.getLogger(f"agent_image_build.{dataset_id[:8]}")
+    _blogger.setLevel(logging.DEBUG)
+    _blogger.propagate = False
+    _blogger.addHandler(_bh)
+    try:
+        agent_tag = build_agent_image(
+            client, spec.repo_image_key, _blogger, rebuild=args.rebuild_agent_image)
+    finally:
+        _bh.close()
+        _blogger.removeHandler(_bh)
+    logger.info("Agent image: %s (build log -> %s)", agent_tag,
+                build_logs / "agent_image_build.log")
 
     env = {
         # Bridge (Anthropic-shaped; pipeline does NOT need --use-claude-code —
