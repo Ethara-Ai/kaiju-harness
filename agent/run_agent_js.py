@@ -562,6 +562,9 @@ def _run_agent_for_repo_js_impl(
                 logger.error(
                     "Failed to write thinking capture output: %s", e, exc_info=True
                 )
+        # Stage-wise cumulative patch alongside the per-module output.json.
+        from agent.stage_patch import write_stage_patch
+        write_stage_patch(local_repo, example["base_commit"], experiment_log_dir, logger)
     finally:
         local_repo.close()
 

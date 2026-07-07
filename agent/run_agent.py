@@ -330,6 +330,10 @@ def _run_agent_for_repo_impl(
             )
             raise
 
+    # Stage-wise cumulative patch alongside the per-module output.json.
+    from agent.stage_patch import write_stage_patch
+    write_stage_patch(local_repo, example["base_commit"], experiment_log_dir, logger)
+
     update_queue.put(("finish_repo", repo_name))
 
 

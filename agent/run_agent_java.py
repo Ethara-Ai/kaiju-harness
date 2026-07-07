@@ -352,7 +352,7 @@ def run_java_agent(
             dataset_path="",
             max_iterations=agent_config.max_iteration,
             model_short=agent_config.model_short,
-            dataset_id=example.get("id"),
+            dataset_id=instance.get("id"),
         )
 
     from agent.openhands_formatter import write_module_output_json
@@ -574,6 +574,10 @@ def run_java_agent(
         "Java agent finished: %s — cost=$%.4f, stubs_remaining=%d",
         repo_name, total_cost, remaining.get("total_stubs", 0),
     )
+
+    # Stage-wise cumulative patch alongside the per-module output.json.
+    from agent.stage_patch import write_stage_patch
+    write_stage_patch(local_repo, stub_base, experiment_log_dir, logger)
 
     return results
 

@@ -1097,6 +1097,13 @@ def run_rust_agent_for_repo(
         except Exception as e:
             logger.warning(f"Failed to write thinking capture output: {e}")
 
+    # Stage-wise cumulative patch (see agent.stage_patch). Strips target/ via
+    # the same filter the eval uses.
+    from agent.stage_patch import write_stage_patch
+    from commit0.harness.patch_utils_rust import filter_rust_patch
+    write_stage_patch(local_repo, example["base_commit"], experiment_log_dir,
+                      logger, filter_fn=filter_rust_patch)
+
 
 # ---------------------------------------------------------------------------
 # Main entry point
