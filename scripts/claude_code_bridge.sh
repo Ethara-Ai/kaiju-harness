@@ -14,6 +14,14 @@
 #   export ANTHROPIC_API_BASE=http://127.0.0.1:8765
 #   export ANTHROPIC_API_KEY=kaiju-cc-stub
 #
+# Containerized inference (agent runs inside the repo image): the container must
+# reach the host bridge, so bind it to all interfaces and let the container use
+# the Docker host gateway name:
+#   KAIJU_CC_BRIDGE_HOST=0.0.0.0 scripts/claude_code_bridge.sh start
+#   export KAIJU_CC_BRIDGE_URL=http://host.docker.internal:8765
+# (agent/container/orchestrate.py reads KAIJU_CC_BRIDGE_URL; on Linux it also
+# maps host.docker.internal -> host-gateway automatically.)
+#
 # Multi-account pool (optional, see docs/CLAUDE_CODE_BRIDGE.md):
 #   export KAIJU_CC_ACCOUNT_POOL="$HOME/.cache/kaiju-harness/acc1.json:$HOME/.cache/kaiju-harness/acc2.json:default"
 
