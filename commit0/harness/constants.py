@@ -105,8 +105,15 @@ FAIL_TO_FAIL = "FAIL_TO_FAIL"
 PASS_TO_PASS = "PASS_TO_PASS"
 PASS_TO_FAIL = "PASS_TO_FAIL"
 
-# Evaluation backends
-EVAL_BACKENDS = ["local", "modal", "e2b"]
+# Evaluation backends.
+# - local          : create a fresh Docker container per eval (host orchestrates).
+# - local_inplace  : run eval.sh in an isolated git worktree INSIDE the current
+#                    process/container (no new container, no docker socket). Used
+#                    by fully-containerized inference so the agent container scores
+#                    itself without docker-in-docker. Reward-hack safe: the eval
+#                    still reconstructs from the patch in a clean worktree and
+#                    reverts test/manifest paths (see spec.make_eval_script_list).
+EVAL_BACKENDS = ["local", "local_inplace", "modal", "e2b"]
 # Use absolute for docker and modal. Backends with sudo access
 ABSOLUTE_REPO_DIR = "/testbed"
 # Use relative for e2b, with no sudo access

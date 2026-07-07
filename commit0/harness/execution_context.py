@@ -7,11 +7,15 @@ and HTTP servers.
 from abc import ABC, abstractmethod
 import docker
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
+import time
 import uuid
 from enum import auto
 from strenum import StrEnum
 from pathlib import Path
-import time
 from typing import Optional, Type
 from types import TracebackType
 
@@ -38,6 +42,7 @@ Sandbox = None  # type: ignore[assignment]
 
 class ExecutionBackend(StrEnum):
     LOCAL = auto()
+    LOCAL_INPLACE = auto()
     MODAL = auto()
     E2B = auto()
 
@@ -158,6 +163,173 @@ class Docker(ExecutionContext):
             self.logger.error(f"Container cleanup failed: {e}")
             if excinst is None:
                 raise
+        close_logger(self.logger)
+
+
+def _instance_get(instance: object, key: str) -> object:
+    """Read `key` from a RepoInstance whether it's a dict or a dataclass/model."""
+    if isinstance(instance, dict):
+        return instance.get(key)
+    return getattr(instance, key, None)
+
+
+class LocalInplace(ExecutionContext):
+    """Run the eval script in an isolated git worktree in the CURRENT process.
+
+    This is the backend for fully-containerized inference: the agent already
+    runs *inside* the repo image's container, so spinning up another Docker
+    container to score a test iteration would require docker-in-docker (a socket
+    mount = a host-escape hole). Instead we reconstruct the eval in a throwaway
+    `git worktree` rooted at `base_commit`, apply the model's patch there, and
+    run the tests — never touching the agent's live checkout at
+    `spec.repo_directory`, and never touching the host Docker daemon.
+
+    Reward-hacking is preserved unchanged: the worktree runs the SAME
+    `eval.sh` (`git reset --hard base` → `git apply patch` → revert
+    test/manifest paths → CHEAT-GUARD verify) that the Docker backend runs. The
+    only rewrite is the working directory (`cd <worktree>` instead of
+    `cd <repo_directory>`) and the patch-file path (a scratch file instead of
+    the container-absolute `/patch.diff`) so the backend is safe to run on a
+    developer host too, not only as root inside a container.
+    """
+
+    def __init__(
+        self,
+        spec: Spec,
+        logger: logging.Logger,
+        timeout: int,
+        num_cpus: int,
+        log_dir: Path,
+        files_to_copy: Optional[Files] = None,
+        files_to_collect: Optional[list[str]] = None,
+        rebuild_image: bool = False,
+    ):
+        super().__init__(
+            spec,
+            logger,
+            timeout,
+            num_cpus,
+            log_dir,
+            files_to_copy=files_to_copy,
+            files_to_collect=files_to_collect,
+        )
+        eval_entry = getattr(files_to_copy, "eval_script", None)
+        if not files_to_copy or not eval_entry:
+            raise ValueError("LocalInplace requires files_to_copy with an eval_script")
+
+        self.repo_dir = str(spec.repo_directory)
+        base_commit = _instance_get(spec.instance, "base_commit")
+        if not isinstance(base_commit, str) or not base_commit.strip():
+            raise ValueError("LocalInplace requires a string base_commit on the spec")
+        self.base_commit = base_commit.strip()
+
+        # Scratch root holds the worktree + rewritten eval.sh + scratch patch.
+        self.work_root = tempfile.mkdtemp(prefix="commit0-inplace-")
+        self.worktree = os.path.join(self.work_root, "tree")
+
+        # Create the isolated worktree at base_commit (detached HEAD). This does
+        # NOT disturb the agent's live checkout or its branch — a worktree shares
+        # the object DB but has its own index/HEAD/working files.
+        logger.debug(
+            "LocalInplace: adding worktree %s @ %s (repo=%s)",
+            self.worktree,
+            self.base_commit,
+            self.repo_dir,
+        )
+        subprocess.run(
+            ["git", "-C", self.repo_dir, "worktree", "add", "--detach",
+             self.worktree, self.base_commit],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Stage the patch at a scratch path (not the container-absolute dest, so
+        # this is safe to run unprivileged on a host).
+        patch_scratch = os.path.join(self.work_root, "patch.diff")
+        patch_entry = getattr(files_to_copy, "patch", None)
+        if patch_entry:
+            shutil.copyfile(patch_entry["src"], patch_scratch)
+            patch_dest_orig = str(patch_entry["dest"])
+        else:
+            Path(patch_scratch).write_text("")
+            patch_dest_orig = "/patch.diff"
+
+        # Rewrite eval.sh: point cwd at the worktree and the patch at the scratch
+        # file. Everything else (reset/apply/revert/cheat-guard) is untouched.
+        eval_src = Path(eval_entry["src"]).read_text(
+            encoding="utf-8", errors="surrogateescape"
+        )
+        eval_src = eval_src.replace(f"cd {self.repo_dir}\n", f"cd {self.worktree}\n", 1)
+        eval_src = eval_src.replace(patch_dest_orig, patch_scratch)
+        self.eval_script_path = os.path.join(self.work_root, "eval.sh")
+        Path(self.eval_script_path).write_text(eval_src, encoding="utf-8")
+
+    def exec_run_with_timeout(self, command: str) -> tuple[str, bool, float]:
+        """Run the prepared eval script in the worktree, then collect artifacts.
+
+        `command` is accepted for interface parity but ignored — the script to
+        run is the rewritten one prepared in __init__.
+        """
+        timed_out = False
+        start = time.time()
+        try:
+            proc = subprocess.run(
+                ["/bin/bash", self.eval_script_path],
+                cwd=self.worktree,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            timed_out = True
+            out = e.stdout or b""
+            err = e.stderr or b""
+            output = (
+                out.decode("utf-8", "replace") if isinstance(out, bytes) else (out or "")
+            ) + (
+                err.decode("utf-8", "replace") if isinstance(err, bytes) else (err or "")
+            )
+        runtime = time.time() - start
+
+        # Collect result artifacts (exit code, test output) from the worktree
+        # into log_dir, mirroring the Docker backend's copy_from_container step.
+        if self.files_to_collect:
+            for fname in self.files_to_collect:
+                src = Path(self.worktree) / fname
+                if src.exists():
+                    shutil.copyfile(src, self.log_dir / fname)
+        return output, timed_out, runtime
+
+    def __exit__(
+        self,
+        exctype: Optional[Type[BaseException]],
+        excinst: Optional[BaseException],
+        exctb: Optional[TracebackType],
+    ) -> None:
+        # Remove the worktree from git's registry, then delete the scratch root.
+        try:
+            subprocess.run(
+                ["git", "-C", self.repo_dir, "worktree", "remove", "--force",
+                 self.worktree],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception as e:  # noqa: BLE001 - best-effort cleanup
+            self.logger.debug("worktree remove failed: %s", e)
+        shutil.rmtree(self.work_root, ignore_errors=True)
+        # Prune any dangling worktree admin entry so the repo stays clean.
+        try:
+            subprocess.run(
+                ["git", "-C", self.repo_dir, "worktree", "prune"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         close_logger(self.logger)
 
 
