@@ -12,6 +12,7 @@ from commit0.harness.constants import (
     SimpleInstance,
 )
 from commit0.harness.spec import Spec
+from commit0.harness.eval_hardening import revert_and_clean_lines
 from commit0.harness.dockerfiles.__init__rust import (
     get_dockerfile_base_rust,
     get_dockerfile_repo_rust,
@@ -116,21 +117,22 @@ class RustSpec(Spec):
             "rust-toolchain.toml",
             "xtask/",
         ]
-        revert_lines = []
-        for tgt in revert_targets:
-            revert_lines.append(
-                f"git checkout {base_commit} -- {tgt} 2>>revert_stderr.log || true"
-            )
-            revert_lines.append(
-                f"git checkout {base_commit} -- '**/{tgt}' 2>>revert_stderr.log || true"
-            )
-        # Also DELETE any build.rs / .cargo / .config / xtask the model ADDED that
-        # did not exist at base (git checkout only restores tracked paths; a newly
-        # added, untracked build.rs would survive the revert and still run).
-        revert_lines.append(
-            f"for _p in $(git diff --name-only --diff-filter=A {base_commit} -- "
-            "'**/build.rs' 'build.rs' '.cargo/**' '.config/**' 'xtask/**' 2>/dev/null); do "
-            'rm -rf "$_p" 2>/dev/null || true; done'
+        # Per-pathspec revert + delete of model-ADDED build files, via the shared
+        # hardened helper (same as every other language). This closes the two
+        # holes the old rust-inline version had: (a) it deleted added files with
+        # `git diff --diff-filter=A`, which can't see UNTRACKED files (a patch
+        # applied with `git apply` leaves adds untracked), so a model-added
+        # build.rs/.cargo survived; the helper uses `git ls-files --others`.
+        # (b) shlex-quoting + `-z` reads for path-with-space safety.
+        revert_lines = revert_and_clean_lines(
+            base_commit,
+            revert_targets=revert_targets,
+            delete_added_globs=[
+                "build.rs", "**/build.rs",
+                ".cargo", "**/.cargo",
+                ".config", "**/.config",
+                "xtask", "**/xtask",
+            ],
         )
         # Fail loudly (and force a non-passing result) if tests still differ.
         revert_lines.append(

@@ -150,3 +150,23 @@ def test_glob_revert_survives_model_added_sibling(tmp_path):
     assert (repo / "foo_test.go").read_text() == "REAL\n"    # reverted despite sibling
     assert not (repo / "evil_test.go").exists()              # added sibling deleted
     assert (repo / "src" / "lib.go").read_text() == "real impl\n"  # impl kept
+
+
+def test_rust_spec_uses_hardened_delete_not_buggy_diff_filter():
+    """spec_rust must route its revert+delete through revert_and_clean_lines
+    (git ls-files --others), NOT its old inline `git diff --diff-filter=A` loop
+    which silently missed model-added UNTRACKED build.rs/.cargo files."""
+    import json
+    from pathlib import Path
+    from commit0.harness.spec_rust import make_rust_spec
+    ds = Path("seize_dataset.json")
+    if not ds.exists():
+        import pytest
+        pytest.skip("seize_dataset.json not present")
+    e = json.load(open(ds))[0]
+    sc = make_rust_spec(e, absolute=False).eval_script
+    assert "ls-files --others" in sc, "rust delete not routed through helper"
+    assert "for _p in $(git diff --name-only --diff-filter=A" not in sc, \
+        "rust still uses the buggy untracked-blind delete loop"
+    # rust-specific pieces must survive the refactor:
+    assert "kaiju_impl" in sc and "CHEAT-GUARD" in sc
