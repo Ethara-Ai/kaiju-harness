@@ -92,6 +92,15 @@ class RustSpec(Spec):
         # aborted -- silently leaving model-edited tests in place. Revert each
         # pathspec independently so a miss can't poison the rest, then VERIFY the
         # security-critical test dirs actually match base.
+        # Anti-cheat revert allowlist. Beyond test dirs + manifests we also reset
+        # every file that can change WHAT or HOW tests run at build/run time, so a
+        # model can't neuter the suite without editing a scored source file:
+        #   build.rs / */build.rs   -> arbitrary build-time code (cargo auto-runs it)
+        #   .cargo/                  -> rustflags, custom test runner, target dir
+        #   .config/nextest.toml     -> nextest filters / skip / retry / slow-timeout
+        #   rust-toolchain(.toml)    -> pin a toolchain that skips/passes tests
+        #   xtask/                   -> a `cargo xtask test` shim some crates use
+        #   .cargo/config(.toml)     -> alias `test` to a no-op
         revert_targets = [
             "tests/",
             "benches/",
@@ -100,6 +109,12 @@ class RustSpec(Spec):
             ".env",
             ".gitmodules",
             ".gitattributes",
+            "build.rs",
+            ".cargo/",
+            ".config/",
+            "rust-toolchain",
+            "rust-toolchain.toml",
+            "xtask/",
         ]
         revert_lines = []
         for tgt in revert_targets:
@@ -109,11 +124,45 @@ class RustSpec(Spec):
             revert_lines.append(
                 f"git checkout {base_commit} -- '**/{tgt}' 2>>revert_stderr.log || true"
             )
+        # Also DELETE any build.rs / .cargo / .config / xtask the model ADDED that
+        # did not exist at base (git checkout only restores tracked paths; a newly
+        # added, untracked build.rs would survive the revert and still run).
+        revert_lines.append(
+            f"for _p in $(git diff --name-only --diff-filter=A {base_commit} -- "
+            "'**/build.rs' 'build.rs' '.cargo/**' '.config/**' 'xtask/**' 2>/dev/null); do "
+            'rm -rf "$_p" 2>/dev/null || true; done'
+        )
         # Fail loudly (and force a non-passing result) if tests still differ.
         revert_lines.append(
             f"if ! git diff --quiet {base_commit} -- tests/ '**/tests/' 2>/dev/null; then "
             f"echo 'CHEAT-GUARD: tests/ still differs from base after revert' >&2; fi"
         )
+
+        # In-src `#[cfg(test)]` restore. Unit tests living INSIDE src/*.rs are not
+        # covered by the tests/ revert, yet the model only ever needs to implement
+        # stubs — never touch test code. For each src file that has an in-src test
+        # module at base, keep the model's impl but reset the test module (from the
+        # first `#[cfg(test)]` to EOF — the universal Rust convention) to base. If
+        # the model changed a signature the base tests need, this yields a genuine
+        # COMPILE_FAILED (correct — signatures must not change).
+        insrc_restore = (
+            f"for f in $(git diff --name-only {base_commit} -- 'src/*.rs' 'src/**/*.rs' 2>/dev/null); do\n"
+            '  [ -f "$f" ] || continue\n'
+            f'  base_ln=$(git show {base_commit}:"$f" 2>/dev/null | '
+            "grep -nE '^[[:space:]]*#\\[cfg\\(test\\)\\]' | head -1 | cut -d: -f1)\n"
+            '  [ -z "$base_ln" ] && continue\n'
+            "  model_ln=$(grep -nE '^[[:space:]]*#\\[cfg\\(test\\)\\]' \"$f\" | head -1 | cut -d: -f1)\n"
+            '  if [ -n "$model_ln" ] && [ "$model_ln" -gt 1 ]; then\n'
+            '    head -n $((model_ln-1)) "$f" > "$f.kaiju_impl" 2>/dev/null || continue\n'
+            '  else\n'
+            '    : > "$f.kaiju_impl"\n'
+            '    [ -z "$model_ln" ] && cp "$f" "$f.kaiju_impl"\n'
+            '  fi\n'
+            f'  git show {base_commit}:"$f" 2>/dev/null | tail -n +"$base_ln" >> "$f.kaiju_impl"\n'
+            '  mv "$f.kaiju_impl" "$f"\n'
+            "done"
+        )
+        revert_lines.append(insrc_restore)
         revert_test_paths = "\n".join(revert_lines)
 
         return [
