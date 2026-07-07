@@ -1116,6 +1116,11 @@ def run_rust_agent(
 
     Filters dataset by ``RUST_SPLIT`` instead of ``SPLIT``.
     Spawns a multiprocessing pool of ``run_rust_agent_for_repo`` workers.
+
+    Note: fully-containerized runs do not go through a flag here — the whole
+    pipeline (this agent + eval) runs inside the repo image via
+    ``agent.container.run_pipeline_containerized``, which invokes this same code
+    path with KAIJU_IN_CONTAINER=1.
     """
     agent_config = load_agent_config(agent_config_file)
 

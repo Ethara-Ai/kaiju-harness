@@ -1,0 +1,183 @@
+"""Run the FULL local rust trajectory pipeline INSIDE the repo image container.
+
+This is Option A: the exact `run_pipeline_rust.sh` (all 3 stages draft->lint->test,
+per-stage eval, RESULTS_JSON, consolidated outputs/<dataset-id>/ structure) runs
+inside the isolated container. Nothing on the host runs the agent, cargo, or eval.
+
+Host does only Docker orchestration:
+  1. build the agent image (repo image + python + aider + kaiju code),
+  2. start one container with the bridge/git/UUID env,
+  3. run `run_pipeline_rust.sh --backend local_inplace` in it (KAIJU_IN_CONTAINER=1
+     makes the pipeline skip the docker build + docker preflight and eval via the
+     local_inplace git-worktree backend — no docker-in-docker),
+  4. copy the produced outputs/<dataset-id>/ tree back to the host,
+  5. remove the container.
+
+Usage:
+  python -m agent.container.run_pipeline_containerized \
+      --dataset evmap_dataset.json --repo-split evmap \
+      [--model anthropic/claude-opus-4-8] [--pipeline-args "--max-iteration 1"]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import shlex
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                    format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("pipeline_container")
+
+DEFAULT_BRIDGE_URL = "http://host.docker.internal:8765"
+
+
+def _extra_hosts():
+    """Map host.docker.internal to the host gateway on Linux so the container can
+    reach the host bridge. Mac/Windows Docker Desktop resolve it natively.
+    """
+    import platform
+    if platform.system() == "Linux":
+        return {"host.docker.internal": "host-gateway"}
+    return None
+
+
+def _stream_exec(client, container_id: str, cmd: str, workdir: str = "/opt/kaiju") -> int:
+    """Run a command in the container, streaming stdout+stderr live; return exit code."""
+    exec_id = client.api.exec_create(
+        container_id, cmd, workdir=workdir, tty=False,
+    )["Id"]
+    for chunk in client.api.exec_start(exec_id, stream=True, demux=False):
+        if chunk:
+            sys.stdout.write(chunk.decode("utf-8", "replace"))
+            sys.stdout.flush()
+    return client.api.exec_inspect(exec_id).get("ExitCode", 1)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dataset", required=True, help="Path to the rust dataset JSON")
+    ap.add_argument("--repo-split", required=True, help="Repo split / repo name (e.g. evmap)")
+    ap.add_argument("--model", default="anthropic/claude-opus-4-8")
+    ap.add_argument("--bridge-url",
+                    default=os.environ.get("KAIJU_CC_BRIDGE_URL", DEFAULT_BRIDGE_URL),
+                    help="Bridge URL reachable from the container")
+    ap.add_argument("--pipeline-args", default="",
+                    help="Extra args passed through to run_pipeline_rust.sh")
+    ap.add_argument("--eval-timeout", type=int, default=10800,
+                    help="Hard cap (s) for the whole in-container pipeline")
+    ap.add_argument("--rebuild-agent-image", action="store_true")
+    ap.add_argument("--keep-container", action="store_true",
+                    help="Do not remove the container on exit (for debugging)")
+    args = ap.parse_args(argv)
+
+    import docker
+    from commit0.harness.spec_rust import make_rust_spec
+    from commit0.harness.docker_utils import (
+        create_container, copy_to_container, copy_from_container, cleanup_container,
+    )
+    from agent.container.agent_image import build_agent_image
+
+    dataset = json.loads(Path(args.dataset).read_text())
+    example = dataset[0] if isinstance(dataset, list) else dataset
+    repo_name = example["repo"].split("/")[-1]
+    dataset_id = example.get("id")
+    if not dataset_id:
+        logger.error("Dataset entry has no 'id' — the pipeline keys outputs/<id> on it.")
+        return 2
+    spec = make_rust_spec(example, absolute=True)
+
+    client = docker.from_env()
+    agent_tag = build_agent_image(
+        client, spec.repo_image_key, logger, rebuild=args.rebuild_agent_image)
+
+    env = {
+        # Bridge (Anthropic-shaped; pipeline does NOT need --use-claude-code —
+        # litellm reads ANTHROPIC_API_BASE directly).
+        "ANTHROPIC_API_BASE": args.bridge_url,
+        "ANTHROPIC_API_KEY": os.environ.get("KAIJU_CC_BRIDGE_SECRET", "kaiju-cc-stub"),
+        # git identity so aider can commit (no global gitconfig in the image).
+        "GIT_AUTHOR_NAME": "Kaiju Agent", "GIT_AUTHOR_EMAIL": "agent@kaiju.local",
+        "GIT_COMMITTER_NAME": "Kaiju Agent", "GIT_COMMITTER_EMAIL": "agent@kaiju.local",
+        # Container-mode: pipeline skips docker build + docker preflight.
+        "KAIJU_IN_CONTAINER": "1",
+        "KAIJU_EXPERIMENT_UUID": dataset_id,
+        "KAIJU_LOG_LAYOUT": "consolidated",
+    }
+
+    container = None
+    rc = 1
+    try:
+        container = create_container(
+            client=client, image_name=agent_tag,
+            container_name=f"kaiju.pipeline.{repo_name}.{dataset_id[:8]}".lower(),
+            logger=logger, environment=env, extra_hosts=_extra_hosts(),
+        )
+        container.start()
+
+        # Copy the dataset in and expose /testbed as repos/<name> (the pipeline
+        # expects the checkout under REPO_BASE=./repos).
+        # NOTE: copy_to_container lands the file at {dst.parent}/{src.name}, so the
+        # staged source MUST be named exactly as the destination basename.
+        with tempfile.TemporaryDirectory() as td:
+            staged_ds = Path(td) / "dataset.json"
+            staged_ds.write_text(Path(args.dataset).read_text(), encoding="utf-8")
+            copy_to_container(container, staged_ds, Path("/opt/kaiju/dataset.json"))
+        # aider commits via `git config --get user.name` (reads git CONFIG, not the
+        # GIT_AUTHOR_* env) — set a global identity or every auto-commit fails and
+        # git_patch comes out empty. Then expose /testbed as repos/<name>.
+        setup = (
+            'git config --global user.name "Kaiju Agent" && '
+            'git config --global user.email "agent@kaiju.local" && '
+            "cd /opt/kaiju && mkdir -p repos && ln -sfn /testbed repos/"
+            + shlex.quote(repo_name)
+        )
+        _stream_exec(client, container.id, f"bash -c {shlex.quote(setup)}")
+
+        pipeline_cmd = (
+            "cd /opt/kaiju && bash run_pipeline_rust.sh "
+            f"--model {shlex.quote(args.model)} "
+            "--dataset dataset.json "
+            f"--repo-split {shlex.quote(args.repo_split)} "
+            "--backend local_inplace "
+            + args.pipeline_args
+        )
+        logger.info("Running pipeline in container %s:\n  %s", container.name, pipeline_cmd)
+        start = time.time()
+        rc = _stream_exec(client, container.id, f"bash -c {shlex.quote(pipeline_cmd)}")
+        logger.info("Pipeline exited rc=%s after %.0fs", rc, time.time() - start)
+
+        # Copy outputs/<dataset-id>/ back to the host (merge into any existing dir).
+        host_out = Path("outputs") / dataset_id
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                staged = Path(td) / dataset_id
+                copy_from_container(
+                    container, Path(f"/opt/kaiju/outputs/{dataset_id}"), staged)
+                shutil.copytree(staged, host_out, dirs_exist_ok=True)
+            logger.info("Copied outputs to %s", host_out.resolve())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not copy outputs/%s: %s", dataset_id, e)
+    finally:
+        if container is not None and not args.keep_container:
+            try:
+                cleanup_container(client, container, logger)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("cleanup failed: %s", e)
+        elif container is not None:
+            logger.info("Left container %s running (--keep-container)", container.name)
+
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

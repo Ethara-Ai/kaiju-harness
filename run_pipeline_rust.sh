@@ -426,7 +426,13 @@ preflight() {
 
     # timeout is used for eval and API probe (not for agent runs — watchdog handles those)
     # Item 10: cargo+rustc on PATH so toolchain issues surface in preflight, not mid-stage.
-    for cmd in jq bc timeout cargo rustc docker; do
+    # In-container: docker itself is not present (and not needed — eval uses the
+    # local_inplace worktree backend, the repo image is the sandbox).
+    local _required_cmds=(jq bc timeout cargo rustc docker)
+    if [[ "${KAIJU_IN_CONTAINER:-0}" == "1" ]]; then
+        _required_cmds=(jq bc timeout cargo rustc)
+    fi
+    for cmd in "${_required_cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: Required command '$cmd' not found"
             errors=$((errors + 1))
@@ -436,7 +442,8 @@ preflight() {
     # Docker DAEMON liveness check. CLI presence alone is insufficient — on macOS the
     # Docker socket is missing until Docker Desktop is actively running, and silent
     # failure here causes pipelines to waste LLM budget on no-op eval cycles.
-    if command -v docker &>/dev/null; then
+    # Skipped in-container (no docker daemon; eval runs via local_inplace).
+    if [[ "${KAIJU_IN_CONTAINER:-0}" != "1" ]] && command -v docker &>/dev/null; then
         if ! docker info &>/dev/null; then
             echo "Error: Docker daemon not reachable. Start Docker Desktop and retry."
             echo "       (docker info returned non-zero; socket likely missing)"
@@ -1279,6 +1286,15 @@ _pipeline_build_done="false"
 
 run_build_once() {
     if [[ "$_pipeline_build_done" == "true" ]]; then
+        return 0
+    fi
+    # Containerized run: the pipeline is ALREADY executing inside the repo image
+    # (the sandbox), and eval uses the local_inplace backend (a git worktree, no
+    # nested container). There is no docker daemon to build with, so skip the
+    # image build entirely. See scripts/run_pipeline_rust_container.sh.
+    if [[ "${KAIJU_IN_CONTAINER:-0}" == "1" ]]; then
+        log "  [in-container] Skipping docker image build (image is the sandbox)."
+        _pipeline_build_done="true"
         return 0
     fi
     log "  Ensuring Docker images for eval are built (one-time per pipeline run)..."
