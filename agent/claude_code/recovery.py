@@ -130,9 +130,23 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
         if cls.__name__ == "RateLimitError" and cls.__module__.startswith("openai"):
             return True
     msg = str(exc).lower()
-    return ("rate_limit_error" in msg
+    if ("rate_limit_error" in msg
             or "subscription_cap" in msg
-            or "ratelimiterror" in msg)
+            or "ratelimiterror" in msg):
+        return True
+    # Bridge "all accounts exhausted" signal: when every account in a
+    # multi-account pool is capped, the bridge short-circuits with a 401
+    # authentication_error whose body carries kind="credentials_unavailable"
+    # and a message "all N accounts exhausted; soonest reset in Xs". That is a
+    # CAP condition a pause-and-resume WILL fix (wait for the soonest reset via
+    # /quota), NOT a real auth failure. Without this, parallel requests that
+    # arrive while the pool is already fully capped get this 401 and terminate
+    # instead of waiting (only the request that TRIGGERS the last cap sees a
+    # real subscription_cap and pauses). Kept narrow to the bridge's distinctive
+    # phrasing so a genuine bad-token 401 still fails fast rather than pausing.
+    return ("accounts exhausted" in msg
+            or "credentials_unavailable" in msg
+            or "credentials unavailable" in msg)
 
 
 # --------------------------------------------------------------------------
