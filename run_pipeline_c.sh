@@ -290,6 +290,13 @@ EOF
         fi
     fi
 
+    # Containerized run: the repo is already the image's /testbed checkout and
+    # eval uses local_inplace (no docker), so skip the host clone + docker build.
+    if [[ "${KAIJU_IN_CONTAINER:-0}" == "1" ]]; then
+        log "  [in-container] Skipping commit0-c setup + build (image is the sandbox)."
+        return 0
+    fi
+
     log "Preflight: running 'commit0-c setup ${REPO_SPLIT}'"
     "$VENV_PYTHON" -m commit0.cli_c setup "$REPO_SPLIT" \
         --dataset-name "$DATASET_FILE" \

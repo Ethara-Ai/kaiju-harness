@@ -50,6 +50,31 @@ def _extra_hosts():
     return None
 
 
+# language -> (spec module, spec factory, pipeline script, in-container repo base)
+LANG_REGISTRY = {
+    "rust":   ("spec_rust", "make_rust_spec", "run_pipeline_rust.sh", "repos"),
+    "python": ("spec",      "make_spec",      "run_pipeline.sh",      "repos"),
+    "go":     ("spec_go",   "make_go_spec",   "run_pipeline_go.sh",   "repos"),
+    "js":     ("spec_js",   "make_js_spec",   "run_pipeline_js.sh",   "repos_js"),
+    "ts":     ("spec_ts",   "make_ts_spec",   "run_pipeline_ts.sh",   "repos_ts"),
+    "java":   ("spec_java", "make_java_spec", "run_pipeline_java.sh", "repos/java"),
+    "c":      ("spec_c",    "make_c_spec",    "run_pipeline_c.sh",    "repos"),
+    "cpp":    ("spec_cpp",  "make_cpp_spec",  "run_pipeline_cpp.sh",  "repos"),
+}
+
+
+def _make_spec(language: str, example: dict):
+    """Build the language's Spec (for repo_image_key) via its factory."""
+    import importlib
+    mod, fac, _, _ = LANG_REGISTRY[language]
+    factory = getattr(importlib.import_module(f"commit0.harness.{mod}"), fac)
+    try:
+        return factory(example, absolute=True)
+    except TypeError:
+        # commit0/python make_spec(instance, dataset_type, absolute).
+        return factory(example, "commit0", True)
+
+
 def _stream_exec(client, container_id: str, cmd: str, workdir: str = "/opt/kaiju") -> int:
     """Run a command in the container, streaming stdout+stderr live; return exit code."""
     exec_id = client.api.exec_create(
@@ -65,7 +90,9 @@ def _stream_exec(client, container_id: str, cmd: str, workdir: str = "/opt/kaiju
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", required=True, help="Path to the rust dataset JSON")
+    ap.add_argument("--language", default="rust", choices=sorted(LANG_REGISTRY),
+                    help="Which language pipeline to run inside the container")
+    ap.add_argument("--dataset", required=True, help="Path to the dataset JSON")
     ap.add_argument("--repo-split", required=True, help="Repo split / repo name (e.g. evmap)")
     ap.add_argument("--model", default="anthropic/claude-opus-4-8")
     ap.add_argument("--bridge-url",
@@ -81,11 +108,12 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     import docker
-    from commit0.harness.spec_rust import make_rust_spec
     from commit0.harness.docker_utils import (
         create_container, copy_to_container, copy_from_container, cleanup_container,
     )
     from agent.container.agent_image import build_agent_image
+
+    _spec_mod, _spec_fac, pipeline_script, repo_base = LANG_REGISTRY[args.language]
 
     dataset = json.loads(Path(args.dataset).read_text())
     example = dataset[0] if isinstance(dataset, list) else dataset
@@ -94,7 +122,7 @@ def main(argv=None) -> int:
     if not dataset_id:
         logger.error("Dataset entry has no 'id' — the pipeline keys outputs/<id> on it.")
         return 2
-    spec = make_rust_spec(example, absolute=True)
+    spec = _make_spec(args.language, example)
 
     client = docker.from_env()
     agent_tag = build_agent_image(
@@ -135,16 +163,17 @@ def main(argv=None) -> int:
         # aider commits via `git config --get user.name` (reads git CONFIG, not the
         # GIT_AUTHOR_* env) — set a global identity or every auto-commit fails and
         # git_patch comes out empty. Then expose /testbed as repos/<name>.
+        link = f"{repo_base}/{repo_name}"
         setup = (
             'git config --global user.name "Kaiju Agent" && '
             'git config --global user.email "agent@kaiju.local" && '
-            "cd /opt/kaiju && mkdir -p repos && ln -sfn /testbed repos/"
-            + shlex.quote(repo_name)
+            f"cd /opt/kaiju && mkdir -p {shlex.quote(repo_base)} && "
+            f"ln -sfn /testbed {shlex.quote(link)}"
         )
         _stream_exec(client, container.id, f"bash -c {shlex.quote(setup)}")
 
         pipeline_cmd = (
-            "cd /opt/kaiju && bash run_pipeline_rust.sh "
+            f"cd /opt/kaiju && bash {pipeline_script} "
             f"--model {shlex.quote(args.model)} "
             "--dataset dataset.json "
             f"--repo-split {shlex.quote(args.repo_split)} "

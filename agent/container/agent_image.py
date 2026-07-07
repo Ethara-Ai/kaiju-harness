@@ -32,7 +32,10 @@ CONTEXT_INCLUDE = [
     "kaiju",
     "kaiju_harbor",
     "scripts",              # pipeline sources scripts/*.sh (_outputs_layout, etc.)
-    "run_pipeline_rust.sh",  # the full trajectory pipeline runs INSIDE the container
+    # The full trajectory pipeline (per language) runs INSIDE the container.
+    "run_pipeline.sh", "run_pipeline_rust.sh", "run_pipeline_go.sh",
+    "run_pipeline_js.sh", "run_pipeline_ts.sh", "run_pipeline_java.sh",
+    "run_pipeline_c.sh", "run_pipeline_cpp.sh",
     "pyproject.toml",
     "uv.lock",
     "README.md",
