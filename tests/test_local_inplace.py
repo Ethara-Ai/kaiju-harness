@@ -317,3 +317,30 @@ def test_model_added_build_rs_is_removed(tmp_path):
                       ["cargo_test_exit_code.txt"]) as ctx:
         ctx.exec_run_with_timeout("/bin/bash /eval.sh")
     assert _exit_code(log_dir) == 0  # build.rs gone -> `! test -e build.rs` succeeds
+
+
+def test_collect_handles_directory_and_nested_paths(tmp_path):
+    """files_to_collect may include a DIRECTORY (e.g. Java's report dir) and
+    NESTED paths — LocalInplace must copy both without crashing (copyfile alone
+    fails on dirs / missing parents)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    (repo / "src" / "lib.rs").write_text("PASS\n")
+    (repo / "tests").mkdir()
+    # test_cmd creates a report DIR + a nested file in the worktree at eval time.
+    tc = ("bash -c 'mkdir -p reports/sub && echo ok > reports/sub/r.xml && "
+          "echo 0 > nested/exit.txt 2>/dev/null || (mkdir -p nested && echo 0 > nested/exit.txt)'")
+    base = _commit_all(repo, "base")
+
+    spec = _build_spec(repo, base, test_cmd=tc)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    files = _prepare_files(tmp_path, repo, spec, base, base)
+    with LocalInplace(spec, logger, 60, 1, log_dir, files,
+                      ["reports", "nested/exit.txt", "cargo_test_exit_code.txt"]) as ctx:
+        ctx.exec_run_with_timeout("/bin/bash /eval.sh")
+
+    # Directory collected recursively; nested file collected with parent created.
+    assert (log_dir / "reports" / "sub" / "r.xml").read_text() == "ok\n"
+    assert (log_dir / "nested" / "exit.txt").read_text().strip() == "0"

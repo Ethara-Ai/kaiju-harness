@@ -195,6 +195,7 @@ def _eval_single_repo(
     patch_path: str,
     timeout: int,
     num_cpus: int,
+    backend: str = "local",
 ) -> Tuple[str, float, int, int]:
     repo_name = instance.get("repo", instance.get("instance_id", "unknown"))
     short_name = repo_name.split("/")[-1] if "/" in repo_name else repo_name
@@ -313,6 +314,7 @@ def evaluate_java_repos(
                 pp,
                 timeout,
                 num_cpus,
+                backend,
             ): name
             for name, (inst, pp) in patch_map.items()
         }

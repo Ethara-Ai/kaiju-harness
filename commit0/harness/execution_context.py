@@ -293,13 +293,28 @@ class LocalInplace(ExecutionContext):
             )
         runtime = time.time() - start
 
-        # Collect result artifacts (exit code, test output) from the worktree
-        # into log_dir, mirroring the Docker backend's copy_from_container step.
+        # Collect result artifacts from the worktree into log_dir, mirroring the
+        # Docker backend's copy_from_container (dst = log_dir / fname). Handle the
+        # cases copy_from_container does but a naive copyfile does not:
+        #   - a DIRECTORY collect target (e.g. Java's target/surefire-reports),
+        #   - a NESTED path whose dst parent doesn't exist yet,
+        #   - an ABSOLUTE fname (e.g. JS's /tmp/test_results.json) where
+        #     log_dir / fname == the absolute source -> skip (already in place),
+        #     matching the Docker backend's effective no-op.
         if self.files_to_collect:
             for fname in self.files_to_collect:
                 src = Path(self.worktree) / fname
-                if src.exists():
-                    shutil.copyfile(src, self.log_dir / fname)
+                if not src.exists():
+                    continue
+                dst = self.log_dir / fname
+                try:
+                    if src.is_dir():
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
+                    elif src.resolve() != dst.resolve():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(src, dst)
+                except Exception as e:  # noqa: BLE001 - best-effort artifact collection
+                    self.logger.debug("LocalInplace: collect %s failed: %s", fname, e)
         return output, timed_out, runtime
 
     def __exit__(

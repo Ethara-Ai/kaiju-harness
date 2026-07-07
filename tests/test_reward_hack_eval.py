@@ -39,10 +39,14 @@ def test_injected_ok_lines_detected():
     assert "exceeds libtest summary" in reason
 
 
-def test_claimed_allpass_with_failure_exit_detected():
+def test_clean_output_with_nonzero_exit_not_flagged():
+    """A genuine run where all parsed tests passed but cargo exited non-zero
+    (e.g. a bench/doctest failed to compile, or a post-run coverage gate) must
+    NOT be flagged — exit-code reconciliation was dropped to avoid this false
+    positive; only structural forgery (injected lines/summaries) is flagged."""
     reason = _detect_result_injection(_CLEAN, exit_code=101,
                                       parsed_passed=2, parsed_total=2)
-    assert "exited 101" in reason
+    assert reason == ""
 
 
 def test_forged_summary_line_detected():
@@ -132,3 +136,15 @@ def test_cpp_clean_run_scores_normally(tmp_path, monkeypatch):
     ecpp._aggregate_cpp_results(str(tmp_path), "widget", out)
     assert out and out[0].get("status") == "TESTS_RAN"
     assert out[0]["num_passed"] == 2 and out[0]["passed"] == 1.0
+
+
+def test_cpp_more_tests_than_stale_canonical_not_flagged(tmp_path, monkeypatch):
+    """A legit run whose real suite exceeds a stale canonical bz2 (all passing,
+    exit 0) must NOT be flagged — observed > canonical is benign."""
+    monkeypatch.setattr(ecpp, "_expected_test_count", lambda name: 10)  # stale/small
+    (tmp_path / "test_output.txt").write_text(_gtest(15))  # 15 real passes
+    (tmp_path / "test_exit_code.txt").write_text("0")      # genuine all-pass
+    out: list = []
+    ecpp._aggregate_cpp_results(str(tmp_path), "widget", out)
+    assert out and out[0].get("status") == "TESTS_RAN"
+    assert out[0]["passed"] == 1.0  # not zeroed
