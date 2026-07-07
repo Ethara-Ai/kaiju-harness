@@ -81,3 +81,54 @@ def test_aggregate_clean_run_scores_normally(tmp_path):
     _aggregate_rust_results(str(log_dir), "foo", out, expected_tests=None)
     assert out and out[0]["status"] == "TESTS_RAN"
     assert out[0]["num_passed"] == 2 and out[0]["passed"] == 1.0
+
+
+# --------------------------------------------------------------------------
+# C++ stdout-injection defense (evaluate_cpp): the count comes from raw stdout
+# (GTest [ OK ] lines), so it's anchored to the canonical count + exit code.
+# --------------------------------------------------------------------------
+import commit0.harness.evaluate_cpp as ecpp
+
+
+def _gtest(n_ok: int) -> str:
+    lines = ["[==========] Running tests from 1 test suite.",
+             "[----------] Global test environment set-up.",
+             "[----------] %d tests from T" % n_ok]
+    for i in range(n_ok):
+        lines.append("[ RUN      ] T.t%d" % i)
+        lines.append("[       OK ] T.t%d (0 ms)" % i)
+    lines.append("[----------] %d tests from T (1 ms total)" % n_ok)
+    lines.append("[==========] %d tests from 1 test suite ran. (1 ms total)" % n_ok)
+    lines.append("[  PASSED  ] %d tests." % n_ok)
+    return "\n".join(lines) + "\n"
+
+
+def test_cpp_forged_gtest_output_flagged(tmp_path, monkeypatch):
+    # Canonical suite has 2 tests; forged output claims 10 passes.
+    monkeypatch.setattr(ecpp, "_expected_test_count", lambda name: 2)
+    (tmp_path / "test_output.txt").write_text(_gtest(10))
+    (tmp_path / "test_exit_code.txt").write_text("1")  # real run failed
+    out: list = []
+    ecpp._aggregate_cpp_results(str(tmp_path), "widget", out)
+    assert out and out[0].get("status") == "CHEAT_DETECTED"
+    assert out[0]["passed"] == 0.0 and out[0]["num_passed"] == 0
+
+
+def test_cpp_allpass_with_failure_exit_flagged(tmp_path, monkeypatch):
+    # Reports exactly the canonical count as passed, but the process failed.
+    monkeypatch.setattr(ecpp, "_expected_test_count", lambda name: 2)
+    (tmp_path / "test_output.txt").write_text(_gtest(2))
+    (tmp_path / "test_exit_code.txt").write_text("1")
+    out: list = []
+    ecpp._aggregate_cpp_results(str(tmp_path), "widget", out)
+    assert out and out[0].get("status") == "CHEAT_DETECTED"
+
+
+def test_cpp_clean_run_scores_normally(tmp_path, monkeypatch):
+    monkeypatch.setattr(ecpp, "_expected_test_count", lambda name: 2)
+    (tmp_path / "test_output.txt").write_text(_gtest(2))
+    (tmp_path / "test_exit_code.txt").write_text("0")  # genuine all-pass
+    out: list = []
+    ecpp._aggregate_cpp_results(str(tmp_path), "widget", out)
+    assert out and out[0].get("status") == "TESTS_RAN"
+    assert out[0]["num_passed"] == 2 and out[0]["passed"] == 1.0

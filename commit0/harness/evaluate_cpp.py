@@ -222,11 +222,32 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
     num_passed = summary.get("passed", 0)
     num_tests = summary.get("total", 0)
     framework = summary.get("framework", "unknown")
-    if framework == "unknown" and num_tests <= 1:
-        expected = _expected_test_count(name)
-        if expected > 0:
-            num_tests = expected
+    # Reward-hacking guard: C++ counts from RAW STDOUT (GTest `[ OK ]`, Catch2,
+    # doctest, ...), so a model whose code prints fake pass lines could inflate
+    # num_passed. Anchor to the canonical test inventory + the process exit code
+    # (both unforgeable by stdout) and flag forged output as CHEAT_DETECTED.
+    expected = _expected_test_count(name)
+    if framework == "unknown" and num_tests <= 1 and expected > 0:
+        num_tests = expected
+    cheat_reason = ""
+    if expected > 0 and num_passed > expected:
+        # More reported passes than the canonical suite even has -> injected.
+        cheat_reason = (f"observed {num_passed} passes > {expected} canonical "
+                        f"tests (forged test output)")
+    elif exit_code not in (0, None) and num_tests > 0 and num_passed >= num_tests:
+        # Claims everything passed, yet the build+test process exited non-zero.
+        cheat_reason = (f"claimed {num_passed}/{num_tests} passed but the run "
+                        f"exited {exit_code} (a genuine all-pass exits 0)")
+    if expected > 0:
+        num_tests = max(num_tests, expected)  # canonical denominator (ceiling)
+        num_passed = min(num_passed, num_tests)
     total_runtime = sum(t.get("duration", 0) for t in tests)
+    status = "TESTS_RAN"
+    if cheat_reason:
+        status = "CHEAT_DETECTED"
+        num_passed = 0
+        logger.warning("%s: CHEAT_DETECTED — forged C++ test output: %s",
+                       name, cheat_reason)
     passed_rate = num_passed / num_tests if num_tests > 0 else 0.0
 
     if total_test_binaries > 0:
@@ -246,6 +267,7 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
             "passed": passed_rate,
             "num_passed": num_passed,
             "num_tests": num_tests,
+            "status": status,
         }
     )
 
