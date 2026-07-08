@@ -37,7 +37,20 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                     format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("pipeline_container")
 
-DEFAULT_BRIDGE_URL = "http://host.docker.internal:8765"
+DEFAULT_BRIDGE_URL = "http://host.docker.internal:8765"          # Anthropic/Claude Code
+DEFAULT_CODEX_BRIDGE_URL = "http://host.docker.internal:8788"    # OpenAI Codex
+
+
+def _default_bridge_url(model: str) -> str:
+    """Pick the subscription-bridge URL a model needs, so callers don't have to
+    pass --bridge-url. OpenAI/Codex -> :8788, Anthropic/Claude -> :8765, and
+    Vertex/Bedrock/Gemini -> '' (no bridge; they use forwarded host creds).
+    Env overrides: KAIJU_CODEX_BRIDGE_URL / KAIJU_CC_BRIDGE_URL."""
+    if model.startswith("openai/") or model.startswith("gpt"):
+        return os.environ.get("KAIJU_CODEX_BRIDGE_URL", DEFAULT_CODEX_BRIDGE_URL)
+    if "claude" in model and not model.startswith(("bedrock/", "vertex_ai")):
+        return os.environ.get("KAIJU_CC_BRIDGE_URL", DEFAULT_BRIDGE_URL)
+    return ""
 
 # Host credential env vars forwarded into the container when present, so the
 # containerized pipeline reaches the SAME providers the local run does (Vertex,
@@ -187,12 +200,12 @@ def main(argv=None) -> int:
     ap.add_argument("--dataset", required=True, help="Path to the dataset JSON")
     ap.add_argument("--repo-split", required=True, help="Repo split / repo name (e.g. evmap)")
     ap.add_argument("--model", default="anthropic/claude-opus-4-8")
-    ap.add_argument("--bridge-url",
-                    default=os.environ.get("KAIJU_CC_BRIDGE_URL", DEFAULT_BRIDGE_URL),
-                    help="Subscription-bridge URL reachable from the container "
-                         "(Anthropic 8765 / OpenAI-Codex 8788). Pass '' to use a "
-                         "real Anthropic/OpenAI key directly instead. Ignored for "
-                         "Vertex/Bedrock/Gemini (those use forwarded host creds).")
+    ap.add_argument("--bridge-url", default=None,
+                    help="Subscription-bridge URL reachable from the container. "
+                         "DEFAULT: auto per model — Anthropic :8765, OpenAI-Codex "
+                         ":8788, none for Vertex/Bedrock/Gemini. Pass '' to force a "
+                         "direct Anthropic/OpenAI key; only override to point at a "
+                         "non-standard host/port.")
     ap.add_argument("--pipeline-args", default="",
                     help="Extra args passed through to run_pipeline_rust.sh")
     ap.add_argument("--eval-timeout", type=int, default=10800,
@@ -271,13 +284,16 @@ def main(argv=None) -> int:
     }
     # Provider parity with the local pipeline: forward all host provider creds,
     # wire the bridge for anthropic/openai, and stage a Vertex/GCP key file.
-    _prov_env, _gac_src = _build_provider_env(args.model, args.bridge_url, logger)
+    # Resolve the bridge URL: explicit flag wins; otherwise auto per model.
+    bridge_url = (args.bridge_url if args.bridge_url is not None
+                  else _default_bridge_url(args.model))
+    _prov_env, _gac_src = _build_provider_env(args.model, bridge_url, logger)
     env.update(_prov_env)
-    _prov = "openai-bridge" if "OPENAI_API_BASE" in _prov_env and args.bridge_url else (
-        "anthropic-bridge" if "ANTHROPIC_API_BASE" in _prov_env and args.bridge_url
+    _prov = "openai-bridge" if "OPENAI_API_BASE" in _prov_env and bridge_url else (
+        "anthropic-bridge" if "ANTHROPIC_API_BASE" in _prov_env and bridge_url
         else "direct-creds")
-    logger.info("Provider wiring: model=%s mode=%s forwarded=%s%s",
-                args.model, _prov, sorted(_prov_env),
+    logger.info("Provider wiring: model=%s mode=%s bridge=%s forwarded=%s%s",
+                args.model, _prov, bridge_url or "(none)", sorted(_prov_env),
                 " +gcp-creds-file" if _gac_src else "")
 
     container = None
@@ -285,7 +301,7 @@ def main(argv=None) -> int:
     try:
         container = create_container(
             client=client, image_name=agent_tag,
-            container_name=f"kaiju.pipeline.{repo_name}.{dataset_id[:8]}".lower(),
+            container_name=f"kaiju.{repo_name}.{dataset_id[:6]}".lower(),
             logger=logger, environment=env, extra_hosts=_extra_hosts(),
         )
         container.start()
