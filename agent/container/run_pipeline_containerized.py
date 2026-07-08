@@ -27,6 +27,7 @@ import logging
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -39,6 +40,30 @@ logger = logging.getLogger("pipeline_container")
 
 DEFAULT_BRIDGE_URL = "http://host.docker.internal:8765"          # Anthropic/Claude Code
 DEFAULT_CODEX_BRIDGE_URL = "http://host.docker.internal:8788"    # OpenAI Codex
+
+
+_RESOLVE_MODEL_SH = (Path(__file__).resolve().parents[2]
+                     / "commit0" / "harness" / "resolve_model.sh")
+
+
+def _resolve_model_name(model_arg: str) -> str:
+    """Resolve a model ALIAS (e.g. 'gpt55', 'opus48cc', 'opus48v') to its full
+    name using the SAME resolve_model.sh the pipeline uses — so the orchestrator
+    detects the real provider (and bridge) even when the alias carries no
+    provider hint. Falls back to the arg unchanged (full names pass through)."""
+    if not _RESOLVE_MODEL_SH.is_file():
+        return model_arg
+    try:
+        out = subprocess.run(
+            ["bash", "-c",
+             f"source {shlex.quote(str(_RESOLVE_MODEL_SH))}; "
+             'resolve_model "$1" >/dev/null 2>&1; printf "%s" "${MODEL_NAME:-}"',
+             "_", model_arg],
+            capture_output=True, text=True, timeout=15,
+        )
+        return out.stdout.strip() or model_arg
+    except Exception:  # noqa: BLE001 - best-effort; fall back to the raw arg
+        return model_arg
 
 
 def _default_bridge_url(model: str) -> str:
@@ -284,10 +309,16 @@ def main(argv=None) -> int:
     }
     # Provider parity with the local pipeline: forward all host provider creds,
     # wire the bridge for anthropic/openai, and stage a Vertex/GCP key file.
+    # Resolve a model alias (gpt55, opus48cc, …) to its full name so provider
+    # detection sees the real provider. The pipeline gets the original arg and
+    # re-resolves it itself (keeping MODEL_SHORT / branch naming consistent).
+    resolved_model = _resolve_model_name(args.model)
+    if resolved_model != args.model:
+        logger.info("Model alias %r -> %s", args.model, resolved_model)
     # Resolve the bridge URL: explicit flag wins; otherwise auto per model.
     bridge_url = (args.bridge_url if args.bridge_url is not None
-                  else _default_bridge_url(args.model))
-    _prov_env, _gac_src = _build_provider_env(args.model, bridge_url, logger)
+                  else _default_bridge_url(resolved_model))
+    _prov_env, _gac_src = _build_provider_env(resolved_model, bridge_url, logger)
     env.update(_prov_env)
     _prov = "openai-bridge" if "OPENAI_API_BASE" in _prov_env and bridge_url else (
         "anthropic-bridge" if "ANTHROPIC_API_BASE" in _prov_env and bridge_url
@@ -301,7 +332,7 @@ def main(argv=None) -> int:
     try:
         container = create_container(
             client=client, image_name=agent_tag,
-            container_name=f"kaiju.{repo_name}.{dataset_id[:6]}".lower(),
+            container_name=f"kaiju.pipeline.{repo_name}.{dataset_id[:8]}".lower(),
             logger=logger, environment=env, extra_hosts=_extra_hosts(),
         )
         container.start()
