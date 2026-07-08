@@ -87,6 +87,40 @@ def _stream_exec(client, container_id: str, cmd: str, workdir: str = "/opt/kaiju
     return client.api.exec_inspect(exec_id).get("ExitCode", 1)
 
 
+def _copy_host_image_build_logs(spec, build_logs: Path, logger) -> list:
+    """Copy the host-built base + repo image build logs into ``build_logs`` so
+    ``outputs/<id>/build_logs`` is self-contained.
+
+    The base and repo images are built on the HOST by ``commit0 <lang> build``
+    BEFORE this containerized run (the container never rebuilds them — the repo
+    image IS its sandbox base), and those builds log to the legacy
+    ``logs/build_images/{base,repo}/<image-key>/`` (Dockerfile + build_image.log
+    + setup.sh). We copy them next to the agent-image build log we capture live.
+    Returns a list of (kind, key, dest_name) actually copied.
+    """
+    copied = []
+    root = Path("logs/build_images")
+    for kind, key in (
+        ("base", getattr(spec, "base_image_key", None)),
+        ("repo", getattr(spec, "repo_image_key", None)),
+    ):
+        if not key:
+            continue
+        # build dir name mirrors docker_build_*: image key with ':' -> '__'.
+        src = root / kind / key.replace(":", "__")
+        if not src.is_dir():
+            logger.info("%s image build log not found at %s (built elsewhere?)",
+                        kind, src)
+            continue
+        dst = build_logs / f"{kind}_image"
+        try:
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            copied.append((kind, key, dst.name))
+        except Exception as e:  # noqa: BLE001 - best-effort artifact copy
+            logger.warning("could not copy %s image build log %s: %s", kind, src, e)
+    return copied
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -132,11 +166,24 @@ def main(argv=None) -> int:
     # container run so the later outputs copy-out merges around it.
     build_logs = Path("outputs") / dataset_id / "build_logs"
     build_logs.mkdir(parents=True, exist_ok=True)
-    (build_logs / "images.txt").write_text(
-        f"repo_image: {spec.repo_image_key}\n"
-        f"(built on host; its docker build log is under logs/build_images/)\n",
-        encoding="utf-8",
-    )
+    # Make build_logs/ self-contained: copy the host base+repo image build logs
+    # (Dockerfile + build_image.log + setup.sh) in, alongside the agent-image
+    # build we capture live below.
+    _copied = _copy_host_image_build_logs(spec, build_logs, logger)
+    _img_lines = [
+        f"repo_image: {spec.repo_image_key}",
+        f"base_image: {getattr(spec, 'base_image_key', 'n/a')}",
+        "",
+    ]
+    if _copied:
+        _img_lines.append("Host image build logs copied into this dir:")
+        _img_lines += [f"  {kind}: {key} -> {name}/" for kind, key, name in _copied]
+    else:
+        _img_lines.append(
+            "(host image build logs not found under logs/build_images/ — the "
+            "repo/base images were built elsewhere.)")
+    (build_logs / "images.txt").write_text("\n".join(_img_lines) + "\n",
+                                           encoding="utf-8")
     _bh = logging.FileHandler(build_logs / "agent_image_build.log")
     _bh.setLevel(logging.DEBUG)
     _blogger = logging.getLogger(f"agent_image_build.{dataset_id[:8]}")
