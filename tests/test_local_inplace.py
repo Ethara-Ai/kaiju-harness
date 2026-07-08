@@ -344,3 +344,81 @@ def test_collect_handles_directory_and_nested_paths(tmp_path):
     # Directory collected recursively; nested file collected with parent created.
     assert (log_dir / "reports" / "sub" / "r.xml").read_text() == "ok\n"
     assert (log_dir / "nested" / "exit.txt").read_text().strip() == "0"
+
+
+# --------------------------------------------------------------------------
+# Universal in-src restore (fix): TOP-LEVEL #[test] fns (concurrent-map style,
+# NOT inside a #[cfg(test)] mod) + benign-rename false-positive.
+# --------------------------------------------------------------------------
+
+_ASSERT_CMP = (
+    "bash -c '"
+    "exp=$(grep -oE \"assert_eq!\\([a-z_]+, [0-9]+\" src/lib.rs | grep -oE \"[0-9]+\" | tail -1); "
+    "act=$(grep -oE \"return [0-9]+\" src/lib.rs | grep -oE \"[0-9]+\" | head -1); "
+    "[ \"$exp\" = \"$act\" ]'"
+)
+
+
+def _lib_toplevel(impl_val: int, var: str, assert_val: int) -> str:
+    """A TOP-LEVEL `#[test]` fn (not wrapped in a `#[cfg(test)]` mod) — the
+    concurrent-map structure the old cfg(test)-anchored splice skipped."""
+    return (
+        f"pub fn f() -> i32 {{ return {impl_val}; }}\n\n"
+        "#[test]\n"
+        f"fn t() {{ let {var} = f(); assert_eq!({var}, {assert_val}); }}\n"
+    )
+
+
+def test_insrc_toplevel_test_tamper_is_restored(tmp_path):
+    """FIX #2: a TOP-LEVEL #[test] the model weakens is still restored (the old
+    #[cfg(test)]-anchored splice skipped top-level #[test] fns entirely)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "tests" / ".keep").write_text("")
+    (repo / "src" / "lib.rs").write_text(_lib_toplevel(0, "x", 42))
+    base = _commit_all(repo, "base")
+
+    _run(["git", "checkout", "-q", "-b", "model"], repo)
+    (repo / "src" / "lib.rs").write_text(_lib_toplevel(0, "x", 0))  # cheat: weaken, impl still 0
+    head = _commit_all(repo, "cheat")
+
+    spec = _build_spec(repo, base, test_cmd=_ASSERT_CMP)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    files = _prepare_files(tmp_path, repo, spec, base, head)
+    with LocalInplace(spec, logger, 60, 1, log_dir, files,
+                      ["cargo_test_exit_code.txt", "test_output.txt"]) as ctx:
+        ctx.exec_run_with_timeout("/bin/bash /eval.sh")
+    assert _exit_code(log_dir) != 0  # restored assert 42 vs impl 0 -> cheat neutralized
+
+
+def test_insrc_benign_rename_not_flagged(tmp_path):
+    """FIX #1: a benign local-var RENAME in an in-src test (count -> rev_count)
+    with a CORRECT impl must PASS and NOT be flagged CHEAT (the old line-grep
+    guard false-positived on the removed `-assert_eq!(count..)` line)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "tests" / ".keep").write_text("")
+    (repo / "src" / "lib.rs").write_text(_lib_toplevel(0, "count", 42))
+    base = _commit_all(repo, "base")
+
+    _run(["git", "checkout", "-q", "-b", "model"], repo)
+    (repo / "src" / "lib.rs").write_text(_lib_toplevel(42, "rev_count", 42))  # correct impl + rename
+    head = _commit_all(repo, "impl+rename")
+
+    spec = _build_spec(repo, base, test_cmd=_ASSERT_CMP)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    files = _prepare_files(tmp_path, repo, spec, base, head)
+    with LocalInplace(spec, logger, 60, 1, log_dir, files,
+                      ["cargo_test_exit_code.txt", "test_output.txt"]) as ctx:
+        ctx.exec_run_with_timeout("/bin/bash /eval.sh")
+    assert _exit_code(log_dir) == 0  # correct impl passes the restored test
+    out = ""
+    if (log_dir / "test_output.txt").exists():
+        out = (log_dir / "test_output.txt").read_text()
+    assert "CHEAT_DETECTED" not in out  # the fix: no false positive on a rename

@@ -20,6 +20,67 @@ from commit0.harness.dockerfiles.__init__rust import (
 
 logger = logging.getLogger(__name__)
 
+# Robust in-src test restore, run inside the eval when python3 is available
+# (the agent image always has it; the local_inplace path the pipeline uses runs
+# there). It reconstructs each changed src file as: the model's IMPL (every
+# `#[test]` / `#[cfg(test)]` / `#[tokio::test]` item stripped) + BASE's test
+# items — so ANY model edit to in-src tests (a variable RENAME, reformat, or a
+# real weakening) is neutralized, regardless of whether tests are a
+# `#[cfg(test)] mod` block or top-level `#[test]` fns, and even when interspersed
+# with impl. `sys.argv[1]` is the base commit. Best-effort per file; always
+# exits 0 (the count-based guard below backstops any miss).
+_INSRC_RESTORE_PY = r'''
+import re, subprocess, sys, pathlib
+BASE = sys.argv[1]
+_TA = re.compile(r'#\[\s*(?:cfg\(\s*test\s*\)|test|tokio::test|async_std::test|'
+                 r'cfg_attr\([^\]]*\btest\b[^\]]*\))\s*\]')
+def _bd(s):
+    s = re.sub(r'//.*', '', s)
+    s = re.sub(r'r#*"(?:.|\n)*?"#*', '', s)
+    s = re.sub(r'"(?:\\.|[^"\\])*"', '', s)
+    s = re.sub(r"'(?:\\.|[^'\\])'", '', s)
+    return s.count('{') - s.count('}')
+def _split(src):
+    lines = src.split('\n'); n = len(lines); i = 0; out = []
+    while i < n:
+        start = i; is_test = False
+        while i < n and (lines[i].lstrip().startswith('#[')
+                         or lines[i].lstrip().startswith('//')
+                         or lines[i].lstrip().startswith('#!')):
+            if _TA.search(lines[i]): is_test = True
+            i += 1
+        if i >= n:
+            out.append(('\n'.join(lines[start:i]), is_test)); break
+        depth = 0; opened = False
+        while i < n:
+            depth += _bd(lines[i])
+            if depth > 0: opened = True
+            prev = lines[i].rstrip(); i += 1
+            if opened:
+                if depth <= 0: break
+            elif prev.endswith(';') or prev.endswith('}') or prev == '':
+                break
+        out.append(('\n'.join(lines[start:i]), is_test))
+    return out
+def _sh(*a):
+    return subprocess.run(a, capture_output=True, text=True).stdout
+for f in _sh('git', 'diff', '--name-only', BASE, '--', 'src').split():
+    try:
+        if not f.endswith('.rs'):
+            continue
+        p = pathlib.Path(f)
+        if not p.is_file():
+            continue
+        base_src = _sh('git', 'show', BASE + ':' + f)
+        if not _TA.search(base_src):
+            continue
+        impl = '\n'.join(t for t, x in _split(p.read_text()) if not x)
+        tests = '\n'.join(t for t, x in _split(base_src) if x)
+        p.write_text(impl.rstrip() + '\n\n' + tests.strip() + '\n')
+    except Exception:
+        pass
+'''
+
 # A commit-ish that we interpolate into a bash script must be a bare git SHA
 # (full or abbreviated). Anything else is rejected so dataset-supplied values
 # can't break out of the command (e.g. `deadbeef; rm -rf /`).
@@ -140,14 +201,13 @@ class RustSpec(Spec):
             f"echo 'CHEAT-GUARD: tests/ still differs from base after revert' >&2; fi"
         )
 
-        # In-src `#[cfg(test)]` restore. Unit tests living INSIDE src/*.rs are not
-        # covered by the tests/ revert, yet the model only ever needs to implement
-        # stubs — never touch test code. For each src file that has an in-src test
-        # module at base, keep the model's impl but reset the test module (from the
-        # first `#[cfg(test)]` to EOF — the universal Rust convention) to base. If
-        # the model changed a signature the base tests need, this yields a genuine
-        # COMPILE_FAILED (correct — signatures must not change).
-        insrc_restore = (
+        # In-src test restore (robust, universal). Rust unit tests live INSIDE
+        # src/*.rs — as `#[cfg(test)] mod` blocks AND/OR top-level `#[test]` fns,
+        # possibly interspersed with impl. The model implements stubs and must
+        # never touch tests. Prefer the python pass (reconstructs impl + BASE's
+        # tests for ANY layout — see _INSRC_RESTORE_PY); fall back to the
+        # cfg(test)-module bash splice only when python3 is absent.
+        insrc_bash = (
             f"for f in $(git diff --name-only {base_commit} -- 'src/*.rs' 'src/**/*.rs' 2>/dev/null); do\n"
             '  [ -f "$f" ] || continue\n'
             f'  base_ln=$(git show {base_commit}:"$f" 2>/dev/null | '
@@ -163,6 +223,15 @@ class RustSpec(Spec):
             f'  git show {base_commit}:"$f" 2>/dev/null | tail -n +"$base_ln" >> "$f.kaiju_impl"\n'
             '  mv "$f.kaiju_impl" "$f"\n'
             "done"
+        )
+        insrc_restore = (
+            "if command -v python3 >/dev/null 2>&1; then\n"
+            f"python3 - {base_commit} <<'KAIJU_INSRC_PY' || true\n"
+            + _INSRC_RESTORE_PY.strip("\n") + "\n"
+            "KAIJU_INSRC_PY\n"
+            "else\n"
+            + insrc_bash + "\n"
+            "fi"
         )
         revert_lines.append(insrc_restore)
         revert_test_paths = "\n".join(revert_lines)
@@ -216,21 +285,25 @@ class RustSpec(Spec):
             "if grep -qE '^error: (failed to (download|fetch|get|load source)|"
             "could not resolve host|network failure|spurious network error)' test_output.txt 2>/dev/null; then "
             "echo 'INFRA_FETCH_FAILED: cargo could not fetch dependencies (network/registry)' >> test_output.txt; fi",
-            # CHEAT-GUARD (A3) — runs AFTER cargo test (which truncates test_output.txt
-            # via `>`), so we APPEND. Many crates keep tests inside src/ as
-            # `#[cfg(test)]` modules that the tests/ revert above never touches. At base
-            # the impl is stubbed, so `#[test]`/`#[cfg(test)]`/removed `assert!` lines
-            # exist ONLY in test code — any such change in the model's diff is tampering.
-            # (Adding an assert! in impl is legitimate, so we flag only removed/changed
-            # asserts and any toggled test attribute.)
-            # Only flag REMOVED (`^-`) test attributes / asserts. The agent may
-            # legitimately ADD test code or impl asserts (those are `^+`); flagging
-            # additions false-positived on real implementations and zeroed valid
-            # runs. Removing/altering an existing `#[test]`/`#[cfg(test)]`/`assert!`
-            # — all of which exist only in test code at base — is the real cheat.
-            f"if git diff {base_commit} -- src/ 2>/dev/null | "
-            r"grep -qE '^-[[:space:]]*#\[(tokio::)?test\]|^-[[:space:]]*#\[cfg\(test\)\]|^-[[:space:]]*assert(_eq|_ne)?!'; then "
-            "echo 'CHEAT_DETECTED: model removed/altered in-src test code' >> test_output.txt; fi",
+            # CHEAT-GUARD (A3) — COUNT-BASED backstop, runs AFTER cargo test (which
+            # truncates test_output.txt via `>`), so we APPEND. It flags a cheat
+            # only on a NET DECREASE in in-src test markers/assertions vs base,
+            # rather than grepping the diff for any removed `assert!` line. The old
+            # line-grep false-positived on benign edits: a variable RENAME inside a
+            # test (`let count` -> `let rev_count`) shows a removed `-assert_eq!(...)`
+            # line even though the assertion is unchanged. Counting is rename/
+            # reformat-proof: at base the impl is stubbed (no asserts — only tests
+            # carry `#[test]`/`#[cfg(test)]`/`assert!`), and the restore above keeps
+            # BASE's tests, so the reconstructed count can only DROP if a real test
+            # survived un-restored and was removed/weakened — the true cheat.
+            f"_kj_base={base_commit}\n"
+            r"_kj_pat='#\[(cfg\(test\)|test|tokio::test)\]|assert(_eq|_ne)?!'" "\n"
+            "_kj_b=0; _kj_n=0\n"
+            f"for _kf in $(git diff --name-only $_kj_base -- src 2>/dev/null | grep '\\.rs$'); do\n"
+            "  _kj_b=$((_kj_b + $(git show \"$_kj_base:$_kf\" 2>/dev/null | grep -cE \"$_kj_pat\")))\n"
+            "  [ -f \"$_kf\" ] && _kj_n=$((_kj_n + $(grep -cE \"$_kj_pat\" \"$_kf\" 2>/dev/null)))\n"
+            "done\n"
+            "if [ \"$_kj_n\" -lt \"$_kj_b\" ]; then echo \"CHEAT_DETECTED: in-src test markers/asserts dropped from $_kj_b to $_kj_n (test code removed)\" >> test_output.txt; fi",
         ]
 
 
