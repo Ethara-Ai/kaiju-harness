@@ -34,7 +34,7 @@ from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_rust import RUST_SPLIT
 from commit0.harness.split_utils import resolve_split
-from commit0.harness.patch_utils_rust import generate_rust_patch, InvalidRustPatchError
+from commit0.harness.patch_utils_rust import filter_rust_patch
 from commit0.harness.utils import load_dataset_from_config
 from agent.claude_code.recovery import run_with_recovery
 
@@ -477,6 +477,29 @@ def _get_stable_log_dir(log_dir: str, repo_name: str, branch: str) -> Path:
     return stable_dir
 
 
+def _module_file_patch(local_repo, base_commit: str, post_sha: str,
+                       rel_path: str) -> str:
+    """Diff of ONLY this module's own source file (``base_commit..post_sha``).
+
+    Each pipeline module owns exactly one source file, but aider commits on its
+    own cadence and often bundles edits to several files into one commit. A naive
+    ``diff(pre_sha, post_sha)`` therefore attributes *whatever* landed in the
+    module's commit window — possibly another module's file — to this module
+    (e.g. the ``src__hazard`` module showing ``src/domain.rs``). Scoping the diff
+    to the module's assigned file makes each module's output.json record its own
+    contribution only. Uses ``base_commit`` (not ``pre_sha``) so the result is
+    self-contained (the file's full diff from the stub) and independent of when
+    aider chose to commit. ``target/`` is stripped for safety (it won't appear
+    for a source file, but keeps the artifact clean)."""
+    try:
+        raw = local_repo.git.diff("--no-renames", base_commit, post_sha,
+                                  "--", rel_path)
+    except Exception as e:  # noqa: BLE001 - patch is a reporting artifact
+        logger.warning("module file patch failed for %s: %s", rel_path, e)
+        return ""
+    return filter_rust_patch(raw) if raw.strip() else ""
+
+
 # ---------------------------------------------------------------------------
 # Per-repo worker
 # ---------------------------------------------------------------------------
@@ -761,25 +784,10 @@ def run_rust_agent_for_repo(
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
-                    module_patch = ""
-                    if pre_sha != post_sha:
-                        try:
-                            module_patch = generate_rust_patch(
-                                repo_path, pre_sha, post_sha, strict=True
-                            )
-                        except InvalidRustPatchError as exc:
-                            rejected_path = test_log_dir / ".rejected_patch.diff"
-                            try:
-                                rejected_path.write_text(exc.patch, encoding="utf-8")
-                                logger.error(
-                                    "InvalidRustPatchError for %s: %s. Rejected patch persisted to %s.",
-                                    src_file_name, exc, rejected_path,
-                                )
-                            except OSError as write_exc:
-                                logger.error(
-                                    "InvalidRustPatchError for %s: %s. Could not persist rejected patch to %s: %s",
-                                    src_file_name, exc, rejected_path, write_exc,
-                                )
+                    # Scope to THIS module's own file only (see _module_file_patch).
+                    module_patch = _module_file_patch(
+                        local_repo, example["base_commit"], post_sha,
+                        os.path.relpath(src_file, repo_path))
                     module_turns = thinking_capture.get_module_turns(src_file_name)
                     if module_turns:
                         write_module_output_json(
@@ -894,25 +902,10 @@ def run_rust_agent_for_repo(
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
-                    module_patch = ""
-                    if pre_sha != post_sha:
-                        try:
-                            module_patch = generate_rust_patch(
-                                repo_path, pre_sha, post_sha, strict=True
-                            )
-                        except InvalidRustPatchError as exc:
-                            rejected_path = lint_log_dir / ".rejected_patch.diff"
-                            try:
-                                rejected_path.write_text(exc.patch, encoding="utf-8")
-                                logger.error(
-                                    "InvalidRustPatchError for %s: %s. Rejected patch persisted to %s.",
-                                    lint_file_name, exc, rejected_path,
-                                )
-                            except OSError as write_exc:
-                                logger.error(
-                                    "InvalidRustPatchError for %s: %s. Could not persist rejected patch to %s: %s",
-                                    lint_file_name, exc, rejected_path, write_exc,
-                                )
+                    # Scope to THIS module's own file only (see _module_file_patch).
+                    module_patch = _module_file_patch(
+                        local_repo, example["base_commit"], post_sha,
+                        os.path.relpath(lint_file, repo_path))
                     module_turns = thinking_capture.get_module_turns(lint_file_name)
                     if module_turns:
                         write_module_output_json(
@@ -1023,25 +1016,10 @@ def run_rust_agent_for_repo(
 
                 if thinking_capture is not None:
                     post_sha = local_repo.head.commit.hexsha
-                    module_patch = ""
-                    if pre_sha != post_sha:
-                        try:
-                            module_patch = generate_rust_patch(
-                                repo_path, pre_sha, post_sha, strict=True
-                            )
-                        except InvalidRustPatchError as exc:
-                            rejected_path = file_log_dir / ".rejected_patch.diff"
-                            try:
-                                rejected_path.write_text(exc.patch, encoding="utf-8")
-                                logger.error(
-                                    "InvalidRustPatchError for %s: %s. Rejected patch persisted to %s.",
-                                    file_name, exc, rejected_path,
-                                )
-                            except OSError as write_exc:
-                                logger.error(
-                                    "InvalidRustPatchError for %s: %s. Could not persist rejected patch to %s: %s",
-                                    file_name, exc, rejected_path, write_exc,
-                                )
+                    # Scope to THIS module's own file only (see _module_file_patch).
+                    module_patch = _module_file_patch(
+                        local_repo, example["base_commit"], post_sha,
+                        os.path.relpath(f, repo_path))
                     module_turns = thinking_capture.get_module_turns(file_name)
                     if module_turns:
                         write_module_output_json(
@@ -1100,7 +1078,6 @@ def run_rust_agent_for_repo(
     # Stage-wise cumulative patch (see agent.stage_patch). Strips target/ via
     # the same filter the eval uses.
     from agent.stage_patch import write_stage_patch
-    from commit0.harness.patch_utils_rust import filter_rust_patch
     write_stage_patch(local_repo, example["base_commit"], experiment_log_dir,
                       logger, filter_fn=filter_rust_patch)
 
