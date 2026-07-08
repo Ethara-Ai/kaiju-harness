@@ -158,14 +158,23 @@ def _load_rust_test_ids(repo_name: str) -> list[str] | None:
     can be cut short by a `timeout` kill). Mirrors `evaluate_go.py`'s use of
     `test_ids_flat` as the canonical total.
     """
-    p = os.path.join(
-        os.path.dirname(__file__), "..", "data", "rust_test_ids", f"{repo_name}.bz2"
-    )
+    # Resolve via find_test_ids_file (same as the go/c/ts/pytest readers) so the
+    # inventory is found BOTH from the host legacy dir (commit0/data/rust_test_ids/)
+    # AND from KAIJU_TEST_IDS_DIR — the location the containerized run mounts it to
+    # (outputs/<uuid>/datasets/), since commit0/data/ is pruned from the agent
+    # image. Without this the in-container rust eval never sees the canonical
+    # inventory and silently falls back to the observed count.
+    from kaiju.paths import find_test_ids_file
+    commit0_path = os.path.dirname(os.path.dirname(__file__))
+    p = find_test_ids_file(commit0_path, "rust_test_ids", f"{repo_name}.bz2")
+    if p is None:
+        logger.debug("rust_test_ids missing for %s", repo_name)
+        return None
     try:
-        with bz2.open(p, "rt") as f:
+        with bz2.open(str(p), "rt") as f:
             ids = [line.strip() for line in f if line.strip()]
     except (OSError, EOFError) as e:
-        logger.debug("rust_test_ids missing for %s (%s): %s", repo_name, p, e)
+        logger.debug("rust_test_ids unreadable for %s (%s): %s", repo_name, p, e)
         return None
     # Exclude doctests so the denominator matches the doctest-blind numerator.
     unit = [i for i in ids if not _DOCTEST_INVENTORY_RE.search(i)]
