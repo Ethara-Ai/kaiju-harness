@@ -23,6 +23,8 @@ __all__ = [
     "CPP_TEST_IDS_DIR",
     "DOCKERFILES_CPP_DIR",
     "DOCKERFILES_DIR",
+    "HEAVY_PRE_INSTALL",
+    "REPO_OVERRIDES",
     "TestStatus",
 ]
 
@@ -67,3 +69,90 @@ class CppRepoInstance(RepoInstance):
     dependencies: List[str] = Field(default_factory=list)
     compiler: str = "gcc"
     submodules: bool = False
+
+
+HEAVY_PRE_INSTALL: Dict[str, List[str]] = {
+    "protocolbuffers/protobuf": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y zlib1g-dev libssl-dev",
+        "cd /tmp && git clone --depth 1 --branch 20250127.0 https://github.com/abseil/abseil-cpp.git",
+        "cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_INSTALL_PREFIX=/usr/local -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release",
+        "cmake --build /tmp/abseil-cpp/build -j$(nproc)",
+        "cmake --install /tmp/abseil-cpp/build",
+        "rm -rf /tmp/abseil-cpp",
+        "ldconfig",
+    ],
+    "grpc/grpc": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y zlib1g-dev libssl-dev libc-ares-dev libre2-dev pkg-config",
+        "cd /tmp && git clone --depth 1 --branch 20250127.0 https://github.com/abseil/abseil-cpp.git",
+        "cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_INSTALL_PREFIX=/usr/local -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/abseil-cpp/build -j$(nproc) && cmake --install /tmp/abseil-cpp/build && rm -rf /tmp/abseil-cpp",
+        "ldconfig",
+    ],
+    "facebook/folly": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libevent-dev libssl-dev libdouble-conversion-dev libgoogle-glog-dev libgflags-dev libiberty-dev liblz4-dev liblzma-dev libsnappy-dev zlib1g-dev libjemalloc-dev libunwind-dev libfmt-dev libsodium-dev libaio-dev libzstd-dev binutils-dev libtool",
+    ],
+    "apache/brpc": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libssl-dev libgflags-dev libgoogle-glog-dev libprotobuf-dev protobuf-compiler libleveldb-dev libsnappy-dev zlib1g-dev",
+    ],
+    "drogonframework/drogon": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libjsoncpp-dev libssl-dev zlib1g-dev libbrotli-dev libc-ares-dev uuid-dev",
+    ],
+    "facebook/proxygen": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libevent-dev libssl-dev libdouble-conversion-dev libgoogle-glog-dev libgflags-dev libiberty-dev liblz4-dev liblzma-dev libsnappy-dev zlib1g-dev libjemalloc-dev libunwind-dev libfmt-dev libsodium-dev libzstd-dev binutils-dev libtool",
+    ],
+    "facebookincubator/velox": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libevent-dev libssl-dev libdouble-conversion-dev libgoogle-glog-dev libgflags-dev liblz4-dev libsnappy-dev libzstd-dev libfmt-dev libbz2-dev libxml2-dev libcurl4-openssl-dev libprotobuf-dev protobuf-compiler libre2-dev libjemalloc-dev",
+    ],
+    "facebook/wangle": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libevent-dev libssl-dev libdouble-conversion-dev libgoogle-glog-dev libgflags-dev libfmt-dev libsodium-dev libzstd-dev",
+    ],
+    "facebook/wdt": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libssl-dev libdouble-conversion-dev libgoogle-glog-dev libgflags-dev libfmt-dev",
+    ],
+    "facebook/fbthrift": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libevent-dev libssl-dev libdouble-conversion-dev libgoogle-glog-dev libgflags-dev libsnappy-dev libzstd-dev libkrb5-dev libsodium-dev libfmt-dev libunwind-dev",
+    ],
+    "userver-framework/userver": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev libyaml-cpp-dev libcurl4-openssl-dev libcrypto++-dev libpq-dev libhiredis-dev libssl-dev libz-dev zlib1g-dev libidn2-dev libc-ares-dev libfmt-dev libcctz-dev libzstd-dev",
+    ],
+    "eclipse-iceoryx/iceoryx": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libacl1-dev libncurses-dev",
+    ],
+    "TileDB-Inc/TileDB": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev libcurl4-openssl-dev zlib1g-dev libzstd-dev libbz2-dev libhdf5-dev",
+    ],
+    "chronoxor/CppServer": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev libasio-dev",
+    ],
+    "Stiffstream/restinio": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev libasio-dev libfmt-dev",
+    ],
+    "google/re2": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev",
+        "cd /tmp && git clone --depth 1 --branch 20250127.0 https://github.com/abseil/abseil-cpp.git && cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_INSTALL_PREFIX=/usr/local -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/abseil-cpp/build -j$(nproc) && cmake --install /tmp/abseil-cpp/build && rm -rf /tmp/abseil-cpp",
+        "cd /tmp && git clone --depth 1 --branch v1.14.0 https://github.com/google/googletest.git && cmake -S /tmp/googletest -B /tmp/googletest/build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/googletest/build -j$(nproc) && cmake --install /tmp/googletest/build && rm -rf /tmp/googletest",
+        "cd /tmp && git clone --depth 1 --branch v1.8.3 https://github.com/google/benchmark.git && cmake -S /tmp/benchmark -B /tmp/benchmark/build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release -DBENCHMARK_ENABLE_TESTING=OFF && cmake --build /tmp/benchmark/build -j$(nproc) && cmake --install /tmp/benchmark/build && rm -rf /tmp/benchmark",
+        "ldconfig",
+    ],
+    "google/leveldb": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libsnappy-dev zlib1g-dev libcrc32c-dev",
+    ],
+    "jbeder/yaml-cpp": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev",
+    ],
+}
+
+
+REPO_OVERRIDES: Dict[str, Dict[str, object]] = {
+    "grpc/grpc":                {"docker_timeout": 7200},
+    "facebook/folly":           {"docker_timeout": 7200},
+    "facebook/proxygen":        {"docker_timeout": 7200},
+    "facebook/fbthrift":        {"docker_timeout": 7200},
+    "facebookincubator/velox":  {"docker_timeout": 7200},
+    "userver-framework/userver":{"docker_timeout": 7200},
+    "protocolbuffers/protobuf": {"docker_timeout": 5400},
+    "apache/brpc":              {"docker_timeout": 5400},
+    "TileDB-Inc/TileDB":        {"docker_timeout": 5400},
+    "facebook/wangle":          {"docker_timeout": 4800},
+    "facebook/wdt":             {"docker_timeout": 4800},
+    "drogonframework/drogon":   {"docker_timeout": 4800},
+}

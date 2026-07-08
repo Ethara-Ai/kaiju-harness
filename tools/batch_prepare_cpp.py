@@ -42,6 +42,7 @@ from tools.generate_test_ids_cpp import (
     generate_for_dataset,
     install_test_ids,
 )
+from commit0.harness.constants_cpp import HEAVY_PRE_INSTALL, REPO_OVERRIDES
 
 GITIGNORE_ENTRIES = [".aider*", "logs/", "build/"]
 DEFAULT_CLONE_DIR = "./repos_staging"
@@ -171,6 +172,8 @@ def _detect_src_dir(repo_dir: Path) -> str:
     cpp_files = list(repo_dir.glob("*.cpp")) + list(repo_dir.glob("*.cc"))
     if cpp_files:
         return "."
+    if (repo_dir / "include").is_dir():
+        return "include"
     return "src"
 
 
@@ -506,12 +509,12 @@ CSV format:
 
     args = parser.parse_args()
 
-    pre_install_map: dict[str, list[str]] = {}
+    pre_install_map: dict[str, list[str]] = {k: list(v) for k, v in HEAVY_PRE_INSTALL.items()}
     if args.pre_install_file:
         if not args.pre_install_file.exists():
             print(f"ERROR: pre-install file not found: {args.pre_install_file}")
             sys.exit(1)
-        pre_install_map = json.loads(args.pre_install_file.read_text())
+        pre_install_map.update(json.loads(args.pre_install_file.read_text()))
 
     if not args.csv_file.exists():
         print(f"ERROR: CSV file not found: {args.csv_file}")
@@ -577,6 +580,14 @@ CSV format:
                 verify_compiles_flag=not args.no_verify_compiles,
             )
             if entry:
+                overrides = REPO_OVERRIDES.get(full_name, {})
+                if overrides:
+                    if "packages" in overrides:
+                        entry.setdefault("setup", {})["packages"] = str(overrides["packages"])
+                    if "install" in overrides:
+                        entry.setdefault("setup", {})["install"] = str(overrides["install"])
+                    if "test_cmd" in overrides:
+                        entry.setdefault("test", {})["test_cmd"] = str(overrides["test_cmd"])
                 entries.append(entry)
                 state.setdefault("completed", {})[full_name] = entry
             else:
@@ -620,7 +631,16 @@ CSV format:
     # Docker build
     test_id_results: dict[str, int] = {}
     if not args.skip_build:
-        build_ok = run_commit0_build(args.output, timeout=args.docker_build_timeout)
+        effective_docker_timeout = args.docker_build_timeout
+        for e in entries:
+            upstream = e.get("original_repo", "")
+            ov = REPO_OVERRIDES.get(upstream, {})
+            dt = int(ov.get("docker_timeout", 0) or 0)
+            if dt > effective_docker_timeout:
+                effective_docker_timeout = dt
+        if effective_docker_timeout != args.docker_build_timeout:
+            print(f"  [INFO] Docker build timeout bumped to {effective_docker_timeout}s for HEAVY repos.")
+        build_ok = run_commit0_build(args.output, timeout=effective_docker_timeout)
         if not build_ok:
             print("  [WARN] Docker build failed. Test ID generation may fail.")
 
