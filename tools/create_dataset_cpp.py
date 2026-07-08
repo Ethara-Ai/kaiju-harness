@@ -221,6 +221,20 @@ def main() -> None:
             output = "cpp_dataset.json"
         create_cpp_dataset(annotated, output)
 
+        # Mount the captured cpp test-id inventory into the consolidated layout
+        # (outputs/<uuid>/datasets/) so the containerized eval finds it via
+        # KAIJU_TEST_IDS_DIR — commit0/data/ is pruned from the agent image.
+        if _consolidated and annotated and annotated[0].get("id"):
+            try:
+                from kaiju.paths import copy_inference_inputs
+                for e in annotated:
+                    copy_inference_inputs(
+                        annotated[0]["id"], e["repo"].split("/")[-1],
+                        test_ids_subdir="cpp_test_ids", repo_base="repos",
+                    )
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("copy_inference_inputs failed: %s", _e)
+
     elif args.command == "validate":
         raw = Path(args.dataset).read_text()
         entries = json.loads(raw)

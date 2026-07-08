@@ -22,11 +22,19 @@ from commit0.harness.constants_cpp import (
 
 
 def _expected_test_count(name: str) -> int:
-    cache_path = CPP_TEST_IDS_DIR / f"{name}.bz2"
-    if not cache_path.exists():
-        return 0
+    # Resolve via find_test_ids_file (like the go/c/ts/rust readers) so the
+    # inventory is found from the host legacy dir AND from KAIJU_TEST_IDS_DIR —
+    # the location the containerized run mounts it to (commit0/data/ is pruned
+    # from the agent image). Falls back to the legacy CPP_TEST_IDS_DIR.
+    from kaiju.paths import find_test_ids_file
+    commit0_path = os.path.dirname(os.path.dirname(__file__))
+    cache_path = find_test_ids_file(commit0_path, "cpp_test_ids", f"{name}.bz2")
+    if cache_path is None:
+        cache_path = CPP_TEST_IDS_DIR / f"{name}.bz2"
+        if not cache_path.exists():
+            return 0
     try:
-        raw = bz2.decompress(cache_path.read_bytes()).decode("utf-8", errors="replace")
+        raw = bz2.decompress(Path(cache_path).read_bytes()).decode("utf-8", errors="replace")
     except (OSError, ValueError):
         return 0
     return sum(1 for line in raw.splitlines() if line.strip())

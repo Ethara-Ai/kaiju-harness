@@ -366,7 +366,7 @@ def main() -> None:
         try:
             from kaiju.paths import copy_inference_inputs as _cii
             for e in hf_entries:
-                _cii(hf_entries[0]["id"], e["repo"].split("/")[-1], test_ids_subdir="js_test_ids", repo_base="repos_js")
+                _cii(hf_entries[0]["id"], e["repo"].split("/")[-1], test_ids_subdir="test_ids", repo_base="repos_js")
         except Exception as _e:
             logger.warning("copy_inference_inputs failed: %s", _e)
 
