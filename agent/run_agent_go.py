@@ -397,12 +397,11 @@ def run_agent_for_repo(
                 logger.warning("Failed to write trajectory.md: %s", e)
 
         git_patch = extract_git_patch(repo_path, example.get("base_commit", "HEAD"))
-        # Stage-wise cumulative patch alongside the per-module output.json.
-        try:
-            (experiment_log_dir / "patch.diff").write_text(
-                git_patch or "", encoding="utf-8", errors="surrogateescape")
-        except Exception as _e:  # noqa: BLE001 - convenience artifact
-            logger.warning("Failed to write stage patch.diff: %s", _e)
+        # Full model-changes record (keeps tests/benches/manifests, strips
+        # binary/cache/build noise) — distinct from the eval's scored patch.diff.
+        from agent.stage_patch import write_stage_patch
+        write_stage_patch(local_repo, example.get("base_commit", "HEAD"),
+                          experiment_log_dir, logger)
         metadata = build_metadata(
             dataset_path=commit0_config_file,
             max_iterations=agent_config.max_iteration,

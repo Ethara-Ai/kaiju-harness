@@ -40,7 +40,7 @@ def test_writes_cumulative_diff(tmp_path):
     out.mkdir()
     write_stage_patch(r, base, out, logger)
 
-    patch = (out / "patch.diff").read_text()
+    patch = (out / "model_changes.diff").read_text()
     assert patch.startswith("diff --git")
     assert "changed" in patch and "b.txt" in patch  # cumulative base..HEAD
 
@@ -56,7 +56,7 @@ def test_empty_when_no_changes(tmp_path):
     out = tmp_path / "logs"
     out.mkdir()
     write_stage_patch(r, base, out, logger)
-    assert (out / "patch.diff").read_text() == ""
+    assert (out / "model_changes.diff").read_text() == ""
 
 
 def test_filter_fn_applied(tmp_path):
@@ -74,7 +74,7 @@ def test_filter_fn_applied(tmp_path):
     out.mkdir()
     write_stage_patch(r, base, out, logger, filter_fn=lambda s: "FILTERED")
     # Helper appends a single trailing newline for patch hygiene.
-    assert (out / "patch.diff").read_text() == "FILTERED\n"
+    assert (out / "model_changes.diff").read_text() == "FILTERED\n"
 
 
 def test_never_raises_on_bad_repo(tmp_path):
@@ -87,7 +87,7 @@ def test_never_raises_on_bad_repo(tmp_path):
     out = tmp_path / "logs"
     out.mkdir()
     write_stage_patch(r, "deadbeef" * 5, out, logger)  # nonexistent commit
-    assert not (out / "patch.diff").exists()  # write skipped, no crash
+    assert not (out / "model_changes.diff").exists()  # write skipped, no crash
 
 
 def test_module_file_patch_scopes_to_own_file(tmp_path):
@@ -114,3 +114,30 @@ def test_module_file_patch_scopes_to_own_file(tmp_path):
     # empty when the file is unchanged from base
     (d / "src/c.rs").write_text("x\n")
     assert _module_file_patch(r, base, head, "src/c.rs") == ""
+
+
+def test_excludes_binary_and_cache_noise_but_keeps_tests(tmp_path):
+    """model_changes.diff must KEEP tests/benches/manifests (the whole point of
+    Option B) but EXCLUDE binary spec / aider cache / build dirs."""
+    r = _repo(tmp_path)
+    root = Path(r.working_tree_dir)
+    (root / "src.rs").write_text("stub\n")
+    r.git.add(A=True); r.index.commit("base"); base = r.head.commit.hexsha
+    # model touches: a source file, a TEST, Cargo.toml (keep) + noise (drop)
+    (root / "src.rs").write_text("impl\n")
+    (root / "tests").mkdir(); (root / "tests/t.rs").write_text("fn t(){}\n")
+    (root / "Cargo.toml").write_text("[package]\n")
+    (root / "spec.pdf.bz2").write_bytes(b"\x00BINARY\x00")
+    (root / ".aider.chat.history.md").write_text("aider cache\n")
+    (root / "__pycache__").mkdir(); (root / "__pycache__/x.pyc").write_bytes(b"\x00")
+    r.git.add(A=True); r.index.commit("work"); 
+
+    out = tmp_path / "logs"; out.mkdir()
+    write_stage_patch(r, base, out, logger)
+    p = (out / "model_changes.diff").read_text()
+    # kept (tracked for audit):
+    assert "src.rs" in p and "tests/t.rs" in p and "Cargo.toml" in p
+    # dropped (noise):
+    assert "spec.pdf.bz2" not in p
+    assert ".aider" not in p
+    assert "__pycache__" not in p
