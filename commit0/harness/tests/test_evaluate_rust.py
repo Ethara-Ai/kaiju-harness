@@ -1126,3 +1126,84 @@ class TestAggregateStatusField:
         out: list = []
         _aggregate_rust_results(str(tmp_path), "x", out)
         assert out[0]["status_detail"], "status_detail must not be empty"
+
+# ---------------------------------------------------------------------------
+# Doctest numerator/denominator consistency (regression for silent mis-scoring)
+#
+# `cargo test` runs doctests and libtest text prints their result lines as
+#   `test src/lib.rs - item (line N) ... ok`
+# The real parser matches these, so without stripping the numerator counts
+# doctests while the canonical inventory (denominator) drops them -> a perfect
+# UNIT solution whose doctests are excluded is scored below 1.0.
+# ---------------------------------------------------------------------------
+class TestDoctestConsistency:
+    def _write(self, tmp_path, text):
+        (tmp_path / "test_output.txt").write_text(text)
+        return str(tmp_path)
+
+    # 2 unit tests + 1 doctest, all pass. Canonical inventory (doctest-blind) = 2.
+    _CARGO_WITH_DOCTEST = (
+        "     Running unittests src/lib.rs (target/debug/deps/foo-abc)\n"
+        "\nrunning 2 tests\n"
+        "test a::t1 ... ok\n"
+        "test a::t2 ... ok\n"
+        "\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        "\n   Doc-tests foo\n"
+        "\nrunning 1 test\n"
+        "test src/lib.rs - foo (line 3) ... ok\n"
+        "\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+    )
+
+    def test_doctest_stripped_from_numerator(self, tmp_path):
+        log = self._write(tmp_path, self._CARGO_WITH_DOCTEST)
+        out = []
+        # Canonical inventory has the 2 unit tests only (doctest already dropped
+        # by _load_rust_test_ids). A perfect unit solution must score 1.0.
+        _aggregate_rust_results(log, "r", out, expected_tests=["a::t1", "a::t2"])
+        assert out[0]["num_tests"] == 2, "doctest must not inflate the denominator"
+        assert out[0]["num_passed"] == 2, "doctest must not inflate the numerator"
+        assert out[0]["passed"] == 1.0, "perfect unit solution must score 1.0"
+        assert out[0]["status"] == "TESTS_RAN"
+
+    def test_doctest_failing_does_not_lower_unit_score(self, tmp_path):
+        # Unit tests all pass; the doctest FAILS. A failing doctest must not drag
+        # a perfect unit solution below 1.0.
+        text = self._CARGO_WITH_DOCTEST.replace(
+            "test src/lib.rs - foo (line 3) ... ok",
+            "test src/lib.rs - foo (line 3) ... FAILED",
+        ).replace(
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        )
+        log = self._write(tmp_path, text)
+        out = []
+        _aggregate_rust_results(log, "r", out, expected_tests=["a::t1", "a::t2"])
+        assert out[0]["num_tests"] == 2
+        assert out[0]["num_passed"] == 2
+        assert out[0]["passed"] == 1.0
+
+    def test_no_canonical_still_strips_doctests(self, tmp_path):
+        # Without a canonical inventory the observed total must also exclude
+        # doctests so the fallback numerator stays doctest-blind and consistent.
+        log = self._write(tmp_path, self._CARGO_WITH_DOCTEST)
+        out = []
+        _aggregate_rust_results(log, "r", out, expected_tests=None)
+        assert out[0]["num_tests"] == 2
+        assert out[0]["num_passed"] == 2
+
+
+class TestDoctestInventoryRegex:
+    """The inventory doctest filter must drop the NO-ITEM-NAME rustdoc form."""
+
+    def test_drops_noname_doctest(self):
+        from commit0.harness.evaluate_rust import _DOCTEST_INVENTORY_RE
+        # rustdoc lists a module-level (`//!`) doctest with no item name.
+        assert _DOCTEST_INVENTORY_RE.search("src/lib.rs - (line 5)")
+
+    def test_drops_named_doctest(self):
+        from commit0.harness.evaluate_rust import _DOCTEST_INVENTORY_RE
+        assert _DOCTEST_INVENTORY_RE.search("src/lib.rs - foo::bar (line 12)")
+
+    def test_keeps_unit_test_id(self):
+        from commit0.harness.evaluate_rust import _DOCTEST_INVENTORY_RE
+        assert not _DOCTEST_INVENTORY_RE.search("queue::tests::add_buffers")

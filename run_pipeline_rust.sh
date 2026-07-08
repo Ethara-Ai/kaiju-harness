@@ -2249,11 +2249,15 @@ for item in data:
         # repo compiles we proceed so its work isn't discarded. Total compile
         # errors across repos are summed for reporting.
         local _all_repos _n_compile=0 _n_total=0 _total_errs=0
+        # `|| true`: a dataset-read failure here must not abort under set -e (this
+        # gate runs with set -e suppressed inside run_single_sample, but keep the
+        # guard explicit and consistent with every other dataset enumeration). An
+        # empty result skips the gate (_n_total=0) and falls through to Stage 3.
         _all_repos=$("$VENV_PYTHON" -c "
 import json,sys
 with open(sys.argv[1]) as f: d = json.load(f)
 rows = d if isinstance(d, list) else d.get('data', [])
-for e in rows: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null)
+for e in rows: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null || true)
         : > "$gate_log"
         while IFS= read -r _r; do
             [[ -z "$_r" ]] && continue

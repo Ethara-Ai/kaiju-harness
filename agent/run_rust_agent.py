@@ -267,27 +267,58 @@ _BLIND_LINT_SHELL = (
     'exit $_rc'
 )
 
-# Portable per-test-cmd timeout. Prefers GNU `timeout` (Linux native, macOS via
-# `brew install coreutils` provides `gtimeout`). Falls back to no timeout if
-# neither is available — the pipeline watchdog (inactivity=900s by default) is
-# the next safety net. KAIJU_TEST_TIMEOUT env var (seconds) overrides 240s.
-# Defines a portable `_run_to <secs> <cmd...>` that ALWAYS bounds the command:
-# timeout -> gtimeout -> perl alarm -> background-kill fallback. The previous
-# preamble fell back to running cargo test with NO timeout when neither
-# timeout/gtimeout existed (the macOS-without-coreutils default), so one hung
-# test could block aider's cmd_test() indefinitely with zero LLM activity.
+# Portable per-test-cmd timeout that reaps the WHOLE process tree, not just the
+# direct child. `cargo test` spawns its compiled test binaries as GRANDCHILDREN;
+# a hung/livelocking test binary spins at 100% CPU. Signalling only cargo (the
+# direct child) leaves that binary orphaned and burning a core — across a big
+# batch these leaked spinners starve later stages. So every path here kills the
+# entire process GROUP:
+#
+#   * timeout/gtimeout: GNU timeout runs COMMAND in its own process group and,
+#     in the default (non-`--foreground`) mode we use, signals that whole group.
+#     We send `-s KILL` because a TERM-ignoring or livelocking test binary won't
+#     honour SIGTERM, and `-k` does NOT help once cargo (the direct child) has
+#     itself exited on TERM — GNU timeout then stops tracking the surviving
+#     grandchild. SIGKILL is unblockable and hits every process still in the
+#     group. A hung test at the hard ceiling needs no graceful shutdown.
+#   * manual fallback (no timeout/gtimeout): `set -m` puts the backgrounded
+#     command in its OWN process group (pgid == its pid); a watcher then
+#     TERM-then-KILLs the whole group via a NEGATIVE pid (`kill -KILL -"$p"`).
+#     A flag file records that a timeout actually fired, so we only ever signal
+#     the group when it was still ours — never a pgid the OS may have recycled
+#     after a clean exit. The perl-alarm branch was removed: `alarm` only
+#     signals the single exec'd process, so it leaked grandchildren identically
+#     to the old direct-child kill.
+#
+# Falls through to running WITHOUT a timeout only if `set -m`/`kill` are somehow
+# unusable; the pipeline watchdog (inactivity ~900s) is the final safety net.
+# KAIJU_TEST_TIMEOUT env var (seconds) overrides the 600s default.
 # (No single quotes — these strings are wrapped in bash -c '...'.)
 _TIMEOUT_PREAMBLE = (
     '_run_to() { '
     'local s="$1"; shift; '
-    'if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?; fi; '
-    'if command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi; '
-    'if command -v perl >/dev/null 2>&1; then perl -e "alarm shift; exec @ARGV" "$s" "$@"; return $?; fi; '
+    # GNU timeout / gtimeout: SIGKILL the whole process group on expiry.
+    'if command -v timeout >/dev/null 2>&1; then timeout -s KILL "$s" "$@"; return $?; fi; '
+    'if command -v gtimeout >/dev/null 2>&1; then gtimeout -s KILL "$s" "$@"; return $?; fi; '
+    # Manual fallback: run in its own process group and reap the group.
+    'local _flag; _flag="${TMPDIR:-/tmp}/.kaiju_run_to.$$.$RANDOM"; '
+    'set -m 2>/dev/null; '
     '"$@" & local p=$!; '
-    '( sleep "$s"; kill -TERM "$p" 2>/dev/null; sleep 3; kill -KILL "$p" 2>/dev/null ) >/dev/null 2>&1 & '
-    'local k=$!; wait "$p" 2>/dev/null; local r=$?; kill "$k" 2>/dev/null; return $r; '
+    'set +m 2>/dev/null; '
+    '( sleep "$s"; kill -0 "$p" 2>/dev/null || exit 0; : > "$_flag"; '
+    'kill -TERM -"$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; '
+    'sleep 5; '
+    'kill -KILL -"$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; '
+    ') >/dev/null 2>&1 & local k=$!; '
+    'wait "$p" 2>/dev/null; local r=$?; '
+    # If the watcher fired, the command timed out: hard-kill the whole group
+    # (reaps any grandchild that ignored TERM) and report the standard 124 rc.
+    'if [ -e "$_flag" ]; then kill -KILL -"$p" 2>/dev/null; r=124; fi; '
+    'kill -KILL "$k" 2>/dev/null; wait "$k" 2>/dev/null; '
+    'rm -f "$_flag" 2>/dev/null; '
+    'return $r; '
     '}; '
-    'TS="${KAIJU_TEST_TIMEOUT:-240}"; '
+    'TS="${KAIJU_TEST_TIMEOUT:-600}"; '
 )
 
 

@@ -9,6 +9,7 @@ import docker
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -226,7 +227,18 @@ class LocalInplace(ExecutionContext):
         # Scratch root holds the worktree + rewritten eval.sh + scratch patch.
         self.work_root = tempfile.mkdtemp(prefix="commit0-inplace-")
         self.worktree = os.path.join(self.work_root, "tree")
+        # A failure anywhere below leaves the object partly built and __exit__
+        # never runs (the context manager was never entered) — leaking the git
+        # worktree registration AND the scratch tmpdir per failed task. On a large
+        # batch that accretes leaked worktrees in the shared repo + fills /tmp.
+        # Tear it all down here so a construction failure self-cleans.
+        try:
+            self._build(logger, files_to_copy, eval_entry)
+        except BaseException:
+            self._cleanup()
+            raise
 
+    def _build(self, logger, files_to_copy, eval_entry) -> None:
         # Create the isolated worktree at base_commit (detached HEAD). This does
         # NOT disturb the agent's live checkout or its branch — a worktree shares
         # the object DB but has its own index/HEAD/working files.
@@ -275,6 +287,59 @@ class LocalInplace(ExecutionContext):
         self.eval_script_path = os.path.join(self.work_root, "eval.sh")
         Path(self.eval_script_path).write_text(eval_src, encoding="utf-8")
 
+    def _cleanup(self) -> None:
+        """Remove the git worktree registration and delete the scratch root.
+
+        Idempotent and exception-safe: used by both a failed __init__ and the
+        normal __exit__, so neither path can leak the worktree or tmpdir.
+        """
+        worktree = getattr(self, "worktree", None)
+        if worktree:
+            try:
+                subprocess.run(
+                    ["git", "-C", self.repo_dir, "worktree", "remove", "--force",
+                     worktree],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            except Exception as e:  # noqa: BLE001 - best-effort cleanup
+                self.logger.debug("worktree remove failed: %s", e)
+        work_root = getattr(self, "work_root", None)
+        if work_root:
+            shutil.rmtree(work_root, ignore_errors=True)
+        # Prune any dangling worktree admin entry so the repo stays clean.
+        try:
+            subprocess.run(
+                ["git", "-C", self.repo_dir, "worktree", "prune"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _terminate_group(self, proc: "subprocess.Popen") -> None:
+        """Kill the eval's whole process group (SIGTERM, grace, then SIGKILL).
+
+        Reaps the bash child AND its `cargo test` / test-binary grandchildren so
+        a timed-out eval can't leave a runaway process spinning at 100% CPU.
+        """
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, OSError):
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, OSError):
+                return
+            try:
+                proc.wait(timeout=10)
+                return  # exited on this signal; no need to escalate
+            except subprocess.TimeoutExpired:
+                continue
+
     def exec_run_with_timeout(self, command: str) -> tuple[str, bool, float]:
         """Run the prepared eval script in the worktree, then collect artifacts.
 
@@ -283,24 +348,34 @@ class LocalInplace(ExecutionContext):
         """
         timed_out = False
         start = time.time()
+        # Run the eval in its OWN process group (start_new_session=True) so that a
+        # timeout can reap the ENTIRE tree — bash + the `timeout ... cargo test`
+        # child + any spawned test binaries. `subprocess.run(timeout=...)` (and a
+        # plain Popen.kill()) only signal the direct child (bash); the cargo/test
+        # grandchildren survive as orphans spinning at 100% CPU. Across a large
+        # batch that leaks a runaway process per timed-out eval and starves the
+        # host. We therefore killpg the whole group: SIGTERM, grace, then SIGKILL.
+        proc = subprocess.Popen(
+            ["/bin/bash", self.eval_script_path],
+            cwd=self.worktree,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            proc = subprocess.run(
-                ["/bin/bash", self.eval_script_path],
-                cwd=self.worktree,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
-            output = (proc.stdout or "") + (proc.stderr or "")
-        except subprocess.TimeoutExpired as e:
+            out, err = proc.communicate(timeout=self.timeout)
+            output = (out or "") + (err or "")
+        except subprocess.TimeoutExpired:
             timed_out = True
-            out = e.stdout or b""
-            err = e.stderr or b""
-            output = (
-                out.decode("utf-8", "replace") if isinstance(out, bytes) else (out or "")
-            ) + (
-                err.decode("utf-8", "replace") if isinstance(err, bytes) else (err or "")
-            )
+            self._terminate_group(proc)
+            # Drain whatever the (now-dead) pipes buffered so partial output isn't
+            # lost. communicate() after kill returns promptly.
+            try:
+                out, err = proc.communicate(timeout=30)
+            except Exception:  # noqa: BLE001 - pipes may already be closed
+                out, err = "", ""
+            output = (out or "") + (err or "")
         runtime = time.time() - start
 
         # Collect result artifacts from the worktree into log_dir, mirroring the
@@ -334,27 +409,7 @@ class LocalInplace(ExecutionContext):
         exctb: Optional[TracebackType],
     ) -> None:
         # Remove the worktree from git's registry, then delete the scratch root.
-        try:
-            subprocess.run(
-                ["git", "-C", self.repo_dir, "worktree", "remove", "--force",
-                 self.worktree],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except Exception as e:  # noqa: BLE001 - best-effort cleanup
-            self.logger.debug("worktree remove failed: %s", e)
-        shutil.rmtree(self.work_root, ignore_errors=True)
-        # Prune any dangling worktree admin entry so the repo stays clean.
-        try:
-            subprocess.run(
-                ["git", "-C", self.repo_dir, "worktree", "prune"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        self._cleanup()
         close_logger(self.logger)
 
 

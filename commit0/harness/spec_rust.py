@@ -34,14 +34,63 @@ import re, subprocess, sys, pathlib
 BASE = sys.argv[1]
 _TA = re.compile(r'#\[\s*(?:cfg\(\s*test\s*\)|test|tokio::test|async_std::test|'
                  r'cfg_attr\([^\]]*\btest\b[^\]]*\))\s*\]')
-def _bd(s):
-    s = re.sub(r'//.*', '', s)
-    s = re.sub(r'r#*"(?:.|\n)*?"#*', '', s)
-    s = re.sub(r'"(?:\\.|[^"\\])*"', '', s)
-    s = re.sub(r"'(?:\\.|[^'\\])'", '', s)
-    return s.count('{') - s.count('}')
+_RAW = re.compile(r'b?r(#*)"')
+_STR = re.compile(r'b?"')
+_CHR = re.compile(r"b?'(?:\\.[^']*|[^'\\])'")
+def _strip_code(src):
+    # Blank every comment/string/char literal (multi-line aware) to spaces,
+    # preserving newlines 1:1, so brace counting sees ONLY real code braces.
+    # A per-line regex (the old _bd) could not do this: a multiline raw string
+    # r#"...{..."# or block comment /* ...} */ leaked its inner braces and made
+    # the splitter mis-classify a following #[test] as impl -> the base test was
+    # never restored -> a model could weaken it undetected. This is the fix.
+    out = []; i = 0; n = len(src)
+    while i < n:
+        c = src[i]
+        if c == '/' and i + 1 < n and src[i+1] == '/':
+            while i < n and src[i] != '\n':
+                out.append(' '); i += 1
+            continue
+        if c == '/' and i + 1 < n and src[i+1] == '*':
+            depth = 1; out.append('  '); i += 2
+            while i < n and depth > 0:
+                if src[i] == '/' and i + 1 < n and src[i+1] == '*':
+                    depth += 1; out.append('  '); i += 2; continue
+                if src[i] == '*' and i + 1 < n and src[i+1] == '/':
+                    depth -= 1; out.append('  '); i += 2; continue
+                out.append('\n' if src[i] == '\n' else ' '); i += 1
+            continue
+        m = _RAW.match(src, i)
+        if m:
+            close = '"' + m.group(1)
+            end = src.find(close, i + m.end())
+            end = n if end == -1 else end + len(close)
+            for j in range(i, end):
+                out.append('\n' if src[j] == '\n' else ' ')
+            i = end; continue
+        m = _STR.match(src, i)
+        if m:
+            start = i; i += m.end()
+            while i < n and src[i] != '"':
+                i += 2 if (src[i] == '\\' and i + 1 < n) else 1
+            i += 1 if i < n else 0
+            for j in range(start, min(i, n)):
+                out.append('\n' if src[j] == '\n' else ' ')
+            continue
+        m = _CHR.match(src, i)
+        if m:
+            for _ in range(m.end()):
+                out.append(' ')
+            i += m.end(); continue
+        out.append(c); i += 1
+    return ''.join(out)
 def _split(src):
     lines = src.split('\n'); n = len(lines); i = 0; out = []
+    clean = _strip_code(src).split('\n')
+    if len(clean) < n:
+        clean = clean + [''] * (n - len(clean))
+    elif len(clean) > n:
+        clean = clean[:n]
     while i < n:
         start = i; is_test = False
         while i < n and (lines[i].lstrip().startswith('#[')
@@ -53,9 +102,9 @@ def _split(src):
             out.append(('\n'.join(lines[start:i]), is_test)); break
         depth = 0; opened = False
         while i < n:
-            depth += _bd(lines[i])
+            depth += clean[i].count('{') - clean[i].count('}')
             if depth > 0: opened = True
-            prev = lines[i].rstrip(); i += 1
+            prev = clean[i].rstrip(); i += 1
             if opened:
                 if depth <= 0: break
             elif prev.endswith(';') or prev.endswith('}') or prev == '':
@@ -269,7 +318,7 @@ class RustSpec(Spec):
             # replace of the `__TEST_IDS__` sentinel (NOT str.format), so literal
             # `{`/`}` in `test_cmd` (e.g. `--features '{a,b}'`) and bash `${...}`
             # expansions pass through untouched.
-            'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-240}" '
+            'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-600}" '
             + test_cmd
             + " __TEST_IDS__ > test_output.txt 2>&1",
             "echo $? > cargo_test_exit_code.txt",

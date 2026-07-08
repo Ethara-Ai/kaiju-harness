@@ -422,3 +422,86 @@ def test_insrc_benign_rename_not_flagged(tmp_path):
     if (log_dir / "test_output.txt").exists():
         out = (log_dir / "test_output.txt").read_text()
     assert "CHEAT_DETECTED" not in out  # the fix: no false positive on a rename
+
+
+# --------------------------------------------------------------------------
+# Multiline-raw-string / block-comment brace-leak (the parser was per-line):
+# a BASE src file whose impl holds a multiline raw string (or block comment)
+# with unbalanced braces BEFORE an in-src #[test]. The old _bd stripped
+# strings/comments per line, so the multiline construct leaked its inner braces
+# and the splitter mis-classified the base #[test] as impl -> the base test was
+# never restored -> a model could weaken it in place (keeping equal marker/
+# assert counts, so the count-guard stayed silent) and PASS. The stateful
+# _strip_code fix restores the base test regardless.
+# --------------------------------------------------------------------------
+
+def _lib_rawstr(impl_val: int, assert_val: int) -> str:
+    """Impl carries a MULTILINE raw string with net-unbalanced braces before the
+    in-src test — a totally valid pattern (JSON/HTML/SQL templates)."""
+    return (
+        f"pub fn f() -> i32 {{ return {impl_val}; }}\n\n"
+        'pub const TMPL: &str = r#"{\n'
+        '    "k": "v {placeholder}\n'
+        '"#;\n\n'
+        "#[test]\n"
+        f"fn t() {{ let x = f(); assert_eq!(x, {assert_val}); }}\n"
+    )
+
+
+def test_insrc_rawstring_before_test_tamper_is_restored(tmp_path):
+    """CLOSED HOLE: base impl has a multiline raw string before the in-src test.
+    Model keeps impl wrong (0), weakens the test in place to assert 0 (SAME
+    marker/assert count, so the count-guard alone can't catch it). The restore
+    must put base's assert-42 back -> mismatch vs impl 0 -> FAIL."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "tests" / ".keep").write_text("")
+    (repo / "src" / "lib.rs").write_text(_lib_rawstr(impl_val=0, assert_val=42))
+    base = _commit_all(repo, "base")
+
+    _run(["git", "checkout", "-q", "-b", "model"], repo)
+    (repo / "src" / "lib.rs").write_text(_lib_rawstr(impl_val=0, assert_val=0))
+    head = _commit_all(repo, "cheat")
+
+    spec = _build_spec(repo, base, test_cmd=_ASSERT_CMP)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    files = _prepare_files(tmp_path, repo, spec, base, head)
+    with LocalInplace(spec, logger, 60, 1, log_dir, files,
+                      ["cargo_test_exit_code.txt", "test_output.txt"]) as ctx:
+        ctx.exec_run_with_timeout("/bin/bash /eval.sh")
+    assert _exit_code(log_dir) != 0  # restored assert 42 vs impl 0 -> cheat neutralized
+
+
+def test_insrc_rawstring_legit_fix_passes(tmp_path):
+    """FALSE-POSITIVE guard for the same fix: a genuine solution whose impl
+    contains a multiline raw string with unbalanced braces must PASS. The old
+    per-line parser DUPLICATED the in-src test (impl swallowed the model's copy,
+    then base's was appended) -> duplicate-symbol compile error -> a real
+    solution scored 0. The stateful parser keeps exactly one test."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "src").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "tests" / ".keep").write_text("")
+    (repo / "src" / "lib.rs").write_text(_lib_rawstr(impl_val=0, assert_val=42))
+    base = _commit_all(repo, "base")
+
+    _run(["git", "checkout", "-q", "-b", "model"], repo)
+    (repo / "src" / "lib.rs").write_text(_lib_rawstr(impl_val=42, assert_val=42))
+    head = _commit_all(repo, "fix")
+
+    spec = _build_spec(repo, base, test_cmd=_ASSERT_CMP)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    files = _prepare_files(tmp_path, repo, spec, base, head)
+    with LocalInplace(spec, logger, 60, 1, log_dir, files,
+                      ["cargo_test_exit_code.txt", "test_output.txt"]) as ctx:
+        ctx.exec_run_with_timeout("/bin/bash /eval.sh")
+    assert _exit_code(log_dir) == 0  # correct impl, exactly one restored test
+    out = ""
+    if (log_dir / "test_output.txt").exists():
+        out = (log_dir / "test_output.txt").read_text()
+    assert "CHEAT_DETECTED" not in out

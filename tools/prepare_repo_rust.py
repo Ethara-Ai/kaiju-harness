@@ -606,17 +606,40 @@ def _capture_rust_test_ids(repo_dir: Path, test_cmd: str, repo_basename: str) ->
     except Exception as e:  # noqa: BLE001
         logger.warning("Step 7/8: could not import test-id capture (%s); skipping.", e)
         return
+    out_dir = Path(__file__).resolve().parent.parent / "commit0" / "data" / "rust_test_ids"
+
+    def _warn_if_stale_remains(reason: str) -> None:
+        # Staleness guard: on a FAILED/empty capture during a RE-prep, an
+        # inventory from a PRIOR prep may still sit on disk under the normalized
+        # key. If the repo's tests changed, that .bz2 is now a stale denominator
+        # the evaluator would silently trust. We do NOT delete it (that would drop
+        # the denominator to the observed count), but we surface it loudly so the
+        # operator can decide whether to purge it before scoring a large batch.
+        try:
+            from kaiju.paths import normalize_test_ids_key
+            prior = out_dir / f"{normalize_test_ids_key(repo_basename)}.bz2"
+            if prior.exists():
+                logger.error(
+                    "Step 7/8: capture %s for %s, but a PRIOR inventory still exists at "
+                    "%s. If the repo's tests changed since it was written it is now a "
+                    "STALE denominator — delete it before scoring if unsure.",
+                    reason, repo_basename, prior,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         ids = collect_test_ids_local(repo_dir, test_cmd)
     except Exception as e:  # noqa: BLE001
         logger.warning("Step 7/8: `cargo test --list` failed for %s (%s); the "
                        "evaluator will use the observed test count.", repo_basename, e)
+        _warn_if_stale_remains("FAILED")
         return
     if not ids:
         logger.warning("Step 7/8: no test IDs discovered for %s; the evaluator "
                        "will use the observed test count.", repo_basename)
+        _warn_if_stale_remains("found no tests")
         return
-    out_dir = Path(__file__).resolve().parent.parent / "commit0" / "data" / "rust_test_ids"
     try:
         path = save_test_ids(ids, repo_basename, out_dir)
         logger.info("Step 8: saved %d canonical test IDs -> %s", len(ids), path)

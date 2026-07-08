@@ -10,9 +10,14 @@ from pathlib import Path
 from typing import Iterator, Union
 
 # Characters allowed in `test_ids` (cargo/nextest filter args). Alphanumerics,
-# whitespace, and the punctuation that appears in test paths / filter exprs.
-# Deliberately excludes shell metacharacters: ; | & $ ` ( ) < > newline " ' \
-_TEST_IDS_RE = re.compile(r"^[\w\s:./@#=+*\-\[\],~^!]*$")
+# HORIZONTAL whitespace only, and the punctuation that appears in test paths /
+# filter exprs. Deliberately excludes shell metacharacters: ; | & $ ` ( ) < > " ' \
+# NOTE: only ` ` and `\t` are allowed for whitespace, NOT `\s` -- `\s` matches
+# newline, and Python's `$` matches before an embedded final newline, so a value
+# like "foo\nrm -rf /x" (every char otherwise allowed) would pass and, once
+# spliced into `cargo test __TEST_IDS__`, run as a SECOND shell command. `\A..\Z`
+# anchors the whole string (not per-line) as a second line of defense.
+_TEST_IDS_RE = re.compile(r"\A[\w \t:./@#=+*\-\[\],~^!]*\Z")
 
 from commit0.harness.constants import (
     EVAL_BACKENDS,

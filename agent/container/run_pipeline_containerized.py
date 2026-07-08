@@ -349,10 +349,23 @@ def main(argv=None) -> int:
 
     container = None
     rc = 1
+    container_name = f"kaiju.pipeline.{repo_name}.{dataset_id[:8]}".lower()
+    # A same-named container left behind by a CRASHED prior run (or a killed batch
+    # task — the container is a child of dockerd, not of the killed python) makes
+    # create_container raise 409 Conflict, which aborts THIS task before `container`
+    # is ever assigned, so the finally-block cleanup can't reap anything. Proactively
+    # remove any stale namesake first so a crash can't wedge every retry of this id.
+    try:
+        _stale = client.containers.get(container_name)
+        logger.warning("Removing stale container %s (id=%s) before recreate",
+                       container_name, _stale.id[:12])
+        _stale.remove(force=True)
+    except Exception:  # noqa: BLE001 - not-found (normal) or transient API error
+        pass
     try:
         container = create_container(
             client=client, image_name=agent_tag,
-            container_name=f"kaiju.pipeline.{repo_name}.{dataset_id[:8]}".lower(),
+            container_name=container_name,
             logger=logger, environment=env, extra_hosts=_extra_hosts(),
         )
         container.start()

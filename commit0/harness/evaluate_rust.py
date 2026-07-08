@@ -79,7 +79,58 @@ _FETCH_FAIL_SENTINEL = "INFRA_FETCH_FAILED"
 #   `path/to/file.rs - some::Item (line N): test`
 # Requiring a `.rs ` path prefix avoids false-dropping a legit unit/integration
 # test whose NAME merely contains ` - ` and `(line N)` (those have no `.rs` path).
-_DOCTEST_INVENTORY_RE = re.compile(r"^\S+\.rs\s+-\s+.+\(line\s+\d+\)")
+# NOTE: the item segment uses `.*` (not `.+`): rustdoc emits a NO-ITEM-NAME form
+# `src/lib.rs - (line N): test` for doctests on module-level `//!` docs (or items
+# it doesn't name). `.+` missed those, leaving a doctest in the denominator that
+# the doctest-blind numerator can never match — silently capping a perfect
+# solution below 1.0. The `.rs ` prefix still guards against unit-test names.
+_DOCTEST_INVENTORY_RE = re.compile(r"^\S+\.rs\s+-\s+.*\(line\s+\d+\)")
+
+# CRITICAL: the numerator is NOT doctest-blind. `cargo test` runs doctests and
+# prints their result lines as `test path/to/file.rs - item (line N) ... ok`,
+# which `rust_test_parser._LIBTEST_LINE_RE` (name group `.+?`) HAPPILY matches —
+# so the parser counts each doctest in `summary.total`/`passed`. The old comment
+# claiming the parser is "doctest-blind" was wrong. With doctests dropped from
+# the denominator but KEPT in the numerator, `num_tests = max(canonical,
+# observed_total)` restores the doctest count into the denominator (observed >
+# canonical) so the drop is negated when doctests pass, and a perfect UNIT
+# solution whose doctests fail/aren't-counted is scored e.g. 17/35=0.486 — the
+# exact bug the drop was meant to fix. Strip doctest result lines from the parsed
+# results here so numerator and denominator are consistently doctest-blind. The
+# parsed `name` is the doctest line minus the ` ... ok` suffix, i.e. the same
+# `<path>.rs - item (line N)` shape as the inventory entry (anchored, `.rs `
+# prefix guards real unit tests whose names never carry a `.rs ` path).
+_DOCTEST_RESULT_NAME_RE = re.compile(r"^\S+\.rs\s+-\s+.*\(line\s+\d+\)$")
+
+
+def _strip_doctests(report: dict) -> int:
+    """Drop doctest entries from a parsed report IN PLACE; return count dropped.
+
+    Keeps the numerator (parser) consistent with the doctest-blind denominator
+    (`_load_rust_test_ids`). Recomputes `summary` from the surviving `tests` so
+    `passed`/`failed`/`total` no longer include doctests.
+    """
+    tests = report.get("tests", [])
+    kept = [t for t in tests if not _DOCTEST_RESULT_NAME_RE.match(t.get("name", ""))]
+    dropped = len(tests) - len(kept)
+    if not dropped:
+        return 0
+    report["tests"] = kept
+    # Recompute the summary from the surviving entries. `outcome` is
+    # `TestStatus.value` (UPPERCASE: "PASSED"/"FAILED"/"SKIPPED"/"ERROR"); match
+    # case-insensitively so a parser/format drift can't silently zero the counts.
+    summary = report.get("summary", {})
+
+    def _n(status: str) -> int:
+        return sum(1 for t in kept if str(t.get("outcome", "")).upper() == status)
+
+    summary["total"] = len(kept)
+    summary["passed"] = _n("PASSED")
+    summary["failed"] = _n("FAILED")
+    summary["skipped"] = _n("SKIPPED")
+    summary["error"] = _n("ERROR")
+    report["summary"] = summary
+    return dropped
 
 
 # A model whose code runs during `cargo test` can print to the same stdout the
@@ -265,6 +316,17 @@ def _aggregate_rust_results(
         return
 
     report = parse_nextest_report(test_output_file)
+    # Strip doctest result lines BEFORE reading counts: `cargo test` runs doctests
+    # and the libtest text parser matches their `... ok` lines, so leaving them in
+    # would make the numerator doctest-INCLUSIVE while the denominator (canonical
+    # inventory) is doctest-blind — mis-scoring a perfect unit solution.
+    _n_doctests = _strip_doctests(report)
+    if _n_doctests:
+        logger.info(
+            "%s: dropped %d doctest result line(s) from parsed output "
+            "(numerator kept doctest-blind to match the denominator)",
+            name, _n_doctests,
+        )
     tests = report.get("tests", [])
     summary = report.get("summary", {})
 
