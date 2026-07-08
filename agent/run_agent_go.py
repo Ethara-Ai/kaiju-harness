@@ -57,6 +57,48 @@ _CLI_GO_PATH = str(Path(__file__).resolve().parent.parent / "commit0" / "cli_go.
 
 RUN_AGENT_LOG_DIR = Path("logs/agent")
 
+# Per-test-run timeout (seconds) handed to `cli_go test`/`evaluate` via
+# --timeout. This bounds the actual `go test` inside the container
+# (execution_context.exec_run_with_timeout does the process-group reaping of a
+# hung run). The old hardcoded 100s was far too short: go tests with -race,
+# integration suites, or many packages routinely exceed it, so the agent's own
+# test runs got falsely killed mid-coding and the model saw a spurious
+# timeout/failure. Rationalized to match the Rust baseline (KAIJU_TEST_TIMEOUT,
+# default 600s). Kept strictly below the inactivity watchdog (900s in
+# run_pipeline_go.sh) so the container-level timeout fires — and the agent gets
+# a real test result — before the watchdog would kill the agent for inactivity.
+_GO_TEST_TIMEOUT_DEFAULT = 600
+_GO_TEST_TIMEOUT_MAX = 840  # < 900s inactivity watchdog, leaves margin for teardown
+
+
+def _go_test_timeout() -> int:
+    """Return the per-test-run timeout in seconds (KAIJU_TEST_TIMEOUT override).
+
+    Falls back to the 600s default on unset/blank/non-numeric/non-positive
+    values, and clamps to stay safely under the inactivity watchdog so a slow
+    (but progressing) test run cannot be misattributed as an agent hang.
+    """
+    raw = os.environ.get("KAIJU_TEST_TIMEOUT", "").strip()
+    if not raw:
+        return _GO_TEST_TIMEOUT_DEFAULT
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid KAIJU_TEST_TIMEOUT=%r; falling back to %ds",
+            raw,
+            _GO_TEST_TIMEOUT_DEFAULT,
+        )
+        return _GO_TEST_TIMEOUT_DEFAULT
+    if val <= 0:
+        logger.warning(
+            "Non-positive KAIJU_TEST_TIMEOUT=%d; falling back to %ds",
+            val,
+            _GO_TEST_TIMEOUT_DEFAULT,
+        )
+        return _GO_TEST_TIMEOUT_DEFAULT
+    return min(val, _GO_TEST_TIMEOUT_MAX)
+
 
 def _read_commit0_go_config(config_file: str) -> dict:
     with open(config_file, "r", encoding="utf-8") as f:
@@ -92,7 +134,7 @@ def _mark_module_done(log_dir: Path) -> None:
 def run_eval_after_each_commit(
     branch: str, backend: str, commit0_config_file: str
 ) -> str:
-    eval_cmd = f"{sys.executable} {_CLI_GO_PATH} evaluate --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+    eval_cmd = f"{sys.executable} {_CLI_GO_PATH} evaluate --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout {_go_test_timeout()}"
     try:
         result = subprocess.run(
             eval_cmd.split(), capture_output=True, text=True, check=True
@@ -202,7 +244,7 @@ def run_agent_for_repo(
                 if not test_id.strip():
                     continue
                 update_queue.put(("set_current_file", (repo_name, test_id)))
-                test_cmd = f"{sys.executable} {_CLI_GO_PATH} test {repo_path} {test_id} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+                test_cmd = f"{sys.executable} {_CLI_GO_PATH} test {repo_path} {test_id} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout {_go_test_timeout()}"
                 if agent_config.blind_tests:
                     test_cmd = _make_blind_test_cmd(test_cmd)
                 elif agent_config.names_only_tests:

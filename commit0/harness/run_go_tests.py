@@ -3,10 +3,22 @@
 import git
 import logging
 import os
+import re
 import traceback
 from pathlib import Path
 
 _module_logger = logging.getLogger(__name__)
+
+# Defense-in-depth guard for `test_ids`. On the Go path the eval command is built
+# entirely from the dataset `test_cmd` (validated in spec_go); `test_ids` is
+# currently used ONLY as a log-path/hash component and is NEVER spliced into the
+# `go test` shell command. We still reject shell metacharacters here so (a) a
+# malformed dataset/CLI value fails fast instead of poisoning a log path, and
+# (b) if a future change ever splices test_ids into the command it is already
+# guarded. Mirrors run_rust_tests._TEST_IDS_RE: only horizontal whitespace (` `,
+# `\t`) is allowed — NOT `\s` (a newline could inject a second shell line) — and
+# `\A..\Z` anchors the WHOLE string, not per-line.
+_TEST_IDS_RE = re.compile(r"\A[\w \t:./@#=+*\-\[\],~^!]*\Z")
 
 from commit0.harness.constants import (
     EVAL_BACKENDS,
@@ -79,6 +91,9 @@ def main(
     rebuild_image: bool,
     verbose: int,
 ) -> int:
+
+    if test_ids is not None and not _TEST_IDS_RE.match(test_ids):
+        raise ValueError(f"Unsafe characters in test_ids: {test_ids!r}")
 
     dataset = load_dataset_from_config(dataset_name, split=dataset_split)
     dataset_name = dataset_name.lower()

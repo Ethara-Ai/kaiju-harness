@@ -140,11 +140,50 @@ def _get_module_path(repo_dir: Path) -> str:
     return ""
 
 
+def _ensure_go_modules(repo_dir: Path, timeout: int = 300) -> None:
+    """Best-effort `go mod download` so `go test -list ./...` can compile the test
+    targets (which it must, to enumerate them).
+
+    Unlike Rust's `cargo test --list` — which resolves+fetches the dependency
+    graph from the registry on demand — `go test -list ./...` needs the module
+    dependencies already present in the local module cache. At prepare time the
+    cache is typically COLD (prep only stubs + commits; the setup dict's
+    `go mod download` runs later, in the Docker image build). Without this,
+    listing fails to compile every package that imports a not-yet-downloaded
+    dependency and silently returns an EMPTY inventory — collapsing the scoring
+    denominator to the observed test count.
+
+    A vendored repo (``vendor/`` present) needs no download — `go test` reads
+    the checked-in vendor tree — so we skip it there. Any failure is swallowed:
+    listing itself will surface the real problem, and an already-warm cache makes
+    this a no-op.
+    """
+    if (repo_dir / "vendor" / "modules.txt").exists():
+        logger.debug("  Vendored module detected; skipping go mod download")
+        return
+    if not (repo_dir / "go.mod").exists():
+        return
+    try:
+        subprocess.run(
+            ["go", "mod", "download"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("  go mod download did not complete (%s); continuing", e)
+
+
 def collect_test_ids_local(
     repo_dir: Path,
     timeout: int = 300,
 ) -> list[str]:
     """Run `go test -list .` locally to discover Go test names."""
+    # Warm the module cache first: `go test -list ./...` compiles the test
+    # targets to enumerate them and cannot do so with missing deps (Go, unlike
+    # cargo, does not fetch on demand during listing).
+    _ensure_go_modules(repo_dir, timeout=timeout)
     cmd = ["go", "test", "-list", ".", "-json", "-count=1", "./..."]
     try:
         result = subprocess.run(
@@ -177,6 +216,22 @@ def collect_test_ids_local(
             return []
         combined_plain = result_plain.stdout + "\n" + result_plain.stderr
         test_ids = _parse_go_test_list_plain(combined_plain, module_path)
+
+    # A package that fails to COMPILE during listing is dropped from the
+    # inventory silently — `go test -list ./...` still lists the packages that
+    # DO compile, so a partial failure yields a partial (under-counted)
+    # denominator. Surface it: the eval runs the same `./...` sweep, so a
+    # capture-time build error is a real signal the stubbed base is broken for
+    # that package, not a benign warning.
+    build_err_markers = ("[build failed]", "build constraints exclude", "# ")
+    combined = result.stdout + "\n" + result.stderr
+    if any(m in combined for m in build_err_markers):
+        logger.warning(
+            "  go test -list reported build errors for some package(s) in %s — "
+            "those tests are NOT in the captured inventory (denominator may be "
+            "under-counted). Ensure the stubbed base compiles.",
+            repo_dir,
+        )
 
     return test_ids
 

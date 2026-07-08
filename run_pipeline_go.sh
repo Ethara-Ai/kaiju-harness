@@ -19,6 +19,13 @@
 
 set -euo pipefail
 
+# Refuse to run with xtrace on. `.env` is sourced with `set -a`, exporting
+# AWS_BEARER_TOKEN_BEDROCK / ANTHROPIC_API_KEY / OPENAI_API_KEY into every child;
+# with `set -x` those (and the full agent command line) get echoed to logs.
+case "$-" in
+    *x*) echo "FATAL: refusing to run with 'set -x' (xtrace) — it would leak secrets from .env into logs." >&2; exit 2 ;;
+esac
+
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ -f "${BASE_DIR}/.env" ]]; then
@@ -113,6 +120,22 @@ if ! [[ "$NUM_SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
+# Validate the remaining numeric args up front so a non-numeric value fails with
+# a clear message instead of a confusing `[[: integer expression expected` or a
+# jq parse error deep inside a stage.
+for _nv in \
+    "--max-iteration:$MAX_ITERATION" \
+    "--stage-timeout:$STAGE_TIMEOUT" \
+    "--eval-timeout:$EVAL_TIMEOUT" \
+    "--inactivity-timeout:$INACTIVITY_TIMEOUT" \
+    "--max-wall-time:$MAX_WALL_TIME"; do
+    _flag="${_nv%%:*}"; _val="${_nv#*:}"
+    if ! [[ "$_val" =~ ^[0-9]+$ ]]; then
+        echo "Error: ${_flag} must be a non-negative integer (got: '${_val}')"
+        exit 1
+    fi
+done
+
 if [[ "$NUM_SAMPLES" -gt 1 ]] && [[ -n "$SKIP_TO_STAGE" ]]; then
     echo "Error: --skip-to-stage and --num-samples > 1 cannot be used together."
     exit 1
@@ -124,6 +147,11 @@ fi
 source "${BASE_DIR}/commit0/harness/resolve_model.sh"
 
 resolve_model "$MODEL_ARG"
+
+# resolve_model is expected to export CACHE_PROMPTS; guard with a default so a
+# future change there can't abort the run with an unbound-variable error under
+# `set -u` far from the cause.
+: "${CACHE_PROMPTS:=true}"
 
 # ============================================================
 # Claude Code OAuth bridge (optional --use-claude-code)
@@ -460,6 +488,49 @@ AGENT_PID=""
 AGENT_ELAPSED=0
 AGENT_RC=0
 
+# Signal a whole process group, falling back to the single PID. The agent is
+# launched under `set -m` (monitor mode) so it leads its own process group;
+# signalling the group (negative PID) reaps the go/docker/aider children it
+# forked, instead of orphaning them to keep burning CPU/API budget after a kill.
+_kill_tree() {
+    local pid="$1" sig="${2:-TERM}"
+    [[ -z "$pid" ]] && return 0
+    kill "-${sig}" "-${pid}" 2>/dev/null \
+        || kill "-${sig}" "${pid}" 2>/dev/null \
+        || true
+}
+
+# Cumulative CPU seconds for every process in the group led by $1 (the agent +
+# its go/python children). Used as a "still computing locally" liveness gate.
+_pgroup_cpu_secs() {
+    ps -o time= -g "$1" 2>/dev/null | awk '
+        { gsub(/ /,""); n=split($0,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; t+=s }
+        END { printf "%d", t+0 }'
+}
+
+# True if any process in group $1 has an ESTABLISHED outbound TCP connection —
+# i.e. an LLM request is in flight. During SERVER-SIDE extended thinking the
+# local process is blocked on the socket at ~0% CPU and writes no logs, so
+# neither mtime nor CPU shows life; a live connection is the real signal that
+# the agent is healthily waiting on the model, not hung. Best-effort: if lsof is
+# unavailable we return non-zero so the caller falls back to the CPU/mtime gate.
+_pgroup_has_live_conn() {
+    command -v lsof >/dev/null 2>&1 || return 2
+    local pids
+    pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$pids" ]] && return 1
+    lsof -nP -a -p "$pids" -iTCP -sTCP:ESTABLISHED >/dev/null 2>&1
+}
+
+# Evaluate a bc expression and emit a JSON-safe number. bc drops the leading
+# zero on values < 1 (".3000", "-.08"), which jq <= 1.6 rejects via --argjson.
+# Re-add it so the result is always valid JSON. Propagates bc's exit status.
+bc_json() {
+    local _out
+    _out=$(echo "$1" | bc) || return 1
+    printf '%s\n' "$_out" | sed -E 's/^(-?)\./\10./'
+}
+
 
 # ============================================================
 # Spec Doc Provisioning (Go)
@@ -620,6 +691,11 @@ for r in sorted(GO_SPLIT.get('${REPO_SPLIT}', [])):
     log "  All Go repos have spec docs. ✓"
 }
 
+# Return code contract for watchdog_run:
+#   0    = agent exited successfully
+#   124  = watchdog killed agent (inactivity / hard / wall-time)
+#   other= agent error (non-zero exit)
+#   NOTE: wait returns 127 when PID is already reaped; treated as 0 (success)
 watchdog_run() {
     local agent_pid="$1"
     local log_dir="$2"
@@ -629,9 +705,21 @@ watchdog_run() {
     local start_time
     start_time=$(date +%s)
     local hard_timeout_warned="false"
+    local _veto_start=0  # when the live-conn/CPU gate started suppressing the inactivity kill
+
+    # How long a live-connection / advancing-CPU agent may run WITHOUT log
+    # progress before we kill it anyway. A long extended-thinking turn writes
+    # NOTHING to the log until it completes (buffered SSE stream), so log
+    # inactivity alone is not a hang. The absolute wall-time cap still backstops
+    # a true hang. Default 90 min; override via WATCHDOG_LIVECONN_VETO_SECS.
+    local _liveconn_veto_secs="${WATCHDOG_LIVECONN_VETO_SECS:-}"
+    if ! [[ "$_liveconn_veto_secs" =~ ^[0-9]+$ ]] || [[ "$_liveconn_veto_secs" -lt 1 ]]; then
+        _liveconn_veto_secs=$(( inactivity_limit * 6 ))
+        [[ "$_liveconn_veto_secs" -lt 5400 ]] && _liveconn_veto_secs=5400
+    fi
 
     while kill -0 "$agent_pid" 2>/dev/null; do
-        sleep 15
+        sleep 5
 
         local now_epoch
         now_epoch=$(date +%s)
@@ -656,21 +744,27 @@ watchdog_run() {
         local agent_active="false"
         if [[ "$latest_mtime" -gt 0 ]]; then
             idle=$(( now_epoch - latest_mtime ))
-            [[ $idle -lt $inactivity_limit ]] && agent_active="true"
+            if [[ $idle -lt $inactivity_limit ]]; then
+                agent_active="true"
+                _veto_start=0  # real log progress — clear the alive-but-silent veto timer
+            fi
         else
             agent_active="true"
+            _veto_start=0
         fi
 
+        # Absolute wall-time cap — unconditional, prevents unbounded spend.
         if [[ "$absolute_max" -gt 0 ]]; then
             local wall_elapsed=$(( now_epoch - start_time ))
             if [[ $wall_elapsed -ge $absolute_max ]]; then
                 log "  WATCHDOG: Absolute wall-time cap ${absolute_max}s reached. Force-killing agent."
-                kill "$agent_pid" 2>/dev/null || true; sleep 2; kill -9 "$agent_pid" 2>/dev/null || true
+                _kill_tree "$agent_pid" TERM; sleep 2; _kill_tree "$agent_pid" KILL
                 wait "$agent_pid" 2>/dev/null || true
                 return 124
             fi
         fi
 
+        # Hard timeout: only kill if the agent is also inactive.
         if [[ "$hard_timeout" -gt 0 ]]; then
             local elapsed=$(( now_epoch - start_time ))
             if [[ $elapsed -ge $hard_timeout ]]; then
@@ -681,17 +775,52 @@ watchdog_run() {
                     fi
                 else
                     log "  WATCHDOG: Hard timeout ${hard_timeout}s reached and agent inactive (${idle}s). Killing."
-                    kill "$agent_pid" 2>/dev/null || true; sleep 2; kill -9 "$agent_pid" 2>/dev/null || true
+                    _kill_tree "$agent_pid" TERM; sleep 2; _kill_tree "$agent_pid" KILL
                     wait "$agent_pid" 2>/dev/null || true
                     return 124
                 fi
             fi
         fi
 
+        # Inactivity timeout: kill if no log writes within the limit — but NOT if
+        # the agent is healthily waiting on the model or still computing locally.
         if [[ "$latest_mtime" -gt 0 ]] && [[ "$agent_active" == "false" ]]; then
-            log "  WATCHDOG: No log activity for ${idle}s (limit: ${inactivity_limit}s). Agent appears stuck."
+            # Log-inactivity ALONE is not "stuck". A long server-side extended-
+            # thinking turn writes no logs and burns ~0 local CPU (blocked on the
+            # socket). Before killing — and wasting a paid turn — require BOTH: no
+            # live LLM connection AND no local CPU progress over a short window.
+            local _alive="false"
+            if _pgroup_has_live_conn "$agent_pid"; then
+                _alive="true"
+                if [[ $(( idle % 60 )) -lt 5 ]]; then
+                    log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                fi
+            else
+                local _cpu1 _cpu2
+                _cpu1=$(_pgroup_cpu_secs "$agent_pid")
+                sleep 3
+                _cpu2=$(_pgroup_cpu_secs "$agent_pid")
+                if [[ "${_cpu2:-0}" -gt "${_cpu1:-0}" ]]; then
+                    _alive="true"
+                    log "  WATCHDOG: log idle ${idle}s but agent CPU advancing (${_cpu1}->${_cpu2}s) — working, not stuck. Continuing."
+                fi
+            fi
+            if [[ "$_alive" == "true" ]]; then
+                # A live connection/CPU DELAYS the inactivity kill, it must not VETO
+                # it forever — bound the veto at _liveconn_veto_secs; the absolute
+                # wall-time cap still backstops a genuine infinite hang.
+                if [[ "$_veto_start" -eq 0 ]]; then _veto_start="$now_epoch"; fi
+                local _veto_for=$(( now_epoch - _veto_start ))
+                if [[ "$_veto_for" -lt "$_liveconn_veto_secs" ]]; then
+                    continue
+                fi
+                log "  WATCHDOG: agent alive-but-silent for ${_veto_for}s (> ${_liveconn_veto_secs}s live-conn veto cap) — killing despite live signal."
+            else
+                _veto_start=0
+            fi
+            log "  WATCHDOG: No log activity for ${idle}s AND no live connection / CPU idle. Agent appears stuck."
             log "  WATCHDOG: Killing agent (PID ${agent_pid})."
-            kill "$agent_pid" 2>/dev/null || true; sleep 2; kill -9 "$agent_pid" 2>/dev/null || true
+            _kill_tree "$agent_pid" TERM; sleep 2; _kill_tree "$agent_pid" KILL
             wait "$agent_pid" 2>/dev/null || true
             return 124
         fi
@@ -730,8 +859,18 @@ run_agent() {
     start_time=$(date +%s)
 
     set +e
+    # Force unbuffered Python so streamed thinking/progress reliably advances the
+    # log mtime the inactivity watchdog reads. Block-buffered stdout (the default
+    # when stdout is a file) can withhold writes for minutes, making a healthy
+    # streaming agent look idle.
+    export PYTHONUNBUFFERED=1
+    # Launch under monitor mode so the agent leads its own process group; this
+    # lets the watchdog/cleanup signal the whole group and reap forked
+    # go/docker/aider children instead of orphaning them.
+    set -m
     "${cmd[@]}" >>"$agent_log" 2>&1 &
     local agent_pid=$!
+    set +m
     AGENT_PID=$agent_pid
 
     watchdog_run "$agent_pid" "$log_dir" "$INACTIVITY_TIMEOUT" "$STAGE_TIMEOUT" "$MAX_WALL_TIME"
@@ -762,6 +901,10 @@ EVAL_NUM_TESTS=0
 EVAL_PASS_RATE="0.0"
 EVAL_RUNTIME="0.0"
 EVAL_ELAPSED=0
+# Distinguishes a real "0 of N passed" from "eval did not run". Values:
+# OK | NO_RESULTS | EVAL_FAILED | EVAL_TIMEOUT. Stages record this so a broken
+# eval (timeout / missing image / hung container) never masquerades as 0%.
+EVAL_STATUS="OK"
 
 run_evaluate() {
     local branch="$1"
@@ -771,7 +914,12 @@ run_evaluate() {
         "$VENV_PYTHON" commit0/cli_go.py evaluate
         --branch "$branch"
         --backend "$BACKEND"
-        --timeout 300
+        # Outer per-repo harness bound. Must EXCEED the inner `go test` timeout
+        # (spec_go: timeout 600 + go test -timeout 600s, ~610s worst case) so the
+        # inner fires first and yields clean partial output + a 124/137 exit the
+        # evaluator classifies as TEST_SUITE_TIMEOUT — instead of the outer killpg
+        # pre-empting it at 300s. Env-overridable; stays under EVAL_TIMEOUT (3600).
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-700}"
         --num-cpus 1
         --num-workers 1
         --commit0-config-file "$COMMIT0_CONFIG"
@@ -799,10 +947,21 @@ run_evaluate() {
 
     local combined_output
     combined_output=$(cat "$eval_log")
-    parse_eval_output "$combined_output"
+    parse_eval_output "$combined_output"   # sets EVAL_STATUS=OK|NO_RESULTS
 
-    if [[ $eval_rc -ne 0 ]]; then
-        log "  Evaluation FAILED — last 10 lines:"
+    # Refine status from the eval process exit code. A non-zero rc with no
+    # parseable results is a broken eval, NOT a 0% score — flag it so the stage
+    # records EVAL_FAILED/EVAL_TIMEOUT instead of a misleading 0/N.
+    if [[ "$EVAL_STATUS" != "OK" ]]; then
+        if [[ $eval_rc -eq 124 ]]; then
+            EVAL_STATUS="EVAL_TIMEOUT"
+        elif [[ $eval_rc -ne 0 ]]; then
+            EVAL_STATUS="EVAL_FAILED"
+        fi
+    fi
+
+    if [[ $eval_rc -ne 0 || "$EVAL_STATUS" != "OK" ]]; then
+        log "  Evaluation issue (rc=${eval_rc}, status=${EVAL_STATUS}) — last 10 lines:"
         tail -10 "$eval_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
     fi
 }
@@ -836,7 +995,7 @@ parse_eval_output() {
                     total_passed=$((total_passed + passed))
                     total_tests=$((total_tests + total))
                     if [[ "$runtime" =~ ^[0-9]*\.?[0-9]+$ ]]; then
-                        total_runtime=$(echo "scale=4; $total_runtime + $runtime" | bc)
+                        total_runtime=$(bc_json "scale=4; $total_runtime + $runtime")
                     fi
                     found_any="true"
                 fi
@@ -845,12 +1004,15 @@ parse_eval_output() {
     done <<< "$output"
 
     if [[ "$found_any" == "true" ]]; then
+        EVAL_STATUS="OK"
         EVAL_NUM_PASSED="$total_passed"
         EVAL_NUM_TESTS="$total_tests"
         EVAL_RUNTIME="$total_runtime"
         if [[ "$total_tests" -gt 0 ]]; then
-            EVAL_PASS_RATE=$(echo "scale=6; $total_passed / $total_tests" | bc)
+            EVAL_PASS_RATE=$(bc_json "scale=6; $total_passed / $total_tests")
         fi
+    else
+        EVAL_STATUS="NO_RESULTS"
     fi
 
     if [[ "$EVAL_PASS_RATE" == "0.0" ]] || [[ "$EVAL_PASS_RATE" == "0" ]]; then
@@ -859,7 +1021,7 @@ parse_eval_output() {
         if [[ -n "$avg_line" ]]; then
             local rate
             rate=$(echo "$avg_line" | awk -F':' '{print $NF}' | tr -d ' ')
-            if [[ -n "$rate" ]] && [[ "$rate" =~ ^[0-9.]+$ ]]; then
+            if [[ -n "$rate" ]] && [[ "$rate" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then  # strict number (reject "1.2.3"/".")
                 EVAL_PASS_RATE="$rate"
             fi
         fi
@@ -870,10 +1032,17 @@ parse_eval_output() {
 # Cost Extraction (identical to Python pipeline)
 # ============================================================
 
+# A $0.0000 result is ambiguous — it could be a genuinely free stage OR a silent
+# extraction failure (no output.json, unparseable cost). The Python prints
+# "<cost> <source>" where source ∈ {output_json:N, aider_fallback:N, none}.
+# The caller runs this in a command substitution `$(...)` (a SUBSHELL), so any
+# assignment to a global here would be lost — returning "<cost> <source>" on
+# stdout lets the caller recover the real source. A "none" source with $0 is
+# logged LOUD so a broken-cost run is never mistaken for a free one.
 extract_all_stage_costs() {
     local log_dir="$1"
     if [[ ! -d "$log_dir" ]]; then
-        echo "0.0000"
+        echo "0.0000 missing_dir"
         return
     fi
     local err_file="${log_dir}/cost_extract.err"
@@ -902,13 +1071,14 @@ for root, _d, files in os.walk(log_dir):
         pass
 
 if oj_count > 0:
-    print(f"{oj_total:.4f}")
+    print(f"{oj_total:.4f} output_json:{oj_count}")
     sys.exit(0)
 
 # Fallback (no output.json present): aider.log session regex.
 # Only counts aider's main edit loop; misses summarizer + commit_msg + cache.
 COST_RE = re.compile(r"Cost:\s+\$\d+\.\d+\s+(?:message|request),\s+\$(\d+\.\d+)\s+session")
 fallback_total = 0.0
+fallback_count = 0
 for root, _d, files in os.walk(log_dir):
     if "aider.log" not in files:
         continue
@@ -922,15 +1092,28 @@ for root, _d, files in os.walk(log_dir):
                     last_match = m
             if last_match:
                 fallback_total += float(last_match.group(1))
+                fallback_count += 1
     except (OSError, ValueError):
         pass
-print(f"{fallback_total:.4f}")
+if fallback_count > 0:
+    print(f"{fallback_total:.4f} aider_fallback:{fallback_count}")
+else:
+    # No cost source at all — distinguish this from a real free run.
+    print("0.0000 none")
 PYEOF
 ) || true
-    if [[ "$result" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        echo "$result"
+    # result is "<cost> <source>"; split it.
+    local cost_part source_part
+    cost_part="${result%% *}"
+    source_part="${result#* }"
+    if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        if [[ "${source_part:-none}" == "none" ]]; then
+            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run."
+        fi
+        echo "$cost_part ${source_part:-none}"
     else
-        echo "0.0000"
+        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000."
+        echo "0.0000 parse_error"
     fi
 }
 
@@ -1013,7 +1196,20 @@ init_results() {
 
 save_results() {
     mkdir -p "$(dirname "$PIPELINE_LOG")"
-    echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
+    # Atomic write. `> "$PIPELINE_LOG"` truncates the file BEFORE jq produces
+    # output, so a killed/failed jq (or invalid RESULTS_JSON) leaves a 0-byte or
+    # partial results file — destroying a prior good run (esp. under --skip-to-stage
+    # which overwrites in place). Write to a temp file, validate it's non-empty
+    # valid JSON, then atomically rename. Keep one .bak of the previous good file.
+    local _tmp="${PIPELINE_LOG}.tmp.$$"
+    if echo "$RESULTS_JSON" | jq '.' > "$_tmp" 2>/dev/null && [[ -s "$_tmp" ]]; then
+        [[ -f "$PIPELINE_LOG" ]] && cp -f "$PIPELINE_LOG" "${PIPELINE_LOG}.bak" 2>/dev/null || true
+        mv -f "$_tmp" "$PIPELINE_LOG"
+    else
+        rm -f "$_tmp" 2>/dev/null || true
+        log "  WARNING: save_results produced invalid/empty JSON — kept previous ${PIPELINE_LOG} intact"
+        return 1
+    fi
 }
 
 # ============================================================
@@ -1034,9 +1230,10 @@ stage_1_draft() {
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
 
-    local cost
-    cost=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 1 cost extraction failed"; return 1; }
-    log "  Stage 1 cost: \$${cost}"
+    local cost cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 1 cost extraction failed"; return 1; }
+    cost="${_co%% *}"; cost_source="${_co#* }"
+    log "  Stage 1 cost: \$${cost} (source: ${cost_source})"
 
     run_evaluate "$BRANCH_NAME" "stage1"
     local eval_time="$EVAL_ELAPSED"
@@ -1048,21 +1245,25 @@ stage_1_draft() {
         --argjson elapsed "$elapsed" \
         --argjson eval_time "$eval_time" \
         --argjson cost "$cost" \
+        --arg cost_source "$cost_source" \
         --argjson rc "$rc" \
         --argjson runtime "${EVAL_RUNTIME:-0.0}" \
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "$EVAL_STATUS" \
         '.stage1 = {
             name: $name,
             elapsed_s: $elapsed,
             eval_time_s: $eval_time,
             cost_usd: $cost,
+            cost_source: $cost_source,
             returncode: $rc,
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1084,12 +1285,13 @@ stage_2_lint_refine() {
 
     local s1_cost
     s1_cost=$(echo "$RESULTS_JSON" | jq -r '.stage1.cost_usd // 0') || { log "ERROR: Stage 2 failed to read stage1 cost"; return 1; }
-    local s2_incremental
-    s2_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
+    local s2_incremental cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
+    s2_incremental="${_co%% *}"; cost_source="${_co#* }"
     local total_cost
-    total_cost=$(echo "scale=4; $s1_cost + $s2_incremental" | bc) || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
+    total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental") || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
-    log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost})"
+    log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
 
     run_evaluate "$BRANCH_NAME" "stage2"
     local eval_time="$EVAL_ELAPSED"
@@ -1102,22 +1304,26 @@ stage_2_lint_refine() {
         --argjson eval_time "$eval_time" \
         --argjson cost_inc "$s2_incremental" \
         --argjson cost_cum "$total_cost" \
+        --arg cost_source "$cost_source" \
         --argjson rc "$rc" \
         --argjson runtime "${EVAL_RUNTIME:-0.0}" \
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "$EVAL_STATUS" \
         '.stage2 = {
             name: $name,
             elapsed_s: $elapsed,
             eval_time_s: $eval_time,
             cost_usd_incremental: $cost_inc,
             cost_usd_cumulative: $cost_cum,
+            cost_source: $cost_source,
             returncode: $rc,
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1145,12 +1351,13 @@ stage_3_test_refine() {
 
     local s2_cumulative
     s2_cumulative=$(echo "$RESULTS_JSON" | jq -r '.stage2.cost_usd_cumulative // 0') || { log "ERROR: Stage 3 failed to read stage2 cost"; return 1; }
-    local s3_incremental
-    s3_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
+    local s3_incremental cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
+    s3_incremental="${_co%% *}"; cost_source="${_co#* }"
     local total_cost
-    total_cost=$(echo "scale=4; $s2_cumulative + $s3_incremental" | bc) || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
+    total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental") || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
-    log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost})"
+    log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
 
     run_evaluate "$BRANCH_NAME" "stage3"
     local eval_time="$EVAL_ELAPSED"
@@ -1163,22 +1370,26 @@ stage_3_test_refine() {
         --argjson eval_time "$eval_time" \
         --argjson cost_inc "$s3_incremental" \
         --argjson cost_cum "$total_cost" \
+        --arg cost_source "$cost_source" \
         --argjson rc "$rc" \
         --argjson runtime "${EVAL_RUNTIME:-0.0}" \
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "$EVAL_STATUS" \
         '.stage3 = {
             name: $name,
             elapsed_s: $elapsed,
             eval_time_s: $eval_time,
             cost_usd_incremental: $cost_inc,
             cost_usd_cumulative: $cost_cum,
+            cost_source: $cost_source,
             returncode: $rc,
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1243,10 +1454,14 @@ print_summary_table() {
 PIPELINE_SUCCESS="false"
 
 cleanup() {
+    # Make cleanup idempotent/re-entrant. Reset traps immediately so a second
+    # Ctrl-C (or a SIGTERM arriving during our own kill/sleep) doesn't re-enter
+    # cleanup or interrupt the escalation mid-way and leave children alive.
+    trap - INT TERM EXIT
     if [[ -n "${AGENT_PID:-}" ]] && kill -0 "$AGENT_PID" 2>/dev/null; then
-        kill -- -"$AGENT_PID" 2>/dev/null || true
+        _kill_tree "$AGENT_PID" TERM
         sleep 2
-        kill -9 -- -"$AGENT_PID" 2>/dev/null || true
+        _kill_tree "$AGENT_PID" KILL
     fi
 
     if [[ "$PIPELINE_SUCCESS" == "true" ]]; then
@@ -1267,7 +1482,10 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
-trap 'exit' INT TERM
+# Preserve interrupt semantics (don't mask with a bare `exit`, which returns the
+# last command's status). 130=SIGINT, 143=SIGTERM. cleanup runs via EXIT.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ============================================================
 # Main
@@ -1403,6 +1621,15 @@ run_single_sample() {
             && log "ATIF conversion complete for run_${sample_idx}" \
             || log "[WARN] ATIF conversion failed for run_${sample_idx}"
     fi
+
+    # Signal sample failure to the caller. Without this the function returns the
+    # status of the last command (the always-succeeding ATIF block), so a sample
+    # where every stage errored still counts as "completed" -> PIPELINE_SUCCESS
+    # flips true -> cleanup deletes the per-run configs needed to debug it.
+    if [[ -n "$pipeline_error" ]]; then
+        return 1
+    fi
+    return 0
 }
 
 SAMPLES_COMPLETED=0
