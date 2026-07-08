@@ -25,14 +25,22 @@ def main(repo: str, verbose: int) -> List[List[str]]:
     repo = repo.replace(".", "-")
     commit0_path = os.path.dirname(commit0.__file__)
 
+    from kaiju.paths import find_test_ids_file
+
+    def _resolve(fname: str) -> str:
+        p = find_test_ids_file(commit0_path, "c_test_ids", fname)
+        if p is None:
+            raise FileNotFoundError(fname)
+        return str(p)
+
     try:
         if "__" in repo:
-            in_file_fail = read(f"{commit0_path}/data/c_test_ids/{repo}#fail_to_pass.bz2")
-            in_file_pass = read(f"{commit0_path}/data/c_test_ids/{repo}#pass_to_pass.bz2")
+            in_file_fail = read(_resolve(f"{repo}#fail_to_pass.bz2"))
+            in_file_pass = read(_resolve(f"{repo}#pass_to_pass.bz2"))
         else:
-            in_file_fail = read(f"{commit0_path}/data/c_test_ids/{repo}.bz2")
+            in_file_fail = read(_resolve(f"{repo}.bz2"))
             in_file_pass = ""
-    except (OSError, EOFError):
+    except (OSError, EOFError, FileNotFoundError):
         logger.warning(
             "No C test ID files found for %s. "
             "Run tools/generate_test_ids_c.py first to create them. "

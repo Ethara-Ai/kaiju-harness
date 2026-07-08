@@ -362,6 +362,14 @@ def main() -> None:
     output_path.write_text(json.dumps(hf_entries, indent=2), encoding="utf-8")
     logger.info("Saved dataset to %s", output_path)
 
+    if _consolidated and hf_entries and hf_entries[0].get("id"):
+        try:
+            from kaiju.paths import copy_inference_inputs as _cii
+            for e in hf_entries:
+                _cii(hf_entries[0]["id"], e["repo"].split("/")[-1], test_ids_subdir="js_test_ids", repo_base="repos_js")
+        except Exception as _e:
+            logger.warning("copy_inference_inputs failed: %s", _e)
+
     bar = "=" * 80
     print(f"\n{bar}")
     print(f"JS DATASET: {len(valid)} entries")

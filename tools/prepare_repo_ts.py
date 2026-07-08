@@ -1130,7 +1130,7 @@ def prepare_ts_repo(
         branch_name = TS_DATASET_BRANCH
         git(repo_dir, "checkout", branch_name)
         try:
-            push_to_fork(repo_dir, fork_name, branch=branch_name, token=token)
+            push_to_fork(repo_dir, fork_name, branch=branch_name, token=token, force_with_lease=False)
         except Exception as e:
             logger.error("  Push failed: %s", e)
             remote_commits = resolve_commits_from_remote(fork_name, branch_name)
@@ -1179,6 +1179,7 @@ def prepare_ts_repo(
                             fork_name,
                             branch=branch_name,
                             token=token,
+                            force_with_lease=False,
                         )
                     except Exception as e:
                         logger.warning("  Spec push failed: %s", e)
@@ -1212,7 +1213,7 @@ def prepare_ts_repo(
                 git(repo_dir, "commit", "-m", f"Add README-based spec for {repo_short}")
                 base_commit = get_head_sha(repo_dir)
                 logger.info("  README spec committed: %s", base_commit[:12])
-                push_to_fork(repo_dir, fork_name, branch=TS_DATASET_BRANCH, token=token)
+                push_to_fork(repo_dir, fork_name, branch=TS_DATASET_BRANCH, token=token, force_with_lease=False)
             except Exception as e:
                 logger.warning("  README spec fallback failed: %s", e)
 

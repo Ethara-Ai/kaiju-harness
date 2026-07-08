@@ -370,6 +370,14 @@ def main() -> None:
     output_path.write_text(json.dumps(hf_entries, indent=2))
     logger.info("Saved dataset to %s", output_path)
 
+    if _consolidated and hf_entries and hf_entries[0].get("id"):
+        from kaiju.paths import copy_inference_inputs
+        for e in hf_entries:
+            split = e["repo"].split("/")[-1]
+            copied = copy_inference_inputs(hf_entries[0]["id"], split, repo_base="repos_ts")
+            if copied:
+                logger.info("Copied inference inputs for %s: %s", split, list(copied))
+
     print(f"\n{'=' * 80}")
     print(f"TS DATASET: {len(valid)} entries")
     print(f"{'=' * 80}")

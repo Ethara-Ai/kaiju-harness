@@ -22,11 +22,22 @@ def main(repo: str, verbose: int) -> List[List[str]]:
     repo = repo.lower()
     repo = repo.replace(".", "-")
     commit0_path = os.path.dirname(commit0.__file__)
+    from kaiju.paths import find_test_ids_file
+
+    def _resolve(fname: str) -> str:
+        p = find_test_ids_file(commit0_path, "test_ids", fname)
+        if p is None:
+            raise FileNotFoundError(
+                f"Test IDs file '{fname}' not found for repo '{repo}' "
+                f"(searched KAIJU_TEST_IDS_DIR and {commit0_path}/data/test_ids/)."
+            )
+        return str(p)
+
     if "__" in repo:
-        in_file_fail = read(f"{commit0_path}/data/test_ids/{repo}#fail_to_pass.bz2")
-        in_file_pass = read(f"{commit0_path}/data/test_ids/{repo}#pass_to_pass.bz2")
+        in_file_fail = read(_resolve(f"{repo}#fail_to_pass.bz2"))
+        in_file_pass = read(_resolve(f"{repo}#pass_to_pass.bz2"))
     else:
-        in_file_fail = read(f"{commit0_path}/data/test_ids/{repo}.bz2")
+        in_file_fail = read(_resolve(f"{repo}.bz2"))
         in_file_pass = ""
     out = [in_file_fail, in_file_pass]
     if verbose:

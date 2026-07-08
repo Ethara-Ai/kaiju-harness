@@ -24,14 +24,15 @@ def main(repo: str, verbose: int) -> List[List[str]]:
     repo = repo.replace(".", "-")
     commit0_path = os.path.dirname(commit0.__file__)
 
-    bz2_path = f"{commit0_path}/data/test_ids/{repo}.bz2"
-    try:
-        content = read(bz2_path)
-    except FileNotFoundError:
+    from kaiju.paths import find_test_ids_file
+    resolved = find_test_ids_file(commit0_path, "test_ids", f"{repo}.bz2")
+    if resolved is None:
         raise FileNotFoundError(
-            f"Test IDs file not found: {bz2_path}. "
+            f"Test IDs file not found for repo '{repo}' (searched KAIJU_TEST_IDS_DIR "
+            f"and {commit0_path}/data/test_ids/). "
             f"Run 'python -m tools.generate_test_ids_ts' first to generate test IDs."
-        ) from None
+        )
+    content = read(str(resolved))
 
     if verbose:
         print(f"TEST IDS:\n{content}")

@@ -1061,6 +1061,11 @@ def main() -> None:
         _entries_path.write_text(json.dumps([entry], indent=2))
         _dataset_path = _out_dir / "dataset.json"
         _dataset_path.write_text(json.dumps([entry], indent=2))
+        try:
+            from kaiju.paths import copy_inference_inputs as _cii
+            _cii(_uuid, entry["repo"].split("/")[-1], test_ids_subdir="rust_test_ids", repo_base="repos")
+        except Exception as _e:
+            logger.warning("copy_inference_inputs failed: %s", _e)
         logger.info("Wrote consolidated entries+dataset to %s", _out_dir)
         out_path.write_text(json.dumps([entry], indent=2))
     else:

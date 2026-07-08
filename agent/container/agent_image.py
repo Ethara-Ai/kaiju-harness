@@ -51,7 +51,7 @@ CONTEXT_PRUNE_DIRS = {
     ".ruff_cache",
     "node_modules",
     ".git",
-    "data",  # commit0/data is large sample data, not needed to import
+    "data",
 }
 
 

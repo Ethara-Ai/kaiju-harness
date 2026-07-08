@@ -530,9 +530,21 @@ def _extract_tool_definitions(out_data: dict[str, Any] | None) -> list[dict] | N
 # reward join (same as v1)
 # ---------------------------------------------------------------------------
 def load_pipeline_rewards(p: Path) -> dict[str, float | None]:
-    d = json.loads(p.read_text())
-    if "stages" in d:  # C pipeline nested schema
-        raw = d["stages"]
+    empty = {k: None for k in ("stage1", "stage2", "stage3")}
+    try:
+        text = p.read_text()
+    except OSError:
+        return empty
+    if not text.strip():
+        return empty
+    try:
+        d = json.loads(text)
+    except json.JSONDecodeError:
+        return empty
+    if not isinstance(d, dict):
+        return empty
+    if "stages" in d:
+        raw = d["stages"] or {}
         remap = {"stage1_draft": "stage1", "stage2_lint": "stage2", "stage3_test": "stage3"}
         return {v: (raw.get(k) or {}).get("pass_rate") for k, v in remap.items()}
     return {k: (d.get(k) or {}).get("pass_rate") for k in ("stage1", "stage2", "stage3")}

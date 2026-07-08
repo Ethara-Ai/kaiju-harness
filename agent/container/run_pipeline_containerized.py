@@ -265,9 +265,6 @@ def main(argv=None) -> int:
     # container run so the later outputs copy-out merges around it.
     build_logs = Path("outputs") / dataset_id / "build_logs"
     build_logs.mkdir(parents=True, exist_ok=True)
-    # Make build_logs/ self-contained: copy the host base+repo image build logs
-    # (Dockerfile + build_image.log + setup.sh) in, alongside the agent-image
-    # build we capture live below.
     _copied = _copy_host_image_build_logs(spec, build_logs, logger)
     _img_lines = [
         f"repo_image: {spec.repo_image_key}",
@@ -283,6 +280,28 @@ def main(argv=None) -> int:
             "repo/base images were built elsewhere.)")
     (build_logs / "images.txt").write_text("\n".join(_img_lines) + "\n",
                                            encoding="utf-8")
+
+    if args.bridge_url:
+        _bridge_url_container = args.bridge_url.replace("127.0.0.1", "host.docker.internal").replace("0.0.0.0", "host.docker.internal").replace("localhost", "host.docker.internal")
+        if "host.docker.internal" in _bridge_url_container:
+            try:
+                client.containers.run(
+                    "alpine:latest",
+                    command=["sh", "-c", f"wget -q --timeout=5 -O- {_bridge_url_container}/healthz || exit 1"],
+                    remove=True,
+                    extra_hosts=_extra_hosts(),
+                    stdout=True, stderr=True,
+                )
+                logger.info("Preflight OK: bridge %s reachable from Docker network", _bridge_url_container)
+            except Exception as e:
+                logger.error(
+                    "PREFLIGHT FAILED: bridge %s NOT reachable from Docker network. "
+                    "Fix: restart bridge with `KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh restart` "
+                    "(or set KAIJU_CC_BRIDGE_HOST=0.0.0.0 in .env). Details: %s",
+                    _bridge_url_container, e,
+                )
+                return 3
+
     _bh = logging.FileHandler(build_logs / "agent_image_build.log")
     _bh.setLevel(logging.DEBUG)
     _blogger = logging.getLogger(f"agent_image_build.{dataset_id[:8]}")
@@ -306,6 +325,7 @@ def main(argv=None) -> int:
         "KAIJU_IN_CONTAINER": "1",
         "KAIJU_EXPERIMENT_UUID": dataset_id,
         "KAIJU_LOG_LAYOUT": "consolidated",
+        "KAIJU_TEST_IDS_DIR": f"/opt/kaiju/outputs/{dataset_id}/datasets",
     }
     # Provider parity with the local pipeline: forward all host provider creds,
     # wire the bridge for anthropic/openai, and stage a Vertex/GCP key file.
@@ -352,6 +372,13 @@ def main(argv=None) -> int:
                 staged_gac.write_bytes(Path(_gac_src).read_bytes())
                 copy_to_container(container, staged_gac, Path(_IN_CONTAINER_GAC))
                 logger.info("Copied GCP service-account key -> %s", _IN_CONTAINER_GAC)
+
+        host_datasets_dir = Path(args.dataset).parent
+        container_datasets_dir = Path(f"/opt/kaiju/outputs/{dataset_id}/datasets")
+        _stream_exec(client, container.id, f"bash -c {shlex.quote('mkdir -p ' + str(container_datasets_dir))}")
+        for src in host_datasets_dir.glob("*.bz2"):
+            copy_to_container(container, src, container_datasets_dir / src.name)
+            logger.info("Staged inference input: %s -> %s", src.name, container_datasets_dir)
         # aider commits via `git config --get user.name` (reads git CONFIG, not the
         # GIT_AUTHOR_* env) — set a global identity or every auto-commit fails and
         # git_patch comes out empty. Then expose /testbed as repos/<name>.

@@ -244,6 +244,16 @@ class LocalInplace(ExecutionContext):
             text=True,
         )
 
+        for _dep_dir in ("node_modules", "target", "vendor"):
+            _src = os.path.join(self.repo_dir, _dep_dir)
+            _dst = os.path.join(self.worktree, _dep_dir)
+            if os.path.isdir(_src) and not os.path.exists(_dst):
+                try:
+                    os.symlink(_src, _dst)
+                    logger.debug("LocalInplace: symlinked %s -> %s", _dep_dir, _src)
+                except OSError as _e:
+                    logger.warning("LocalInplace: could not symlink %s: %s", _dep_dir, _e)
+
         # Stage the patch at a scratch path (not the container-absolute dest, so
         # this is safe to run unprivileged on a host).
         patch_scratch = os.path.join(self.work_root, "patch.diff")

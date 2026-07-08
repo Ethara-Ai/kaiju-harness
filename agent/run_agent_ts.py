@@ -216,6 +216,7 @@ def run_agent_for_repo_ts(
                         f" {shlex.quote(repo_path)}"
                         f" {shlex.quote(test_file)}"
                         f" --branch {shlex.quote(branch)}"
+                        f" --backend {shlex.quote(backend)}"
                         f" --commit0-config-file {shlex.quote(commit0_config_file)}"
                         f" --timeout 100"
                     )

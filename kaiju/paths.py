@@ -67,3 +67,36 @@ def spec_path(uuid: str) -> Path:
 
 def prep_log_path(uuid: str) -> Path:
     return experiment_dir(uuid) / "prep.log"
+
+
+def find_test_ids_file(commit0_path: str, subdir: str, filename: str) -> Path | None:
+    override = os.environ.get("KAIJU_TEST_IDS_DIR", "")
+    if override:
+        override_dir = Path(override)
+        stem = filename[:-4] if filename.endswith(".bz2") else filename
+        for candidate in (override_dir / filename, override_dir / f"{stem}_test_ids.bz2"):
+            if candidate.exists():
+                return candidate
+    legacy = Path(commit0_path) / "data" / subdir / filename
+    if legacy.exists():
+        return legacy
+    return None
+
+
+def copy_inference_inputs(uuid: str, split_name: str, *, test_ids_subdir: str = "test_ids", repo_base: str = "repos") -> dict:
+    import shutil
+    dst = datasets_dir(uuid)
+    copied = {}
+    tid = REPO_ROOT / "commit0" / "data" / test_ids_subdir / f"{split_name}.bz2"
+    if tid.exists():
+        target = dst / f"{split_name}_test_ids.bz2"
+        shutil.copy2(tid, target)
+        copied["test_ids"] = str(target)
+    for spec_rel in (Path(repo_base) / split_name / "spec.pdf.bz2", Path("specs") / f"{split_name}_readme_spec.pdf.bz2", Path("specs") / f"{split_name}.pdf.bz2"):
+        spec_abs = REPO_ROOT / spec_rel
+        if spec_abs.exists():
+            target = dst / f"{split_name}_spec.pdf.bz2"
+            shutil.copy2(spec_abs, target)
+            copied["spec"] = str(target)
+            break
+    return copied

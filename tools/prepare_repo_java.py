@@ -535,6 +535,12 @@ def main() -> None:
         _out_dir = datasets_dir(_uuid)
         _entries_path = _out_dir / "entries.json"
         _entries_path.write_text(json.dumps(dataset_entries, indent=2))
+        try:
+            from kaiju.paths import copy_inference_inputs as _cii
+            for _e in dataset_entries:
+                _cii(_uuid, _e["repo"].split("/")[-1], test_ids_subdir="java_test_ids", repo_base="repos/java")
+        except Exception as _e:
+            logger.warning("copy_inference_inputs failed: %s", _e)
         logger.info("Wrote %d entries to %s (consolidated)", len(dataset_entries), _entries_path)
         if args.output:
             output_path = Path(args.output)

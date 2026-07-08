@@ -302,6 +302,14 @@ def main() -> None:
     output_path.write_text(json.dumps(hf_entries, indent=2))
     logger.info("Saved dataset to %s", output_path)
 
+    if _consolidated and hf_entries and hf_entries[0].get("id"):
+        try:
+            from kaiju.paths import copy_inference_inputs as _cii
+            for e in hf_entries:
+                _cii(hf_entries[0]["id"], e["repo"].split("/")[-1], test_ids_subdir="c_test_ids", repo_base="repos")
+        except Exception as _e:
+            logger.warning("copy_inference_inputs failed: %s", _e)
+
     print(f"\n{'=' * 80}")
     print(f"C DATASET: {len(valid)} entries")
     print(f"{'=' * 80}")
