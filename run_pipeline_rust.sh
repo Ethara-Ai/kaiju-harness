@@ -1486,7 +1486,7 @@ extract_all_stage_costs() {
     LAST_COST_SOURCE="none"
     if [[ ! -d "$log_dir" ]]; then
         LAST_COST_SOURCE="missing_dir"
-        echo "0.0000"
+        echo "0.0000 missing_dir"
         return
     fi
     local err_file="${log_dir}/cost_extract.err"
@@ -1555,13 +1555,18 @@ PYEOF
         if [[ "$LAST_COST_SOURCE" == "none" ]]; then
             log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run."
         fi
-        echo "$cost_part"
+        # Echo BOTH cost AND source: the caller runs this in a command
+        # substitution `$(...)`, i.e. a SUBSHELL, so any assignment to the global
+        # LAST_COST_SOURCE here is lost when the subshell exits — the parent would
+        # always read the stale initial "unknown". Returning "<cost> <source>" on
+        # stdout lets the caller recover the real source.
+        echo "$cost_part ${source_part:-none}"
     else
         LAST_COST_SOURCE="parse_error"
         # NB: use plain brackets, NOT ${result@Q} — the @Q transform is bash 4.4+
         # and throws "bad substitution" on the macOS default bash 3.2.
         log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000."
-        echo "0.0000"
+        echo "0.0000 parse_error"
     fi
 }
 
@@ -1732,9 +1737,9 @@ stage_1_draft() {
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
 
-    local cost
-    cost=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 1 cost extraction failed"; return 1; }
-    local cost_source="$LAST_COST_SOURCE"
+    local cost cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 1 cost extraction failed"; return 1; }
+    cost="${_co%% *}"; cost_source="${_co#* }"
     log "  Stage 1 cost: \$${cost} (source: ${cost_source})"
 
     run_evaluate "$BRANCH_NAME" "stage1"
@@ -1787,9 +1792,9 @@ stage_2_lint_refine() {
 
     local s1_cost
     s1_cost=$(echo "$RESULTS_JSON" | jq -r '.stage1.cost_usd // 0') || { log "ERROR: Stage 2 failed to read stage1 cost"; return 1; }
-    local s2_incremental
-    s2_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
-    local cost_source="$LAST_COST_SOURCE"
+    local s2_incremental cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
+    s2_incremental="${_co%% *}"; cost_source="${_co#* }"
     local total_cost
     total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental") || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
@@ -1853,9 +1858,9 @@ stage_3_test_refine() {
 
     local s2_cumulative
     s2_cumulative=$(echo "$RESULTS_JSON" | jq -r '.stage2.cost_usd_cumulative // 0') || { log "ERROR: Stage 3 failed to read stage2 cost"; return 1; }
-    local s3_incremental
-    s3_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
-    local cost_source="$LAST_COST_SOURCE"
+    local s3_incremental cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
+    s3_incremental="${_co%% *}"; cost_source="${_co#* }"
     local total_cost
     total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental") || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
