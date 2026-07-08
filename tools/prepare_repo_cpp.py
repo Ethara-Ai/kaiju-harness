@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
 import uuid as _uuid_mod
@@ -58,6 +59,11 @@ from tools._git_auth import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+class BazelOnlyRepo(RuntimeError):
+    pass
+
 
 TOOLS_DIR = Path(__file__).parent
 PROJECT_ROOT = TOOLS_DIR.parent
@@ -96,20 +102,41 @@ def get_default_branch(repo_dir: Path) -> str:
 
 
 
+def _run_with_retries(cmd: list[str], *, timeout: int, check: bool, attempts: int = 3, backoff: float = 5.0) -> subprocess.CompletedProcess:
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=check)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            last_exc = exc
+            if i == attempts - 1:
+                break
+            wait = backoff * (2 ** i)
+            logger.warning("Command failed (attempt %d/%d): %s. Retrying in %.1fs.", i + 1, attempts, " ".join(cmd[:4]), wait)
+            time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
+
+
 def clone_repo(full_name: str, clone_dir: Path) -> Path:
     repo_name = full_name.split("/")[-1]
     repo_dir = clone_dir / repo_name
 
     if repo_dir.exists():
         logger.info("Clone already exists: %s", repo_dir)
-        return repo_dir
+    else:
+        url = f"https://github.com/{full_name}.git"
+        logger.info("Cloning %s...", full_name)
+        _run_with_retries(
+            ["git", "clone", "--recurse-submodules", url, str(repo_dir)],
+            timeout=1200, check=True,
+        )
 
-    url = f"https://github.com/{full_name}.git"
-    logger.info("Cloning %s...", full_name)
-    subprocess.run(
-        ["git", "clone", url, str(repo_dir)],
-        capture_output=True, text=True, timeout=600, check=True,
-    )
+    if (repo_dir / ".gitmodules").is_file():
+        logger.info("Initializing submodules for %s...", repo_name)
+        _run_with_retries(
+            ["git", "-C", str(repo_dir), "submodule", "update", "--init", "--recursive"],
+            timeout=600, check=False,
+        )
     return repo_dir
 
 
@@ -263,6 +290,9 @@ def _detect_test_framework(repo_dir: Path) -> str:
     return ""
 
 
+_BAZEL_MARKERS = ("WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "BUILD.bazel", "BUILD")
+
+
 def detect_build_system(repo_dir: Path) -> str:
     hit = _build_system_at(repo_dir)
     if hit is not None:
@@ -278,11 +308,61 @@ def detect_build_system(repo_dir: Path) -> str:
             )
             return nested
 
+    if any((repo_dir / m).exists() for m in _BAZEL_MARKERS):
+        raise BazelOnlyRepo(
+            f"{repo_dir.name} looks Bazel-only (found WORKSPACE/BUILD but no "
+            "CMakeLists.txt/meson.build/configure.ac/Makefile). Skipping — "
+            "current pipeline supports cmake/meson/autotools/make only."
+        )
+
     raise RuntimeError(
         f"No supported build system found in {repo_dir}. "
         "Expected: CMakeLists.txt, meson.build, configure.ac, or Makefile "
         "at repo root or shallow subdirectory."
     )
+
+
+_TEST_OPTION_PATTERN = re.compile(
+    r"""option\s*\(\s*([A-Z][A-Z0-9_]*)\s+(?:"[^"]*"|'[^']*')\s+[^)]*\)""",
+    re.IGNORECASE,
+)
+
+_TEST_OPTION_HINTS = (
+    "BUILD_TESTS", "BUILD_TESTING", "BUILD_TEST", "BUILDTESTS",
+    "ENABLE_TESTS", "ENABLE_TESTING", "ENABLE_TEST",
+    "WITH_TESTS", "WITH_TESTING",
+    "BUILD_UNIT_TESTS", "BUILD_UNITTESTS",
+    "_TEST", "_TESTS", "_TESTING",
+)
+
+_TEST_OPTION_BLOCKLIST = (
+    "CUDA", "GPU", "HIP", "SYCL", "ROCM", "OPENCL", "FUZZ",
+    "BENCHMARK", "COVERAGE", "SANITIZ", "VALGRIND", "PROFIL",
+)
+
+
+def _detect_cmake_test_options(repo_dir: Path) -> list[str]:
+    root = repo_dir / "CMakeLists.txt"
+    if not root.is_file():
+        return []
+    try:
+        text = root.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    flags: list[str] = []
+    seen: set[str] = set()
+    for match in _TEST_OPTION_PATTERN.finditer(text):
+        name = match.group(1)
+        upper = name.upper()
+        if not any(hint in upper for hint in _TEST_OPTION_HINTS):
+            continue
+        if any(bad in upper for bad in _TEST_OPTION_BLOCKLIST):
+            continue
+        if name in seen:
+            continue
+        flags.append(f"-D{name}=ON")
+        seen.add(name)
+    return flags
 
 
 def generate_compile_commands(
@@ -296,6 +376,13 @@ def generate_compile_commands(
         build_dir = repo_dir / "build"
         build_dir.mkdir(exist_ok=True)
         cmake_cfg_cmd: list[str] = ["cmake", "-B", "build", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+        auto_test_flags = _detect_cmake_test_options(repo_dir)
+        existing_defs = {opt.split("=", 1)[0] for opt in (cmake_options or []) if opt.startswith("-D")}
+        for flag in auto_test_flags:
+            if flag.split("=", 1)[0] not in existing_defs:
+                cmake_cfg_cmd.append(flag)
+        if auto_test_flags:
+            logger.info("Auto-enabled test flags: %s", " ".join(auto_test_flags))
         if cmake_options:
             cmake_cfg_cmd.extend(cmake_options)
         result = subprocess.run(
@@ -605,6 +692,7 @@ def create_dataset_entry(
     cmake_options: list[str] | None = None,
     pre_install: list[str] | None = None,
     build_subdir: str = ".",
+    has_submodules: bool = False,
 ) -> dict:
     primary_src = src_dirs[0] if src_dirs else "."
     test_dir = primary_src.rsplit("/src", 1)[0] if "/src" in primary_src else "."
@@ -621,6 +709,9 @@ def create_dataset_entry(
         "meson": install_meson,
     }
     install = install_by_system.get(build_system, install_make)
+
+    if has_submodules:
+        install = f"git submodule update --init --recursive && {install}"
 
     subdir = (build_subdir or ".").strip() or "."
     if subdir != ".":
@@ -915,6 +1006,17 @@ def prepare_cpp_repo(
         cpp_standard, version_source, version_conflicts or "(none)",
     )
 
+    auto_test_flags = _detect_cmake_test_options(repo_dir) if build_system == "cmake" else []
+    merged_cmake_options = list(cmake_options or [])
+    for flag in auto_test_flags:
+        if flag not in merged_cmake_options:
+            merged_cmake_options.append(flag)
+    has_submodules = (repo_dir / ".gitmodules").exists()
+    if auto_test_flags:
+        logger.info("Auto-detected cmake test flags: %s", " ".join(auto_test_flags))
+    if has_submodules:
+        logger.info("Repo uses git submodules; install command will init them.")
+
     entry = create_dataset_entry(
         upstream=upstream,
         fork_name=fork_name,
@@ -930,8 +1032,9 @@ def prepare_cpp_repo(
         test_framework=test_framework,
         packages=packages,
         spec_url=readme_spec_url or spec_url,
-        cmake_options=cmake_options,
+        cmake_options=merged_cmake_options or None,
         pre_install=pre_install,
+        has_submodules=has_submodules,
     )
 
     if not dry_run:

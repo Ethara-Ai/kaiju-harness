@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Any
 
 from tools.prepare_repo_cpp import (
+    BazelOnlyRepo,
     DEFAULT_ORG,
+    _detect_cmake_test_options,
     clone_repo,
     create_dataset_entry,
     detect_build_system,
@@ -316,6 +318,12 @@ def prepare_single_repo(
             return None
 
     packages = dependencies if dependencies else ""
+    detected_cmake_opts = _detect_cmake_test_options(repo_dir) if build_system == "cmake" else []
+    has_submodules = (repo_dir / ".gitmodules").exists()
+    if detected_cmake_opts:
+        print(f"  [INFO] Auto-detected test flags: {' '.join(detected_cmake_opts)}")
+    if has_submodules:
+        print("  [INFO] Repo uses git submodules; install command will init them.")
     entry = create_dataset_entry(
         upstream=full_name,
         fork_name=fork_name,
@@ -330,6 +338,8 @@ def prepare_single_repo(
         packages=packages,
         pre_install=pre_install,
         build_subdir=build_subdir,
+        cmake_options=detected_cmake_opts or None,
+        has_submodules=has_submodules,
     )
     if default_branch:
         entry.setdefault("meta", {})["default_branch"] = default_branch
@@ -440,13 +450,15 @@ def print_summary(
     test_id_results: dict[str, int],
     failures: dict[str, str],
     elapsed: float,
+    skips: dict[str, str] | None = None,
 ) -> None:
-    """Print a formatted summary of the batch run."""
+    skips = skips or {}
     print(f"\n{'='*60}")
     print("  BATCH PREPARE C++ SUMMARY")
     print(f"{'='*60}")
     print(f"  Total time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
     print(f"  Repos prepared: {len(entries)}")
+    print(f"  Repos skipped: {len(skips)}")
     print(f"  Repos failed: {len(failures)}")
     print()
 
@@ -457,11 +469,30 @@ def print_summary(
             tid = test_id_results.get(repo.split("/")[-1], 0)
             print(f"    {repo:40s} tests={tid}")
 
+    if skips:
+        print("\n  Skipped repos:")
+        for name, reason in skips.items():
+            print(f"    {name:40s} {reason}")
+
     if failures:
         print("\n  Failed repos:")
         for name, reason in failures.items():
             print(f"    {name:40s} {reason}")
     print(f"{'='*60}\n")
+
+
+def _playwright_preflight() -> None:
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except ImportError:
+        print("[WARN] playwright not installed; spec PDF generation will fall back to README-only.")
+        return
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+    except Exception as exc:
+        print(f"[WARN] playwright chromium unavailable ({exc!s}); run `playwright install chromium` for full spec PDFs.")
 
 
 def main() -> None:
@@ -543,9 +574,12 @@ CSV format:
     # Load state for resumability
     state = load_state(args.state_file) if args.resume else {"completed": {}, "failures": {}}
 
+    _playwright_preflight()
+
     start_time = time.time()
     entries: list[dict[str, Any]] = []
     failures: dict[str, str] = dict(state.get("failures", {}))
+    skips: dict[str, str] = dict(state.get("skips", {}))
 
     # Restore previously completed entries
     for name, entry in state.get("completed", {}).items():
@@ -579,6 +613,22 @@ CSV format:
                 pre_install=pre_install_map.get(full_name, []),
                 verify_compiles_flag=not args.no_verify_compiles,
             )
+        except BazelOnlyRepo as e:
+            print(f"  [SKIP] {full_name}: {e}")
+            skips[full_name] = str(e)
+            state.setdefault("skips", {})[full_name] = str(e)
+            if not args.dry_run:
+                save_state(args.state_file, state)
+            continue
+        except Exception as e:
+            print(f"  [ERROR] {full_name}: {e}")
+            failures[full_name] = str(e)
+            state.setdefault("failures", {})[full_name] = str(e)
+            if not args.dry_run:
+                save_state(args.state_file, state)
+            continue
+
+        try:
             if entry:
                 overrides = REPO_OVERRIDES.get(full_name, {})
                 if overrides:
@@ -651,10 +701,9 @@ CSV format:
         print("\n  [SKIP] Docker build (--skip-build)")
 
     elapsed = time.time() - start_time
-    print_summary(entries, test_id_results, failures, elapsed)
+    print_summary(entries, test_id_results, failures, elapsed, skips=skips)
 
-    # Cleanup state file on full success
-    if not failures and args.state_file.exists():
+    if not failures and not skips and args.state_file.exists():
         args.state_file.unlink()
         print(f"  Cleaned up state file: {args.state_file}")
 
