@@ -28,6 +28,7 @@ from tools.prepare_repo_cpp import (
     clone_repo,
     create_dataset_entry,
     detect_build_system,
+    find_build_source_subdir,
     fork_repo,
     generate_compile_commands,
     get_head_sha,
@@ -42,38 +43,85 @@ from tools.generate_test_ids_cpp import (
     install_test_ids,
 )
 
-GITIGNORE_ENTRIES = [".aider*", "logs/"]
+GITIGNORE_ENTRIES = [".aider*", "logs/", "build/"]
 DEFAULT_CLONE_DIR = "./repos_staging"
 
 
-def parse_csv(csv_path: Path) -> list[dict[str, str]]:
-    """Parse the batch CSV file.
+_FRAMEWORK_ALIASES = {
+    "googletest": "gtest",
+    "google_test": "gtest",
+    "gtest": "gtest",
+    "catch2": "catch2",
+    "catch": "catch",
+    "doctest": "doctest",
+    "boost.test": "boost_test",
+    "boost_test": "boost_test",
+    "ctest": "ctest",
+    "ctest(named)": "ctest",
+    "custom+ctest(named)": "ctest",
+    "caf-test+ctest(named)": "caf",
+    "caf-test": "caf",
+    "caf": "caf",
+}
 
-    Expected columns:
-        library_name, Github url, Organization Name,
-        build_system, test_framework, cpp_standard, dependencies
-    """
+
+def _canon_framework(raw: str) -> str:
+    key = raw.strip().lower()
+    key = key.split(" (")[0].strip()
+    return _FRAMEWORK_ALIASES.get(key, key or "ctest")
+
+
+def _first(row: dict[str, str], *keys: str, default: str = "") -> str:
+    for k in keys:
+        if k in row and row[k] is not None and str(row[k]).strip():
+            return str(row[k]).strip()
+    return default
+
+
+def parse_csv(csv_path: Path) -> list[dict[str, str]]:
     repos: list[dict[str, str]] = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            url = row.get("Github url", "").strip()
-            if not url:
+            archived = _first(row, "archived", default="").lower()
+            if archived in ("true", "yes", "1"):
                 continue
-            # Extract owner/repo from URL
-            parts = url.rstrip("/").split("/")
-            if len(parts) < 2:
-                print(f"  [WARN] Skipping invalid URL: {url}")
+            license_ok = _first(row, "license_accepted", default="yes").lower()
+            if license_ok in ("no", "false", "0"):
                 continue
-            full_name = f"{parts[-2]}/{parts[-1]}"
+
+            url = _first(row, "repo_url", "Github url", "github_url", "url")
+            org_repo = _first(row, "org_repo", "full_name", "repo")
+            if org_repo and "/" in org_repo:
+                full_name = org_repo
+            elif url:
+                parts = url.rstrip("/").split("/")
+                if len(parts) < 2:
+                    print(f"  [WARN] Skipping invalid URL: {url}")
+                    continue
+                full_name = f"{parts[-2]}/{parts[-1]}"
+            else:
+                continue
+
+            library_name = _first(row, "library_name", "repo_name",
+                                  default=full_name.split("/")[-1])
+            org = _first(row, "Organization Name", "target_org", "org",
+                         default=DEFAULT_ORG)
+            build_system = _first(row, "build_system", default="cmake").lower()
+            test_framework = _canon_framework(_first(row, "test_framework"))
+            cpp_standard = _first(row, "cpp_standard", default="17")
+            dependencies = _first(row, "dependencies", "deps")
+            default_branch = _first(row, "default_branch")
+
             repos.append({
                 "full_name": full_name,
-                "library_name": row.get("library_name", parts[-1]).strip(),
-                "org": row.get("Organization Name", DEFAULT_ORG).strip(),
-                "build_system": row.get("build_system", "cmake").strip().lower(),
-                "test_framework": row.get("test_framework", "ctest").strip().lower(),
-                "cpp_standard": row.get("cpp_standard", "17").strip(),
-                "dependencies": row.get("dependencies", "").strip(),
+                "library_name": library_name,
+                "org": org,
+                "build_system": build_system,
+                "test_framework": test_framework,
+                "cpp_standard": cpp_standard,
+                "dependencies": dependencies,
+                "default_branch": default_branch,
             })
     return repos
 
@@ -99,12 +147,28 @@ def _make_test_cmd(
 
 def _detect_src_dir(repo_dir: Path) -> str:
     """Detect the most likely source directory for a C++ repo."""
-    candidates = ["src", "include", "lib", "source"]
-    for d in candidates:
+    preferred = ["src", "source"]
+    for d in preferred:
         if (repo_dir / d).is_dir():
             return d
-    # Fallback: look for .cpp/.hpp files at the root
-    cpp_files = list(repo_dir.glob("*.cpp")) + list(repo_dir.glob("*.hpp"))
+    _SKIP = {"build", "cmake-build-debug", "cmake-build-release", "builddir", "third_party",
+             "test", "tests", "unittest", "unittests", "examples", "sample", "samples",
+             "benchmark", "benchmarks", "bench", "fuzz", "fuzzing", "doc", "docs",
+             ".git", ".github", ".vscode", ".idea", "cmake", "python", "app", "bindings",
+             "include"}
+    _EXTS = {".cc", ".cpp", ".cxx", ".c++"}
+    best_dir = None
+    best_count = 0
+    for entry in sorted(repo_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith(".") or entry.name in _SKIP:
+            continue
+        count = sum(1 for p in entry.rglob("*") if p.is_file() and p.suffix in _EXTS)
+        if count > best_count:
+            best_count = count
+            best_dir = entry.name
+    if best_dir:
+        return best_dir
+    cpp_files = list(repo_dir.glob("*.cpp")) + list(repo_dir.glob("*.cc"))
     if cpp_files:
         return "."
     return "src"
@@ -135,6 +199,9 @@ def prepare_single_repo(
     dependencies: str,
     dry_run: bool = False,
     allow_broken_stubs: bool = False,
+    default_branch: str = "",
+    pre_install: list[str] | None = None,
+    verify_compiles_flag: bool = True,
 ) -> dict[str, Any] | None:
     """Prepare a single C++ repo: fork, clone, stub, push, create entry.
 
@@ -181,6 +248,10 @@ def prepare_single_repo(
     if detected != build_system:
         print(f"  [INFO] Detected build system '{detected}' differs from CSV '{build_system}'. Using CSV value.")
 
+    build_subdir = find_build_source_subdir(repo_dir)
+    if build_subdir != ".":
+        print(f"  [INFO] Build config lives in nested subdir '{build_subdir}' — install/test_cmd will be prefixed with 'cd {build_subdir}'.")
+
     # 4. Record reference commit, create branch
     print("  [3/8] Recording reference commit...")
     reference_commit = get_head_sha(repo_dir)
@@ -197,7 +268,9 @@ def prepare_single_repo(
         print("  [WARN] compile_commands.json generation failed. Stubber may not work optimally.")
 
     # 6. Stub source
-    src_dir = _detect_src_dir(repo_dir)
+    src_root = repo_dir if build_subdir == "." else repo_dir / build_subdir
+    src_dir_relative = _detect_src_dir(src_root)
+    src_dir = src_dir_relative if build_subdir == "." else f"{build_subdir}/{src_dir_relative}"
     print(f"  [5/8] Stubbing source directory: {src_dir}...")
     try:
         stubbed, skipped = stub_source_dir(repo_dir, src_dir, build_system)
@@ -207,15 +280,17 @@ def prepare_single_repo(
         if not allow_broken_stubs:
             return None
 
-    # 7. Verify compilation
-    print("  [6/8] Verifying stubbed code compiles...")
-    compiles = verify_compiles(repo_dir, build_system)
-    if not compiles:
-        print("  [WARN] Stubbed code does not compile.")
-        if not allow_broken_stubs:
-            print("  [ERROR] Aborting (use --allow-broken-stubs to continue).")
-            return None
-        print("  [WARN] Continuing despite compilation failure (--allow-broken-stubs).")
+    if verify_compiles_flag:
+        print("  [6/8] Verifying stubbed code compiles...")
+        compiles = verify_compiles(repo_dir, build_system)
+        if not compiles:
+            print("  [WARN] Stubbed code does not compile.")
+            if not allow_broken_stubs:
+                print("  [ERROR] Aborting (use --allow-broken-stubs to continue).")
+                return None
+            print("  [WARN] Continuing despite compilation failure (--allow-broken-stubs).")
+    else:
+        print("  [6/8] Skipping host compile verification (--no-verify-compiles).")
 
     # 8. Commit and push
     print("  [7/8] Committing and pushing...")
@@ -237,13 +312,12 @@ def prepare_single_repo(
             print(f"  [ERROR] Push failed again: {e2}")
             return None
 
-    # Create entry
     packages = dependencies if dependencies else ""
     entry = create_dataset_entry(
         upstream=full_name,
         fork_name=fork_name,
         repo_name=repo_name,
-        src_dir=src_dir,
+        src_dirs=[src_dir],
         test_cmd=test_cmd,
         base_commit=base_commit,
         reference_commit=reference_commit,
@@ -251,7 +325,11 @@ def prepare_single_repo(
         cpp_standard=cpp_standard,
         test_framework=test_framework,
         packages=packages,
+        pre_install=pre_install,
+        build_subdir=build_subdir,
     )
+    if default_branch:
+        entry.setdefault("meta", {})["default_branch"] = default_branch
 
     # Validate
     issues = validate_cpp_entry(entry)
@@ -275,7 +353,7 @@ def run_commit0_setup(dataset_path: Path) -> bool:
     print("\n  Running commit0 C++ setup...")
     cmd = [
         sys.executable, "-m", "commit0.cli_cpp",
-        "setup", "all",
+        "setup",
         "--dataset-name", str(dataset_path),
         "--dataset-split", "train",
     ]
@@ -291,19 +369,18 @@ def run_commit0_setup(dataset_path: Path) -> bool:
         return False
 
 
-def run_commit0_build(dataset_path: Path) -> bool:
-    """Run commit0 Docker build for C++ repos."""
-    print("\n  Building Docker images...")
+def run_commit0_build(dataset_path: Path, timeout: int = 3600) -> bool:
+    print(f"\n  Building Docker images (timeout={timeout}s)...")
     cmd = [
         sys.executable, "-m", "commit0.harness.build_cpp",
-        "--dataset", str(dataset_path),
+        str(dataset_path),
     ]
     try:
-        subprocess.run(cmd, check=True, timeout=3600)
+        subprocess.run(cmd, check=True, timeout=timeout)
         print("  [OK] Docker build complete.")
         return True
     except subprocess.TimeoutExpired:
-        print("  [ERROR] Docker build timed out (3600s).")
+        print(f"  [ERROR] Docker build timed out ({timeout}s).")
         return False
     except subprocess.CalledProcessError as e:
         print(f"  [ERROR] Docker build failed: {e}")
@@ -420,8 +497,21 @@ CSV format:
                         help="State file for resumability")
     parser.add_argument("--allow-broken-stubs", action="store_true",
                         help="Continue even if stubbed code does not compile")
+    parser.add_argument("--no-verify-compiles", action="store_true",
+                        help="Skip host toolchain compile verification (default off for HEAVY repos with deps)")
+    parser.add_argument("--docker-build-timeout", type=int, default=3600,
+                        help="Docker build timeout in seconds (default: 3600)")
+    parser.add_argument("--pre-install-file", type=Path, default=None,
+                        help="JSON map { 'org/repo': ['cmd1', 'cmd2'] } of per-repo pre_install steps")
 
     args = parser.parse_args()
+
+    pre_install_map: dict[str, list[str]] = {}
+    if args.pre_install_file:
+        if not args.pre_install_file.exists():
+            print(f"ERROR: pre-install file not found: {args.pre_install_file}")
+            sys.exit(1)
+        pre_install_map = json.loads(args.pre_install_file.read_text())
 
     if not args.csv_file.exists():
         print(f"ERROR: CSV file not found: {args.csv_file}")
@@ -482,6 +572,9 @@ CSV format:
                 dependencies=repo_info["dependencies"],
                 dry_run=args.dry_run,
                 allow_broken_stubs=args.allow_broken_stubs,
+                default_branch=repo_info.get("default_branch", ""),
+                pre_install=pre_install_map.get(full_name, []),
+                verify_compiles_flag=not args.no_verify_compiles,
             )
             if entry:
                 entries.append(entry)
@@ -527,7 +620,7 @@ CSV format:
     # Docker build
     test_id_results: dict[str, int] = {}
     if not args.skip_build:
-        build_ok = run_commit0_build(args.output)
+        build_ok = run_commit0_build(args.output, timeout=args.docker_build_timeout)
         if not build_ok:
             print("  [WARN] Docker build failed. Test ID generation may fail.")
 

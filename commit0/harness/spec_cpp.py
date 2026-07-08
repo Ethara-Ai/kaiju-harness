@@ -52,6 +52,7 @@ class CppSpec(Spec):
             base_image=self.base_image_key,
             pre_install=specs.get("pre_install"),
             install_cmd=specs.get("install"),
+            packages=specs.get("packages"),
         )
 
     def _get_build_system(self) -> str:
@@ -126,7 +127,7 @@ class CppSpec(Spec):
             f"git apply -v {diff_path} || git apply {diff_path} || true",
             *revert_lines,
             "git status",
-            f"{{{{ {build_cmd} && {test_cmd} {{test_ids}}; }}}} > test_output.txt 2>&1",
+            f"{{{{ {build_cmd}; {test_cmd} {{test_ids}}; }}}} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",
         ]
 

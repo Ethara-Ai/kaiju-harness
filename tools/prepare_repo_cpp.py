@@ -113,18 +113,175 @@ def clone_repo(full_name: str, clone_dir: Path) -> Path:
     return repo_dir
 
 
-def detect_build_system(repo_dir: Path) -> str:
-    if (repo_dir / "CMakeLists.txt").exists():
+def _build_system_at(d: Path) -> str | None:
+    if (d / "CMakeLists.txt").exists():
         return "cmake"
-    if (repo_dir / "meson.build").exists():
+    if (d / "meson.build").exists():
         return "meson"
-    if (repo_dir / "configure.ac").exists() or (repo_dir / "configure.in").exists():
+    if (d / "configure.ac").exists() or (d / "configure.in").exists():
         return "autotools"
-    if (repo_dir / "Makefile").exists():
+    if (d / "Makefile").exists():
         return "make"
+    return None
+
+
+_NESTED_BUILD_SKIP = {
+    "build", "cmake-build-debug", "cmake-build-release", "builddir",
+    ".cache", "_deps", "third_party", "vendor", "extern", ".git",
+    "test", "tests", "unittest", "unittests", "examples", "sample",
+    "samples", "benchmark", "benchmarks", "bench", "fuzz", "fuzzing",
+    "doc", "docs", ".github", ".vscode", ".idea", "python", "bindings",
+    "cmake", "scripts", "tools",
+}
+
+
+def find_build_source_subdir(repo_dir: Path) -> str:
+    if _build_system_at(repo_dir) is not None:
+        return "."
+
+    preferred = ["wangle", "dev", "iceoryx_meta", "src", "source"]
+    for name in preferred:
+        cand = repo_dir / name
+        if cand.is_dir() and _build_system_at(cand) is not None:
+            return name
+
+    for entry in sorted(repo_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(".") or entry.name in _NESTED_BUILD_SKIP:
+            continue
+        if _build_system_at(entry) is not None:
+            return entry.name
+
+    return "."
+
+
+_FRAMEWORK_MARKERS = [
+    ("gtest", ("gtest", "googletest", "gtest_discover_tests", "gtest_add_tests")),
+    ("catch2", ("catch2", "catch2/catch", "catch_discover_tests")),
+    ("doctest", ("doctest",)),
+    ("boost_test", ("boost/test", "boost_unit_test", "boost::unit_test")),
+    ("caf", ("caf_add_test_suites", "caf-test", "caf::test")),
+    ("catch", ("catch.hpp", "catch/catch.hpp", "catch_main")),
+]
+
+
+_TEST_DIR_NAMES = {"test", "tests", "unittest", "unittests", "unit_tests", "testing"}
+
+
+def _iter_test_related_dirs(repo_dir: Path, max_depth: int = 4):
+    def walk(current: Path, depth: int, in_test: bool):
+        yield current, in_test
+        if depth >= max_depth:
+            return
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name.startswith("."):
+                continue
+            is_test_dir = name in _TEST_DIR_NAMES
+            if not is_test_dir and name in _NESTED_BUILD_SKIP:
+                continue
+            yield from walk(entry, depth + 1, in_test or is_test_dir)
+
+    yield from walk(repo_dir, 0, False)
+
+
+def _framework_scan_cmake_texts(repo_dir: Path) -> str:
+    parts: list[str] = []
+    seen: set[Path] = set()
+    root_cmake = repo_dir / "CMakeLists.txt"
+    if root_cmake.exists():
+        parts.append(root_cmake.read_text(errors="ignore"))
+        seen.add(root_cmake.resolve())
+    for d, in_test in _iter_test_related_dirs(repo_dir):
+        if not in_test:
+            continue
+        p = d / "CMakeLists.txt"
+        if not p.exists():
+            continue
+        rp = p.resolve()
+        if rp in seen:
+            continue
+        parts.append(p.read_text(errors="ignore"))
+        seen.add(rp)
+    return "\n".join(parts).lower()
+
+
+def _framework_scan_test_sources(repo_dir: Path) -> str:
+    snippets: list[str] = []
+    for d, in_test in _iter_test_related_dirs(repo_dir):
+        if not in_test:
+            continue
+        try:
+            for entry in d.iterdir():
+                if not entry.is_file():
+                    continue
+                if not entry.name.endswith((".cpp", ".cc", ".cxx", ".c++", ".hpp", ".h", ".hh", ".hxx")):
+                    continue
+                try:
+                    snippets.append(entry.read_text(errors="ignore")[:8192])
+                except OSError:
+                    continue
+                if len(snippets) > 128:
+                    return "\n".join(snippets).lower()
+        except OSError:
+            continue
+    return "\n".join(snippets).lower()
+
+
+_SOURCE_FRAMEWORK_MARKERS = [
+    ("gtest", ("#include <gtest/gtest.h>", '#include "gtest/gtest.h"')),
+    ("catch2", ('#include <catch2/', '#include "catch2/')),
+    ("doctest", ('#include <doctest/doctest.h>', '#include "doctest/doctest.h"',
+                 '#include <doctest.h>', '#include "doctest.h"')),
+    ("boost_test", ('#include <boost/test/', '#include "boost/test/')),
+    ("catch", ('#include "catch.hpp"', '#include <catch.hpp>')),
+]
+
+
+def _detect_test_framework(repo_dir: Path) -> str:
+    text = _framework_scan_cmake_texts(repo_dir)
+    for tf_name, markers in _FRAMEWORK_MARKERS:
+        if tf_name == "catch" and "catch2" in text:
+            continue
+        if any(m in text for m in markers):
+            return tf_name
+    src_text = _framework_scan_test_sources(repo_dir)
+    for tf_name, markers in _SOURCE_FRAMEWORK_MARKERS:
+        if tf_name == "catch" and "catch2" in src_text:
+            continue
+        if any(m in src_text for m in markers):
+            return tf_name
+    if text and ("add_test(" in text or "enable_testing" in text):
+        return "ctest"
+    return ""
+
+
+def detect_build_system(repo_dir: Path) -> str:
+    hit = _build_system_at(repo_dir)
+    if hit is not None:
+        return hit
+
+    subdir = find_build_source_subdir(repo_dir)
+    if subdir != ".":
+        nested = _build_system_at(repo_dir / subdir)
+        if nested is not None:
+            logger.info(
+                "Build config found in nested subdir '%s' (system=%s)",
+                subdir, nested,
+            )
+            return nested
+
     raise RuntimeError(
         f"No supported build system found in {repo_dir}. "
-        "Expected: CMakeLists.txt, meson.build, configure.ac, or Makefile"
+        "Expected: CMakeLists.txt, meson.build, configure.ac, or Makefile "
+        "at repo root or shallow subdirectory."
     )
 
 
@@ -309,6 +466,20 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
         logger.warning("cppstubber exited %d: %s", result.returncode, result.stderr.strip()[:500])
 
     logger.info("Stubbed source (cppstubber): %d items", ok)
+
+    if ok == 0 and any(src_dir.rglob(f"*{ext}") for ext in _CPP_EXTENSIONS):
+        logger.warning("cppstubber produced 0 stubs but sources present — trying tree-sitter fallback")
+        try:
+            from tools.stub_cpp import stub_cpp_directory
+            ts_count = stub_cpp_directory(str(src_dir))
+            if ts_count:
+                logger.info("Tree-sitter fallback: %d stubs placed", ts_count)
+                return ts_count, 0
+        except ImportError:
+            logger.error("Tree-sitter fallback unavailable")
+        except Exception as exc:
+            logger.error("Tree-sitter stubbing failed: %s", exc)
+
     return ok, fail
 
 
@@ -432,6 +603,8 @@ def create_dataset_entry(
     version_source: str = "default",
     version_conflicts: list[str] | None = None,
     cmake_options: list[str] | None = None,
+    pre_install: list[str] | None = None,
+    build_subdir: str = ".",
 ) -> dict:
     primary_src = src_dirs[0] if src_dirs else "."
     test_dir = primary_src.rsplit("/src", 1)[0] if "/src" in primary_src else "."
@@ -441,6 +614,21 @@ def create_dataset_entry(
         f"cmake -B build{cmake_opts_str} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
         " && cmake --build build -j$(nproc)"
     )
+    install_meson = "meson setup builddir && ninja -C builddir"
+    install_make = "make -j$(nproc)"
+    install_by_system = {
+        "cmake": install_cmake,
+        "meson": install_meson,
+    }
+    install = install_by_system.get(build_system, install_make)
+
+    subdir = (build_subdir or ".").strip() or "."
+    if subdir != ".":
+        install = f"cd {subdir} && ({install})"
+        wrapped_test_cmd = f"cd {subdir} && ({test_cmd})"
+        test_dir = subdir
+    else:
+        wrapped_test_cmd = test_cmd
 
     return {
         "instance_id": f"commit-0/{repo_name}",
@@ -454,17 +642,13 @@ def create_dataset_entry(
             "cpp_standard": cpp_standard,
             "packages": packages,
             "specification": spec_url,
-            "pre_install": [],
-            "install": install_cmake
-            if build_system == "cmake"
-            else "meson setup builddir && ninja -C builddir"
-            if build_system == "meson"
-            else "make -j$(nproc)",
+            "pre_install": list(pre_install or []),
+            "install": install,
             "version_source": version_source,
             "version_conflicts": version_conflicts or [],
         },
         "test": {
-            "test_cmd": test_cmd,
+            "test_cmd": wrapped_test_cmd,
             "test_dir": test_dir,
             "test_framework": test_framework,
         },
@@ -610,6 +794,8 @@ def prepare_cpp_repo(
     spec_url: str = "",
     build_system: str = "auto",
     cmake_options: list[str] | None = None,
+    pre_install: list[str] | None = None,
+    default_branch_override: str | None = None,
 ) -> dict | None:
     repo_name = upstream.split("/")[-1]
 
@@ -635,7 +821,7 @@ def prepare_cpp_repo(
         build_system = detect_build_system(repo_dir)
     logger.info("Build system: %s", build_system)
 
-    default_branch = get_default_branch(repo_dir)
+    default_branch = default_branch_override or get_default_branch(repo_dir)
     try:
         git(repo_dir, "checkout", "-b", "commit0_all")
     except subprocess.CalledProcessError:
@@ -712,19 +898,7 @@ def prepare_cpp_repo(
     save_test_ids(repo_name, test_ids)
     git(repo_dir, "checkout", "commit0_all")
 
-    test_framework = ""
-    for tf_name, tf_marker in [
-        ("gtest", "gtest"),
-        ("catch2", "catch2"),
-        ("doctest", "doctest"),
-        ("boost_test", "boost/test"),
-    ]:
-        cmake_file = repo_dir / "CMakeLists.txt"
-        if cmake_file.exists():
-            cmake_text = cmake_file.read_text(errors="ignore").lower()
-            if tf_marker in cmake_text:
-                test_framework = tf_name
-                break
+    test_framework = _detect_test_framework(repo_dir)
 
     # Canonical C++ standard detection (CMakeLists/Makefile/meson). CLI
     # kwarg wins only when user explicitly overrode the default.
@@ -757,6 +931,7 @@ def prepare_cpp_repo(
         packages=packages,
         spec_url=readme_spec_url or spec_url,
         cmake_options=cmake_options,
+        pre_install=pre_install,
     )
 
     if not dry_run:

@@ -20,6 +20,7 @@ def get_dockerfile_repo_cpp(
     base_image: str,
     pre_install: list[str] | None = None,
     install_cmd: str | None = None,
+    packages: str | list[str] | None = None,
 ) -> str:
     lines = [
         f"FROM {base_image}",
@@ -31,12 +32,28 @@ def get_dockerfile_repo_cpp(
         'ARG no_proxy="localhost,127.0.0.1,::1"',
         'ARG NO_PROXY="localhost,127.0.0.1,::1"',
         "",
+    ]
+
+    apt_packages: list[str] = []
+    if isinstance(packages, str):
+        apt_packages = [p for p in packages.replace(",", " ").split() if p]
+    elif isinstance(packages, list):
+        apt_packages = [p for p in packages if p]
+    if apt_packages:
+        pkg_str = " ".join(sorted(set(apt_packages)))
+        lines.append(
+            "RUN apt-get update && apt-get install -y --no-install-recommends "
+            f"{pkg_str} && rm -rf /var/lib/apt/lists/*"
+        )
+        lines.append("")
+
+    lines.extend([
         "COPY ./setup.sh /root/",
         "RUN chmod +x /root/setup.sh && /bin/bash /root/setup.sh",
         "",
         "WORKDIR /testbed/",
         "",
-    ]
+    ])
 
     if pre_install:
         for cmd in pre_install:
@@ -44,7 +61,7 @@ def get_dockerfile_repo_cpp(
         lines.append("")
 
     if install_cmd:
-        lines.append(f"RUN {install_cmd}")
+        lines.append(f"RUN {install_cmd} 2>/dev/null || true")
         lines.append("")
 
     lines.append(

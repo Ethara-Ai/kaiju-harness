@@ -27,8 +27,10 @@ _TEST_RUNNERS: dict[str, str] = {
     "ctest": "ctest --test-dir build --output-junit /testbed/test_results.xml --timeout 60",
     "gtest": "ctest --test-dir build --output-junit /testbed/test_results.xml --timeout 60",
     "catch2": "./build/tests/test_all -r junit -o /testbed/test_results.xml",
+    "catch": "./build/tests/test_all -r junit -o /testbed/test_results.xml",
     "doctest": "./build/tests/test_all --reporters=junit --out=/testbed/test_results.xml",
     "boost_test": "./build/tests/test_all --logger=JUNIT,message,/testbed/test_results.xml",
+    "caf": "ctest --test-dir build --output-junit /testbed/test_results.xml --timeout 60",
 }
 
 _BUILD_PARTS: dict[str, str] = {
