@@ -32,8 +32,8 @@ from commit0.harness.constants_java import (
     JAVA_BASE_BRANCH,
     detect_build_system,
 )
-from commit0.harness.utils import _PROTECTED_TEST_PATHSPECS
 from agent.claude_code.recovery import run_with_recovery
+from agent.module_patch import module_file_patch
 
 logger = logging.getLogger(__name__)
 
@@ -398,7 +398,6 @@ def run_java_agent(
                         for c in spec_costs:
                             thinking_capture.summarizer_costs.add(c)
 
-                    pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
                     with capture_module_calls(
                         thinking_capture=thinking_capture,
@@ -424,11 +423,16 @@ def run_java_agent(
                     _mark_module_done(test_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                            if pre_sha != post_sha
-                            else ""
+                        # Test modules are read-only on the test file; their
+                        # edit targets are the stubbed source files aider may
+                        # implement. Scope to those source files (repo-relative)
+                        # from stub_base so other modules' bundled edits are
+                        # not attributed to this test module.
+                        _edit_targets = [
+                            os.path.relpath(f, repo_path) for f in stubbed_files
+                        ]
+                        module_patch = module_file_patch(
+                            local_repo, stub_base, "HEAD", _edit_targets, logger=logger
                         )
                         module_turns = thinking_capture.get_module_turns(test_log_name)
                         if module_turns:
@@ -482,7 +486,6 @@ def run_java_agent(
                         for c in spec_costs:
                             thinking_capture.summarizer_costs.add(c)
 
-                    pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
                     with capture_module_calls(
                         thinking_capture=thinking_capture,
@@ -507,11 +510,12 @@ def run_java_agent(
                     _mark_module_done(file_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                            if pre_sha != post_sha
-                            else ""
+                        # This module owns exactly one stubbed source file
+                        # (rel_path, repo-relative). Scope its patch to that
+                        # file from stub_base so co-committed edits to other
+                        # modules' files are not attributed here.
+                        module_patch = module_file_patch(
+                            local_repo, stub_base, "HEAD", rel_path, logger=logger
                         )
                         module_turns = thinking_capture.get_module_turns(file_log_name)
                         if module_turns:

@@ -36,8 +36,9 @@ from agent.display import TerminalDisplay
 from agent.thinking_capture import ThinkingCapture
 from agent.llm_cost_capture import capture_module_calls
 from agent.trajectory_writer import write_trajectory_md
-from agent.output_writer import extract_git_patch, build_metadata
+from agent.output_writer import build_metadata
 from agent.openhands_formatter import write_module_output_json
+from agent.module_patch import module_file_patch
 from commit0.harness.constants_c import (
     C_SPLIT,
     C_STUB_MARKER,
@@ -220,6 +221,10 @@ def run_agent_for_repo(
     experiment_log_dir.mkdir(parents=True, exist_ok=True)
 
     eval_results: dict[str, str] = {}
+    # Maps each pipeline module name -> the repo-relative source file(s) that
+    # module was allowed to edit, so its output.json git_patch is scoped to its
+    # OWN contribution rather than the whole-branch diff.
+    module_owned_files: dict[str, list[str]] = {}
     thinking_capture: Optional[ThinkingCapture] = None
     if agent_config.capture_thinking:
         thinking_capture = ThinkingCapture()
@@ -255,6 +260,9 @@ def run_agent_for_repo(
                 )
                 test_id_safe = short_test_id.replace("/", "__").replace(".", "_")
                 test_log_dir = experiment_log_dir / test_id_safe
+                # Test modules are handed the full target_edit_files set (the
+                # test file itself is read-only), so scope to those sources.
+                module_owned_files[test_id_safe] = list(target_edit_files_rel)
                 if _is_module_done(test_log_dir):
                     logger.info("Skipping %s (already done)", test_id_safe)
                     continue
@@ -321,6 +329,8 @@ def run_agent_for_repo(
                 update_queue.put(("set_current_file", (repo_name, edit_file_rel)))
                 file_name = edit_file_rel.replace(".c", "").replace("/", "__")
                 lint_log_dir = experiment_log_dir / file_name
+                # This module edits exactly this one source file.
+                module_owned_files[file_name] = [edit_file_rel]
                 if _is_module_done(lint_log_dir):
                     logger.info("Skipping %s (already done)", file_name)
                     continue
@@ -376,6 +386,8 @@ def run_agent_for_repo(
                 update_queue.put(("set_current_file", (repo_name, f_rel)))
                 file_name = f_rel.replace(".c", "").replace("/", "__")
                 file_log_dir = experiment_log_dir / file_name
+                # This module edits exactly this one source file.
+                module_owned_files[file_name] = [f_rel]
                 if _is_module_done(file_log_dir):
                     logger.info("Skipping %s (already done)", file_name)
                     continue
@@ -439,7 +451,6 @@ def run_agent_for_repo(
             except Exception as e:
                 logger.warning("Failed to write trajectory.md: %s", e)
 
-        git_patch = extract_git_patch(repo_path, example.get("base_commit", "HEAD"))
         # Full model-changes record (keeps tests/benches/manifests, strips
         # binary/cache/build noise) — distinct from the eval's scored patch.diff.
         from agent.stage_patch import write_stage_patch
@@ -461,13 +472,23 @@ def run_agent_for_repo(
             module_metrics = thinking_capture.get_module_metrics(module_name)
             stage = module_turns[0].stage if module_turns else "unknown"
             module_log_dir = experiment_log_dir / module_name
+            # Scope this module's patch to ONLY the file(s) it was allowed to
+            # edit, so its output.json records its own contribution rather than
+            # the whole-branch diff (which would leak other modules' changes).
+            module_patch = module_file_patch(
+                local_repo,
+                example["base_commit"],
+                "HEAD",
+                module_owned_files.get(module_name, []),
+                logger=logger,
+            )
             try:
                 write_module_output_json(
                     output_dir=str(module_log_dir),
                     module_turns=module_turns,
                     module=module_name,
                     instance_id=example.get("instance_id", repo_name),
-                    git_patch=git_patch,
+                    git_patch=module_patch,
                     instruction="",
                     metadata=metadata,
                     metrics=module_metrics,

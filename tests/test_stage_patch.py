@@ -141,3 +141,29 @@ def test_excludes_binary_and_cache_noise_but_keeps_tests(tmp_path):
     assert "spec.pdf.bz2" not in p
     assert ".aider" not in p
     assert "__pycache__" not in p
+
+
+def test_module_file_patch_list_scopes_to_edit_targets(tmp_path):
+    """The shared helper (used by all non-rust agents for test modules) must
+    scope to a LIST of edit-target source files and exclude everything else —
+    e.g. a read-only test file bundled into the same commit."""
+    from agent.module_patch import module_file_patch
+    import subprocess
+    d = tmp_path / "repo"; d.mkdir()
+    subprocess.run(["git", "init", "-q", str(d)], check=True)
+    r = Repo(str(d)); r.git.config("user.email", "t@t.t"); r.git.config("user.name", "t")
+    (d / "src").mkdir(); (d / "tests").mkdir()
+    for p in ["src/a.rs", "src/b.rs", "src/c.rs"]:
+        (d / p).write_text("stub\n")
+    (d / "tests/t.rs").write_text("orig test\n")
+    r.git.add(A=True); r.index.commit("base"); base = r.head.commit.hexsha
+    # one bundled commit: model edits a+b (its targets), c (another module), and the test
+    (d / "src/a.rs").write_text("impl a\n"); (d / "src/b.rs").write_text("impl b\n")
+    (d / "src/c.rs").write_text("impl c\n"); (d / "tests/t.rs").write_text("changed test\n")
+    r.git.add(A=True); r.index.commit("bundled"); head = r.head.commit.hexsha
+
+    # this module's edit targets are a + b (NOT c, NOT the read-only test)
+    p = module_file_patch(r, base, head, ["src/a.rs", "src/b.rs"])
+    assert "src/a.rs" in p and "src/b.rs" in p
+    assert "src/c.rs" not in p          # another module's file excluded
+    assert "tests/t.rs" not in p        # read-only test excluded

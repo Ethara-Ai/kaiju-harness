@@ -35,6 +35,7 @@ from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_rust import RUST_SPLIT
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.patch_utils_rust import filter_rust_patch
+from agent.module_patch import module_file_patch
 from commit0.harness.utils import load_dataset_from_config
 from agent.claude_code.recovery import run_with_recovery
 
@@ -479,25 +480,9 @@ def _get_stable_log_dir(log_dir: str, repo_name: str, branch: str) -> Path:
 
 def _module_file_patch(local_repo, base_commit: str, post_sha: str,
                        rel_path: str) -> str:
-    """Diff of ONLY this module's own source file (``base_commit..post_sha``).
-
-    Each pipeline module owns exactly one source file, but aider commits on its
-    own cadence and often bundles edits to several files into one commit. A naive
-    ``diff(pre_sha, post_sha)`` therefore attributes *whatever* landed in the
-    module's commit window — possibly another module's file — to this module
-    (e.g. the ``src__hazard`` module showing ``src/domain.rs``). Scoping the diff
-    to the module's assigned file makes each module's output.json record its own
-    contribution only. Uses ``base_commit`` (not ``pre_sha``) so the result is
-    self-contained (the file's full diff from the stub) and independent of when
-    aider chose to commit. ``target/`` is stripped for safety (it won't appear
-    for a source file, but keeps the artifact clean)."""
-    try:
-        raw = local_repo.git.diff("--no-renames", base_commit, post_sha,
-                                  "--", rel_path)
-    except Exception as e:  # noqa: BLE001 - patch is a reporting artifact
-        logger.warning("module file patch failed for %s: %s", rel_path, e)
-        return ""
-    return filter_rust_patch(raw) if raw.strip() else ""
+    """Rust wrapper over the shared ``module_file_patch`` (strips ``target/``)."""
+    return module_file_patch(local_repo, base_commit, post_sha, rel_path,
+                             filter_fn=filter_rust_patch, logger=logger)
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ from agent.agent_utils_js import (
 from agent.agents_js import AiderJsAgents
 from agent.class_types import AgentConfig
 from agent.llm_cost_capture import capture_module_calls
+from agent.module_patch import module_file_patch
 from agent.thinking_capture import ThinkingCapture
 from agent.run_agent_no_rich import (
     _make_blind_lint_cmd,
@@ -317,7 +318,6 @@ def _run_agent_for_repo_js_impl(
                         for c in spec_costs:
                             thinking_capture.summarizer_costs.add(c)
 
-                    pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
                     with capture_module_calls(
                         thinking_capture,
@@ -344,18 +344,15 @@ def _run_agent_for_repo_js_impl(
                     _mark_module_done(test_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(
-                                "--no-renames",
-                                pre_sha,
-                                post_sha,
-                                "--",
-                                ".",
-                                *_JS_PROTECTED_TEST_PATHSPECS,
-                            )
-                            if pre_sha != post_sha
-                            else ""
+                        # Test stage: the test file is read-only; the agent edits
+                        # the source target-edit files. Scope this module's patch
+                        # to those source files, not the whole commit window.
+                        module_patch = module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            target_edit_files,
+                            logger=logger,
                         )
                         module_turns = thinking_capture.get_module_turns(test_file_name)
                         if module_turns:
@@ -403,7 +400,6 @@ def _run_agent_for_repo_js_impl(
                     if agent_config.blind_lint and lint_cmd:
                         lint_cmd = _make_blind_lint_cmd(lint_cmd)
 
-                    pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
                     with capture_module_calls(
                         thinking_capture,
@@ -428,18 +424,14 @@ def _run_agent_for_repo_js_impl(
                     _mark_module_done(lint_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(
-                                "--no-renames",
-                                pre_sha,
-                                post_sha,
-                                "--",
-                                ".",
-                                *_JS_PROTECTED_TEST_PATHSPECS,
-                            )
-                            if pre_sha != post_sha
-                            else ""
+                        # Lint stage: scope this module's patch to the single
+                        # lint-target file it owns, not the whole commit window.
+                        module_patch = module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            lint_file,
+                            logger=logger,
                         )
                         module_turns = thinking_capture.get_module_turns(lint_file_name)
                         if module_turns:
@@ -482,7 +474,6 @@ def _run_agent_for_repo_js_impl(
                     )
                     if agent_config.blind_lint and lint_cmd:
                         lint_cmd = _make_blind_lint_cmd(lint_cmd)
-                    pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
                     with capture_module_calls(
                         thinking_capture,
@@ -506,18 +497,14 @@ def _run_agent_for_repo_js_impl(
                     _mark_module_done(file_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(
-                                "--no-renames",
-                                pre_sha,
-                                post_sha,
-                                "--",
-                                ".",
-                                *_JS_PROTECTED_TEST_PATHSPECS,
-                            )
-                            if pre_sha != post_sha
-                            else ""
+                        # Draft stage: scope this module's patch to the single
+                        # target-edit file it owns, not the whole commit window.
+                        module_patch = module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            f,
+                            logger=logger,
                         )
                         module_turns = thinking_capture.get_module_turns(file_name)
                         if module_turns:

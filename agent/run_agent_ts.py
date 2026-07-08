@@ -23,12 +23,13 @@ from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
 from agent.llm_cost_capture import capture_module_calls
+from agent.module_patch import module_file_patch
 from agent import agent_utils_ts_compile_gate as _ts_compile_gate
 from commit0.harness.constants_ts import TS_SPLIT, TS_STUB_MARKER
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_ts_test_ids import main as get_ts_tests
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
-from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
+from commit0.harness.utils import load_dataset_from_config
 from commit0.cli_ts import read_commit0_ts_config_file
 from pathlib import Path
 from agent.run_agent import DirContext
@@ -304,11 +305,14 @@ def run_agent_for_repo_ts(
                     _mark_module_done(test_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                            if pre_sha != post_sha
-                            else ""
+                        # test_file_name is a read-only test module; scope the
+                        # patch to the source files this stage actually edits.
+                        module_patch = module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            target_edit_files,
+                            logger=logger,
                         )
                         module_turns = thinking_capture.get_module_turns(test_file_name)
                         if module_turns:
@@ -378,11 +382,13 @@ def run_agent_for_repo_ts(
                     _mark_module_done(lint_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                            if pre_sha != post_sha
-                            else ""
+                        # This module owns exactly lint_file (the file linted).
+                        module_patch = module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            lint_file,
+                            logger=logger,
                         )
                         module_turns = thinking_capture.get_module_turns(lint_file_name)
                         if module_turns:
@@ -449,11 +455,13 @@ def run_agent_for_repo_ts(
                     _mark_module_done(file_log_dir)
 
                     if thinking_capture is not None:
-                        post_sha = local_repo.head.commit.hexsha
-                        module_patch = (
-                            local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
-                            if pre_sha != post_sha
-                            else ""
+                        # This module owns exactly f (the drafted edit-target file).
+                        module_patch = module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            f,
+                            logger=logger,
                         )
                         module_turns = thinking_capture.get_module_turns(file_name)
                         if module_turns:

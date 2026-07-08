@@ -18,13 +18,14 @@ from agent.agent_utils_cpp import (
 )
 from agent.agents_cpp import CppAiderAgents
 from agent.class_types import AgentConfig
+from agent.module_patch import module_file_patch
 from agent.run_agent import DirContext, run_eval_after_each_commit
 from agent.thinking_capture import SummarizerCost, ThinkingCapture
 from agent.llm_cost_capture import capture_module_calls
 from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_cpp import CPP_SPLIT
-from commit0.harness.utils import load_dataset_from_config, _PROTECTED_TEST_PATHSPECS
+from commit0.harness.utils import load_dataset_from_config
 from agent.claude_code.recovery import run_with_recovery
 
 logging.basicConfig(
@@ -465,8 +466,18 @@ def run_cpp_agent_for_repo(
         module_elapsed = time.time() - module_start
         if thinking_capture is not None:
             post_sha = local_repo.head.commit.hexsha
+            # Scope this module's patch to ONLY the file it owns (``tf``), so
+            # other modules' bundled edits within the same commit window are not
+            # attributed to this module. ``tf`` may be absolute or repo-relative.
+            _tf_rel = os.path.relpath(tf, repo_path) if os.path.isabs(tf) else tf
             module_patch = (
-                local_repo.git.diff(pre_sha, post_sha, "--", ".", *_PROTECTED_TEST_PATHSPECS)
+                module_file_patch(
+                    local_repo,
+                    example.get("base_commit", ""),
+                    "HEAD",
+                    _tf_rel,
+                    logger=logger,
+                )
                 if pre_sha != post_sha
                 else ""
             )
