@@ -373,12 +373,27 @@ def main(argv=None) -> int:
                 copy_to_container(container, staged_gac, Path(_IN_CONTAINER_GAC))
                 logger.info("Copied GCP service-account key -> %s", _IN_CONTAINER_GAC)
 
-        host_datasets_dir = Path(args.dataset).parent
+        # The captured test-id inventory (+ any spec) lands in the CONSOLIDATED
+        # datasets dir via copy_inference_inputs, NOT next to --dataset (which the
+        # user typically passes from the repo root — globbing there finds no
+        # inventory, or worse, unrelated *.bz2 like spec.pdf.bz2). Stage from the
+        # canonical outputs/<uuid>/datasets/ so the in-container eval's
+        # KAIJU_TEST_IDS_DIR lookup actually resolves. Fall back to --dataset's
+        # dir only if the consolidated dir is absent.
         container_datasets_dir = Path(f"/opt/kaiju/outputs/{dataset_id}/datasets")
         _stream_exec(client, container.id, f"bash -c {shlex.quote('mkdir -p ' + str(container_datasets_dir))}")
-        for src in host_datasets_dir.glob("*.bz2"):
+        host_datasets_dir = Path("outputs") / dataset_id / "datasets"
+        if not host_datasets_dir.is_dir():
+            host_datasets_dir = Path(args.dataset).parent
+        staged_any = False
+        for src in host_datasets_dir.glob("*_test_ids.bz2"):
             copy_to_container(container, src, container_datasets_dir / src.name)
             logger.info("Staged inference input: %s -> %s", src.name, container_datasets_dir)
+            staged_any = True
+        if not staged_any:
+            logger.warning("No *_test_ids.bz2 found in %s — the in-container eval will "
+                           "fall back to the observed test count (no canonical denominator)",
+                           host_datasets_dir)
         # aider commits via `git config --get user.name` (reads git CONFIG, not the
         # GIT_AUTHOR_* env) — set a global identity or every auto-commit fails and
         # git_patch comes out empty. Then expose /testbed as repos/<name>.
