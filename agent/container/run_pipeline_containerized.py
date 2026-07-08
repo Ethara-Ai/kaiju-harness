@@ -39,6 +39,64 @@ logger = logging.getLogger("pipeline_container")
 
 DEFAULT_BRIDGE_URL = "http://host.docker.internal:8765"
 
+# Host credential env vars forwarded into the container when present, so the
+# containerized pipeline reaches the SAME providers the local run does (Vertex,
+# Bedrock, Gemini, direct Anthropic/OpenAI keys) — not only the two subscription
+# bridges. Mirrors the provider matrix in run_pipeline_*.sh's preflight.
+_CREDENTIAL_PASSTHROUGH = (
+    # OpenAI
+    "OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_BASE_URL", "OPENAI_ORG_ID",
+    # Anthropic (direct)
+    "ANTHROPIC_API_KEY", "ANTHROPIC_API_BASE",
+    # Google Gemini + Vertex AI (VERTEXAI_LOCATION is required for regional 404s)
+    "GOOGLE_API_KEY", "GEMINI_API_KEY", "VERTEX_AI_API_KEY", "VERTEXAI_API_KEY",
+    "VERTEXAI_PROJECT", "VERTEXAI_LOCATION", "GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION",
+    # AWS Bedrock
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE",
+)
+
+# Where a staged Vertex/GCP service-account key lands inside the container.
+_IN_CONTAINER_GAC = "/opt/kaiju/.gcp-creds.json"
+
+
+def _build_provider_env(model: str, bridge_url: str, logger) -> tuple:
+    """Return ``(env_updates, gac_source_path)`` for the container.
+
+    Brings the containerized run to provider parity with the local pipeline:
+      1. forwards every provider credential present on the host,
+      2. for Vertex/GCP, flags the service-account key FILE for copy-in and
+         repoints ``GOOGLE_APPLICATION_CREDENTIALS`` at its in-container path,
+      3. wires the subscription BRIDGE for anthropic/openai when ``bridge_url``
+         is set (overriding a direct key with the bridge stub/secret); pass
+         ``--bridge-url ""`` to use a real Anthropic/OpenAI key directly instead.
+    """
+    env: dict = {}
+    for k in _CREDENTIAL_PASSTHROUGH:
+        v = os.environ.get(k)
+        if v:
+            env[k] = v
+    gac_src = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    if gac_src and Path(gac_src).is_file():
+        env["GOOGLE_APPLICATION_CREDENTIALS"] = _IN_CONTAINER_GAC
+    elif gac_src:
+        logger.warning("GOOGLE_APPLICATION_CREDENTIALS=%s is not a readable file; "
+                       "not forwarded", gac_src)
+        gac_src = ""
+    is_openai = model.startswith("openai/") or model.startswith("gpt")
+    is_anthropic = ("claude" in model and not model.startswith("bedrock/")
+                    and not model.startswith("vertex_ai"))
+    if bridge_url and is_openai:
+        # OpenAI Codex bridge: litellm reads OPENAI_API_BASE; SDK reads OPENAI_BASE_URL.
+        env["OPENAI_API_BASE"] = bridge_url
+        env["OPENAI_BASE_URL"] = bridge_url
+        env["OPENAI_API_KEY"] = os.environ.get("KAIJU_CODEX_BRIDGE_SECRET", "kaiju-codex-stub")
+    elif bridge_url and is_anthropic:
+        # Anthropic/Claude Code bridge.
+        env["ANTHROPIC_API_BASE"] = bridge_url
+        env["ANTHROPIC_API_KEY"] = os.environ.get("KAIJU_CC_BRIDGE_SECRET", "kaiju-cc-stub")
+    return env, (gac_src or None)
+
 
 def _extra_hosts():
     """Map host.docker.internal to the host gateway on Linux so the container can
@@ -131,7 +189,10 @@ def main(argv=None) -> int:
     ap.add_argument("--model", default="anthropic/claude-opus-4-8")
     ap.add_argument("--bridge-url",
                     default=os.environ.get("KAIJU_CC_BRIDGE_URL", DEFAULT_BRIDGE_URL),
-                    help="Bridge URL reachable from the container")
+                    help="Subscription-bridge URL reachable from the container "
+                         "(Anthropic 8765 / OpenAI-Codex 8788). Pass '' to use a "
+                         "real Anthropic/OpenAI key directly instead. Ignored for "
+                         "Vertex/Bedrock/Gemini (those use forwarded host creds).")
     ap.add_argument("--pipeline-args", default="",
                     help="Extra args passed through to run_pipeline_rust.sh")
     ap.add_argument("--eval-timeout", type=int, default=10800,
@@ -208,22 +269,16 @@ def main(argv=None) -> int:
         "KAIJU_EXPERIMENT_UUID": dataset_id,
         "KAIJU_LOG_LAYOUT": "consolidated",
     }
-    # Provider-aware bridge wiring: point the container at whichever bridge the
-    # model needs. `openai/*` / `gpt*` -> the OpenAI Codex (ChatGPT-auth) bridge
-    # (OpenAI-shaped env); everything else -> the Anthropic/Claude bridge. The
-    # container only ever gets the bridge SECRET (or a stub), never the real
-    # OAuth token — the bridge substitutes it.
-    if args.model.startswith("openai/") or args.model.startswith("gpt"):
-        # litellm reads OPENAI_API_BASE; the OpenAI SDK reads OPENAI_BASE_URL.
-        env["OPENAI_API_BASE"] = args.bridge_url
-        env["OPENAI_BASE_URL"] = args.bridge_url
-        env["OPENAI_API_KEY"] = os.environ.get(
-            "KAIJU_CODEX_BRIDGE_SECRET", "kaiju-codex-stub")
-    else:
-        # litellm reads ANTHROPIC_API_BASE directly.
-        env["ANTHROPIC_API_BASE"] = args.bridge_url
-        env["ANTHROPIC_API_KEY"] = os.environ.get(
-            "KAIJU_CC_BRIDGE_SECRET", "kaiju-cc-stub")
+    # Provider parity with the local pipeline: forward all host provider creds,
+    # wire the bridge for anthropic/openai, and stage a Vertex/GCP key file.
+    _prov_env, _gac_src = _build_provider_env(args.model, args.bridge_url, logger)
+    env.update(_prov_env)
+    _prov = "openai-bridge" if "OPENAI_API_BASE" in _prov_env and args.bridge_url else (
+        "anthropic-bridge" if "ANTHROPIC_API_BASE" in _prov_env and args.bridge_url
+        else "direct-creds")
+    logger.info("Provider wiring: model=%s mode=%s forwarded=%s%s",
+                args.model, _prov, sorted(_prov_env),
+                " +gcp-creds-file" if _gac_src else "")
 
     container = None
     rc = 1
@@ -243,6 +298,13 @@ def main(argv=None) -> int:
             staged_ds = Path(td) / "dataset.json"
             staged_ds.write_text(Path(args.dataset).read_text(), encoding="utf-8")
             copy_to_container(container, staged_ds, Path("/opt/kaiju/dataset.json"))
+            # Vertex/GCP: copy the service-account key in under the exact basename
+            # GOOGLE_APPLICATION_CREDENTIALS points at inside the container.
+            if _gac_src:
+                staged_gac = Path(td) / Path(_IN_CONTAINER_GAC).name
+                staged_gac.write_bytes(Path(_gac_src).read_bytes())
+                copy_to_container(container, staged_gac, Path(_IN_CONTAINER_GAC))
+                logger.info("Copied GCP service-account key -> %s", _IN_CONTAINER_GAC)
         # aider commits via `git config --get user.name` (reads git CONFIG, not the
         # GIT_AUTHOR_* env) — set a global identity or every auto-commit fails and
         # git_patch comes out empty. Then expose /testbed as repos/<name>.
