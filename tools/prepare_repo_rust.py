@@ -44,7 +44,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
+from kaiju.paths import datasets_dir
 import uuid as _uuid_mod
 
 from tools._git_auth import (
@@ -591,6 +591,39 @@ base_dir: repos
 # ─── Main Pipeline ───────────────────────────────────────────────────────────
 
 
+def _capture_rust_test_ids(repo_dir: Path, test_cmd: str, repo_basename: str) -> None:
+    """Capture the canonical Rust test inventory via `cargo test --list` on the
+    stubbed base (which A11 verified compiles — `--list` compiles the test targets
+    against the stub signatures without running them) and save it to
+    ``commit0/data/rust_test_ids/<repo_basename>.bz2``. Best-effort: any failure
+    just leaves the evaluator to fall back to the observed count.
+    """
+    try:
+        from tools.generate_test_ids_rust import (
+            collect_test_ids_local,
+            save_test_ids,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Step 7/8: could not import test-id capture (%s); skipping.", e)
+        return
+    try:
+        ids = collect_test_ids_local(repo_dir, test_cmd)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Step 7/8: `cargo test --list` failed for %s (%s); the "
+                       "evaluator will use the observed test count.", repo_basename, e)
+        return
+    if not ids:
+        logger.warning("Step 7/8: no test IDs discovered for %s; the evaluator "
+                       "will use the observed test count.", repo_basename)
+        return
+    out_dir = Path(__file__).resolve().parent.parent / "commit0" / "data" / "rust_test_ids"
+    try:
+        path = save_test_ids(ids, repo_basename, out_dir)
+        logger.info("Step 8: saved %d canonical test IDs -> %s", len(ids), path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Step 8: failed to save test IDs for %s (%s).", repo_basename, e)
+
+
 def prepare_rust_repo(
     upstream: str,
     crate: str,
@@ -689,6 +722,14 @@ def prepare_rust_repo(
         )
     elif base_compiles is True:
         logger.info("A11: stubbed base compiles cleanly for %s.", crate)
+
+    # Step 7.2 / 8: capture the canonical test inventory (`cargo test --list`) and
+    # save it as commit0/data/rust_test_ids/<repo>.bz2 — the AUTHORITATIVE
+    # denominator the evaluator uses. Without it the evaluator falls back to the
+    # observed count, which (a) mis-reports a timeout-truncated run and (b) lets a
+    # model inflate its score by adding passing tests. Keyed by the repo basename
+    # (what evaluate_rust looks up).
+    _capture_rust_test_ids(repo_dir, test_cmd, upstream.split("/")[-1])
 
     # Step 7.5: Scrape spec PDF
     spec_filename = ""

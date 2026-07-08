@@ -27,6 +27,7 @@ Requires:
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import logging
 import re
@@ -145,6 +146,13 @@ def collect_test_ids_local(
     cmd = _build_cargo_list_cmd(test_cmd)
     logger.info("Collecting test IDs: %s (in %s)", " ".join(cmd), repo_dir)
 
+    # Cap lints to `allow` so listing works on a STUBBED base too: the stubber
+    # strips doc comments, and crates with `#![deny(missing_docs)]` (or other
+    # `deny` lints) would otherwise fail to compile the test target — we only
+    # need the test NAMES, not a clean build. Merge with any existing RUSTFLAGS.
+    env = dict(os.environ)
+    env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " --cap-lints=allow").strip()
+
     try:
         result = subprocess.run(
             cmd,
@@ -152,6 +160,7 @@ def collect_test_ids_local(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         logger.warning("  cargo test --list timed out after %ds", timeout)
