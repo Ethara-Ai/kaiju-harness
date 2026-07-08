@@ -200,10 +200,6 @@ def main(argv=None) -> int:
                 build_logs / "agent_image_build.log")
 
     env = {
-        # Bridge (Anthropic-shaped; pipeline does NOT need --use-claude-code —
-        # litellm reads ANTHROPIC_API_BASE directly).
-        "ANTHROPIC_API_BASE": args.bridge_url,
-        "ANTHROPIC_API_KEY": os.environ.get("KAIJU_CC_BRIDGE_SECRET", "kaiju-cc-stub"),
         # git identity so aider can commit (no global gitconfig in the image).
         "GIT_AUTHOR_NAME": "Kaiju Agent", "GIT_AUTHOR_EMAIL": "agent@kaiju.local",
         "GIT_COMMITTER_NAME": "Kaiju Agent", "GIT_COMMITTER_EMAIL": "agent@kaiju.local",
@@ -212,6 +208,22 @@ def main(argv=None) -> int:
         "KAIJU_EXPERIMENT_UUID": dataset_id,
         "KAIJU_LOG_LAYOUT": "consolidated",
     }
+    # Provider-aware bridge wiring: point the container at whichever bridge the
+    # model needs. `openai/*` / `gpt*` -> the OpenAI Codex (ChatGPT-auth) bridge
+    # (OpenAI-shaped env); everything else -> the Anthropic/Claude bridge. The
+    # container only ever gets the bridge SECRET (or a stub), never the real
+    # OAuth token — the bridge substitutes it.
+    if args.model.startswith("openai/") or args.model.startswith("gpt"):
+        # litellm reads OPENAI_API_BASE; the OpenAI SDK reads OPENAI_BASE_URL.
+        env["OPENAI_API_BASE"] = args.bridge_url
+        env["OPENAI_BASE_URL"] = args.bridge_url
+        env["OPENAI_API_KEY"] = os.environ.get(
+            "KAIJU_CODEX_BRIDGE_SECRET", "kaiju-codex-stub")
+    else:
+        # litellm reads ANTHROPIC_API_BASE directly.
+        env["ANTHROPIC_API_BASE"] = args.bridge_url
+        env["ANTHROPIC_API_KEY"] = os.environ.get(
+            "KAIJU_CC_BRIDGE_SECRET", "kaiju-cc-stub")
 
     container = None
     rc = 1
