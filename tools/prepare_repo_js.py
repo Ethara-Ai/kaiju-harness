@@ -447,6 +447,70 @@ def _collect_extra_scan_dirs(
     return extra
 
 
+def _capture_js_test_ids(
+    repo_dir: Path,
+    repo_basename: str,
+    test_framework: str,
+    test_dir: str,
+) -> None:
+    """Capture the canonical JS test inventory by running the framework's
+    list/discovery command on the pristine (un-stubbed) source, and save it to
+    ``commit0/data/test_ids/<repo_basename>.bz2``.
+
+    Must be called AFTER dependency install (``node_modules`` is required for
+    ``jest --listTests`` / ``vitest list`` / etc.) and BEFORE stubbing, since
+    stubbed source throws at import time and yields zero discovered tests.
+
+    Best-effort: any failure just leaves ``evaluate_js`` to fall back to the
+    observed test count as its denominator. Never raises.
+    """
+    try:
+        from tools.generate_test_ids_js import (
+            _normalize_js_test_ids,
+            collect_js_test_ids_local,
+        )
+        from tools.generate_test_ids import save_test_ids
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "  Could not import JS test-id capture (%s); skipping. The evaluator "
+            "will use the observed test count.",
+            e,
+        )
+        return
+    try:
+        ids = collect_js_test_ids_local(
+            repo_dir=repo_dir,
+            test_dir=test_dir,
+            framework=test_framework,
+        )
+        ids = _normalize_js_test_ids(ids, test_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "  JS test-id collection failed for %s (%s); the evaluator will use "
+            "the observed test count.",
+            repo_basename,
+            e,
+        )
+        return
+    if not ids:
+        logger.warning(
+            "  No JS test IDs discovered for %s; the evaluator will use the "
+            "observed test count.",
+            repo_basename,
+        )
+        return
+    out_dir = (
+        Path(__file__).resolve().parent.parent / "commit0" / "data" / "test_ids"
+    )
+    try:
+        path = save_test_ids(ids, repo_basename, out_dir)
+        logger.info("  Saved %d canonical JS test IDs -> %s", len(ids), path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "  Failed to save JS test IDs for %s (%s).", repo_basename, e
+        )
+
+
 def create_js_stubbed_branch(
     repo_dir: Path,
     full_name: str,
@@ -454,6 +518,8 @@ def create_js_stubbed_branch(
     pkg_manager: str,
     branch_name: str = JS_DATASET_BRANCH,
     base_branch_name: str = JS_BASE_BRANCH,
+    test_framework: str | None = None,
+    test_dir: str | None = None,
 ) -> tuple[str, str, int]:
     """Create the JS commit0 + commit0_dataset branches; returns (base, ref, n_stubbed)."""
     default_branch = get_default_branch(repo_dir)
@@ -512,6 +578,18 @@ def create_js_stubbed_branch(
                 f"  cmd: {' '.join(install_cmd)}\n"
                 f"  stderr tail: {install_result.stderr[-500:].strip()}"
             )
+
+    # Capture the canonical test inventory on pristine (un-stubbed) source,
+    # after node_modules is installed. This gives evaluate_js a real denominator
+    # via commit0/data/test_ids/<repo>.bz2 instead of falling back to the
+    # observed count. Best-effort; never aborts prep.
+    if test_framework and test_dir:
+        _capture_js_test_ids(
+            repo_dir=repo_dir,
+            repo_basename=full_name.split("/")[-1],
+            test_framework=test_framework,
+            test_dir=test_dir,
+        )
 
     logger.info("  Stubbing JavaScript source in: %s", src_dir)
     report = run_stub_js(
@@ -667,7 +745,12 @@ def prepare_js_repo(
     logger.info("  Test framework: %s, Package manager: %s", test_framework, pkg_manager)
 
     base_commit, reference_commit, functions_stubbed = create_js_stubbed_branch(
-        repo_dir, full_name, src_dir, pkg_manager
+        repo_dir,
+        full_name,
+        src_dir,
+        pkg_manager,
+        test_framework=test_framework,
+        test_dir=test_dict.get("test_dir"),
     )
 
     if not dry_run:

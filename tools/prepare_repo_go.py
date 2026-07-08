@@ -345,6 +345,52 @@ def build_test_dict(repo_dir: Path) -> dict:
     }
 
 
+def _capture_go_test_ids(repo_dir: Path, test_cmd: str, repo_basename: str) -> None:
+    """Capture the canonical Go test inventory via `go test -list ./...` on the
+    stubbed base and save it to ``commit0/data/test_ids/<repo>.bz2`` — the
+    AUTHORITATIVE denominator ``evaluate_go`` scores against. Without it the
+    evaluator falls back to the observed test count (mis-reporting a
+    timeout-truncated run and letting a model inflate its score by adding
+    passing tests).
+
+    Keyed by the repo basename; ``save_test_ids`` normalises the name to
+    ``repo.lower().replace(".", "-")`` — exactly what ``get_go_test_ids`` looks
+    up for the single-file (no ``__``) case. ``test_cmd`` is accepted for parity
+    with the Rust helper but not forwarded: ``collect_test_ids_local`` always
+    runs its own ``go test -list . -json -count=1 ./...`` sweep.
+
+    Best-effort: any failure logs a warning and does NOT abort prep.
+    """
+    try:
+        from tools.generate_test_ids_go import (
+            collect_test_ids_local,
+            save_test_ids,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("  Test-ID capture: could not import helpers (%s); skipping.", e)
+        return
+    try:
+        ids = collect_test_ids_local(repo_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "  Test-ID capture: `go test -list` failed for %s (%s); the "
+            "evaluator will use the observed test count.", repo_basename, e,
+        )
+        return
+    if not ids:
+        logger.warning(
+            "  Test-ID capture: no test IDs discovered for %s; the evaluator "
+            "will use the observed test count.", repo_basename,
+        )
+        return
+    out_dir = Path(__file__).resolve().parent.parent / "commit0" / "data" / "test_ids"
+    try:
+        path = save_test_ids(ids, repo_basename, out_dir)
+        logger.info("  Test-ID capture: saved %d canonical test IDs -> %s", len(ids), path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("  Test-ID capture: failed to save test IDs for %s (%s).", repo_basename, e)
+
+
 def prepare_single_repo(
     full_name: str,
     clone_dir: Path,
@@ -370,6 +416,15 @@ def prepare_single_repo(
             return None
 
         base_commit, reference_commit = create_stubbed_branch(repo_dir, full_name)
+
+        # Capture the canonical test inventory (`go test -list ./...`) on the
+        # stubbed base (repo is on commit0_all here) and save it as
+        # commit0/data/test_ids/<repo>.bz2 — the AUTHORITATIVE denominator
+        # evaluate_go scores against. Keyed by the repo basename, matching what
+        # get_go_test_ids looks up. Best-effort: never aborts prep.
+        _capture_go_test_ids(
+            repo_dir, build_test_dict(repo_dir)["test_cmd"], full_name.split("/")[-1]
+        )
 
         if not dry_run:
             branch_name = "commit0_all"

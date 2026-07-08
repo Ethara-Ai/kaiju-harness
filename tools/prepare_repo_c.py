@@ -293,6 +293,62 @@ def _build_c_setup(repo_path: Path, cmake_flags: str, spec_url: str) -> dict:
     }
 
 
+def _capture_c_test_ids(repo_dir: Path, slug: str) -> None:
+    """Capture the canonical C test inventory and save it as the AUTHORITATIVE
+    denominator the evaluator uses.
+
+    ``evaluate_c`` scores ``num_passed / len(test_ids_flat)`` over the UNION of
+    the fail/pass lists. ``get_c_test_ids`` reads a SINGLE
+    ``commit0/data/c_test_ids/<repo>.bz2`` (when the repo name has no ``__``),
+    keyed by ``repo.lower().replace(".", "-")``. Without that file the evaluator
+    silently falls back to the observed test count — which mis-reports a
+    timeout-truncated run and lets a model inflate its score by adding passing
+    tests.
+
+    Reuses ``generate_test_ids_c._enumerate_local`` (cmake configure+build then
+    ``ctest --show-only=json-v1``, with a ``ctest -N`` fallback) so we don't
+    duplicate the build logic; ``_ensure_compile_commands`` has already run a
+    ``-DBUILD_TESTING=ON`` cmake configure, so the build/ dir is warm.
+
+    Best-effort: any failure just warns and leaves the evaluator to fall back to
+    the observed count. Never aborts prep.
+    """
+    try:
+        from tools.generate_test_ids_c import _enumerate_local, write_bz2
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "test-id capture: could not import generate_test_ids_c (%s); skipping.", e
+        )
+        return
+    try:
+        ids = _enumerate_local(repo_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "test-id capture: ctest enumeration failed for %s (%s); the evaluator "
+            "will use the observed test count.", slug, e,
+        )
+        return
+    if not ids:
+        logger.warning(
+            "test-id capture: no C test IDs discovered for %s; the evaluator will "
+            "use the observed test count.", slug,
+        )
+        return
+    # Filename key MUST match get_c_test_ids.main(): repo.lower().replace(".", "-")
+    # of the repo basename, single file (union of all tests) into c_test_ids/.
+    repo_key = slug.split("/")[-1].lower().replace(".", "-")
+    out_dir = (
+        Path(__file__).resolve().parent.parent
+        / "commit0" / "data" / "c_test_ids"
+    )
+    try:
+        target = out_dir / f"{repo_key}.bz2"
+        write_bz2(ids, target)
+        logger.info("test-id capture: saved %d canonical C test IDs -> %s", len(ids), target)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("test-id capture: failed to save test IDs for %s (%s).", slug, e)
+
+
 def prepare_one(
     slug: str,
     clone_dir: Path,
@@ -385,6 +441,13 @@ def prepare_one(
     )
     base_commit = git(repo_path, "rev-parse", "HEAD")
     logger.info("%s: base_commit=%s (+%d/-%d)", slug, base_commit[:12], additions, deletions)
+
+    # Capture the canonical test inventory (ctest enumeration) on the stubbed
+    # base and save it as commit0/data/c_test_ids/<repo>.bz2 — the AUTHORITATIVE
+    # denominator evaluate_c uses. Stub bodies keep signatures + CMake add_test()
+    # registrations intact, so enumeration on the stubbed tree still lists every
+    # test. Without this file the evaluator falls back to the observed count.
+    _capture_c_test_ids(repo_path, slug)
 
     # Scrape a spec PDF and fold it into base_commit (default-on,
     # best-effort, with README fallback when spec_url is missing or fails).

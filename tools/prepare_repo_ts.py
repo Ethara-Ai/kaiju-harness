@@ -1079,6 +1079,93 @@ def _run_post_stub_tsc_check(repo_dir: Path) -> None:
     )
 
 
+def _capture_ts_test_ids(
+    repo_dir: Path,
+    repo: str,
+    test_dir: str,
+    framework: str,
+    reference_commit: str | None = None,
+) -> None:
+    """Capture the canonical TS test inventory and save it as the AUTHORITATIVE
+    denominator the evaluator reads.
+
+    Runs ``collect_ts_test_ids_local`` (vitest/jest ``--list``/``--listTests``)
+    in *repo_dir* and saves the discovered IDs to
+    ``commit0/data/test_ids/<repo>.bz2`` where ``<repo>`` is the key
+    ``get_ts_test_ids.main`` looks up (``repo.lower().replace(".", "-")``,
+    applied by ``save_test_ids``). Without it, ``evaluate_ts`` has no inventory
+    and falls back to the observed test count.
+
+    Test discovery needs ``node_modules`` (npx must resolve vitest/jest), so this
+    MUST run after dependency install (``create_ts_stubbed_branch`` installs them).
+    Collection runs against the reference (un-stubbed) commit when available so
+    imports resolve during listing. Best-effort: any failure just leaves the
+    evaluator to fall back to the observed count -- never aborts prep.
+    """
+    try:
+        from tools.generate_test_ids_ts import (
+            collect_ts_test_ids_local,
+            _normalize_ts_test_ids,
+        )
+        from tools.generate_test_ids import save_test_ids
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "  Could not import TS test-id capture (%s); skipping inventory.", e
+        )
+        return
+
+    restore_ref: str | None = None
+    if reference_commit:
+        try:
+            restore_ref = get_head_sha(repo_dir)
+            git(repo_dir, "checkout", reference_commit, "--", ".")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "  Could not checkout reference commit for TS test-id capture "
+                "(%s); collecting against current tree.",
+                e,
+            )
+            restore_ref = None
+
+    try:
+        ids = collect_ts_test_ids_local(
+            repo_dir=repo_dir,
+            test_dir=test_dir,
+            framework=framework,
+        )
+        ids = _normalize_ts_test_ids(ids, test_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "  TS test-id collection failed for %s (%s); the evaluator will use "
+            "the observed test count.",
+            repo,
+            e,
+        )
+        ids = []
+    finally:
+        if restore_ref:
+            try:
+                git(repo_dir, "checkout", restore_ref, "--", ".")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("  Could not restore working tree after capture: %s", e)
+
+    if not ids:
+        logger.warning(
+            "  No TS test IDs discovered for %s; the evaluator will use the "
+            "observed test count.",
+            repo,
+        )
+        return
+
+    out_dir = _PROJECT_ROOT / "commit0" / "data" / "test_ids"
+    try:
+        repo_key = repo.split("/")[-1]
+        path = save_test_ids(ids, repo_key, out_dir)
+        logger.info("  Saved %d canonical TS test IDs -> %s", len(ids), path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("  Failed to save TS test IDs for %s (%s).", repo, e)
+
+
 def prepare_ts_repo(
     full_name: str,
     clone_dir: Path,
@@ -1124,6 +1211,18 @@ def prepare_ts_repo(
 
     base_commit, reference_commit, functions_stubbed = create_ts_stubbed_branch(
         repo_dir, full_name, src_dir
+    )
+
+    # Capture the canonical test inventory -> commit0/data/test_ids/<repo>.bz2 (the
+    # AUTHORITATIVE denominator evaluate_ts reads). Runs AFTER
+    # create_ts_stubbed_branch because test listing needs node_modules, which that
+    # step installs. Best-effort -- never aborts prep.
+    _capture_ts_test_ids(
+        repo_dir=repo_dir,
+        repo=full_name,
+        test_dir=test_dict.get("test_dir", "__tests__"),
+        framework=test_framework,
+        reference_commit=reference_commit,
     )
 
     if not dry_run:
