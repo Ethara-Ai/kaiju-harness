@@ -450,6 +450,28 @@ def main(argv=None) -> int:
             logger.info("Copied outputs to %s", host_out.resolve())
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not copy outputs/%s: %s", dataset_id, e)
+
+        # Copy the ATIF training artifact back too. commit0_to_atif_v2.py writes it
+        # to /opt/kaiju/Harbor_Data/Trajectory/ (NOT under outputs/<uuid>/), so the
+        # copy above misses it and it is LOST on container removal — meaning a
+        # containerized run produces no trajectory training data on the host (the
+        # actual product of trajectory-gen). Merge it into the same host location
+        # local runs use. Best-effort: absent dir (ATIF disabled/failed) just warns.
+        try:
+            host_harbor = Path("Harbor_Data") / "Trajectory"
+            with tempfile.TemporaryDirectory() as td:
+                staged = Path(td) / "Trajectory"
+                copy_from_container(
+                    container, Path("/opt/kaiju/Harbor_Data/Trajectory"), staged)
+                if staged.exists() and any(staged.iterdir()):
+                    host_harbor.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(staged, host_harbor, dirs_exist_ok=True)
+                    logger.info("Copied ATIF trajectory artifacts to %s", host_harbor.resolve())
+                else:
+                    logger.warning("No ATIF trajectory produced in the container "
+                                   "(Harbor_Data/Trajectory empty) — check the ATIF step")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not copy Harbor_Data/Trajectory: %s", e)
     finally:
         if container is not None and not args.keep_container:
             try:
