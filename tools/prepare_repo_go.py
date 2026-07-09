@@ -694,6 +694,18 @@ def main() -> None:
         _entries_path = _out_dir / "entries.json"
         _entries_path.write_text(json.dumps(entries, indent=2))
         logger.info("Wrote %d entries to %s (consolidated)", len(entries), _entries_path)
+        # Stage each captured test-id inventory into outputs/<uuid>/datasets/ so the
+        # CONTAINERIZED eval finds it via KAIJU_TEST_IDS_DIR (commit0/data/ is pruned
+        # from the agent image). Mirrors prepare_repo_rust; without this a repo
+        # prepared via prepare_repo_go (which never calls create_dataset_go) silently
+        # loses the canonical denominator in the container.
+        try:
+            from kaiju.paths import copy_inference_inputs as _cii
+            for _e in entries:
+                _cii(_uuid, _e["repo"].split("/")[-1],
+                     test_ids_subdir="test_ids", repo_base="repos")
+        except Exception as _cie:  # noqa: BLE001 - best-effort staging
+            logger.warning("copy_inference_inputs failed: %s", _cie)
         if args.output:
             output_path = Path(args.output)
             output_path.write_text(json.dumps(entries, indent=2))
@@ -702,6 +714,26 @@ def main() -> None:
         output_path = Path(args.output)
         output_path.write_text(json.dumps(entries, indent=2))
         logger.info("\nSaved %d entries to %s", len(entries), output_path)
+
+    # Generate the commit0-go build config (parity with prepare_repo_rust's
+    # generate_commit0_yaml) so `cli_go build --commit0-config-file .commit0_go.yaml`
+    # works without the operator hand-writing dataset_name/split/repo_split/base_dir.
+    try:
+        _ds_name = f"./{Path(args.output).name}"
+        _cfg = (TOOLS_DIR.parent / ".commit0_go.yaml")
+        _first = entries[0] if entries else {}
+        _cfg.write_text(
+            f"# commit0 Go config for {_first.get('original_repo', '?')}\n"
+            f"dataset_name: {_ds_name}\n"
+            "dataset_split: test\n"
+            "repo_split: all\n"
+            "base_dir: repos\n"
+            f"# fork: {_first.get('repo', '?')}\n"
+            f"# test_cmd: {(_first.get('test') or {}).get('test_cmd', '?')}\n"
+        )
+        logger.info("Generated config: %s", _cfg)
+    except Exception as _cfg_err:  # noqa: BLE001 - best-effort
+        logger.warning("commit0-go config generation failed: %s", _cfg_err)
 
 
 if __name__ == "__main__":
