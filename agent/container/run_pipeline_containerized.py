@@ -585,6 +585,28 @@ def main(argv=None) -> int:
         host_datasets_dir = Path("outputs") / dataset_id / "datasets"
         if not host_datasets_dir.is_dir():
             host_datasets_dir = Path(args.dataset).parent
+        # Ensure the canonical test-id inventory is present in the mount/stage dir.
+        # If nothing is there yet (e.g. --skip-prepare, or a prepare that generated the
+        # .bz2 only into commit0/data/test_ids/ but never staged it), copy it over so
+        # the in-container agent's get_tests() resolves it instead of raising
+        # FileNotFoundError — which crashes the agent worker and yields a degenerate
+        # 0/0, $0, empty-pipeline_results run. The container image does NOT bake
+        # commit0/data/test_ids/ (gitignored), so staging here is required.
+        if not list(host_datasets_dir.glob("*_test_ids.bz2")):
+            try:
+                from kaiju.paths import normalize_test_ids_key
+                _norm = normalize_test_ids_key(repo_name)
+                _canon = Path("commit0/data/test_ids") / f"{_norm}.bz2"
+                if _canon.is_file():
+                    host_datasets_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(_canon, host_datasets_dir / f"{_norm}_test_ids.bz2")
+                    logger.info("Staged canonical test-id inventory %s -> %s/%s_test_ids.bz2",
+                                _canon, host_datasets_dir, _norm)
+                else:
+                    logger.warning("No canonical test-id inventory at %s — eval will fall back "
+                                   "to observed count (and a strict agent may crash)", _canon)
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("Could not stage canonical test-id inventory: %s", _e)
         if _mounted:
             # outputs/<uuid>/ is host-mounted, so outputs/<uuid>/datasets/ (with the
             # captured inventory) is ALREADY visible inside the container. Copying it
