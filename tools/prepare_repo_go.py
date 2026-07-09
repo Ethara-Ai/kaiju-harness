@@ -345,6 +345,55 @@ def build_test_dict(repo_dir: Path) -> dict:
     }
 
 
+def _stubbed_base_compiles_go(repo_dir: Path, timeout: int = 900) -> "bool | None":
+    """A11 (go): does the STUBBED base tree compile?
+
+    A correctly-stubbed repo replaces function bodies with `_ = "STUB…"; return
+    <zero>`, which still typechecks — so the base should build. If it doesn't, the
+    agent starts from a broken tree and any 0% is an infra/impossible-task
+    artifact, not a model failure.
+
+    Returns True (compiles), False (does not), or None (couldn't determine — go
+    missing, timeout, or a network/fetch error) so the caller records provenance
+    without branding a good repo as broken over a transient prep-time blip.
+    Mirrors ruststubber's _stubbed_base_compiles. `go build ./...` also auto-fetches
+    deps, warming the module cache for the test-id capture that follows.
+    """
+    if shutil.which("go") is None:
+        logger.info("A11: go not on PATH; skipping stubbed-base compile check.")
+        return None
+    try:
+        proc = subprocess.run(
+            ["go", "build", "./..."],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("A11: stubbed-base compile check could not run (%s); recording unknown.", e)
+        return None
+    if proc.returncode == 0:
+        return True
+    # A non-zero exit isn't necessarily "base doesn't compile": a cold module cache
+    # / registry outage at prep time also fails. Treat those as unknown (None) so a
+    # transient network blip doesn't permanently brand a solvable repo.
+    combined = ((proc.stderr or "") + (proc.stdout or "")).lower()
+    net_markers = (
+        "dial tcp", "no such host", "connection refused", "i/o timeout",
+        "network is unreachable", "timeout awaiting", "could not resolve",
+        "unrecognized import path", "reading ", "410 gone", "connection reset",
+        "tls handshake timeout", "proxyconnect", "server misbehaving",
+    )
+    if any(m in combined for m in net_markers):
+        logger.warning(
+            "A11: stubbed-base compile check hit a fetch/network error (not a real "
+            "compile failure); recording unknown for %s.", repo_dir,
+        )
+        return None
+    return False
+
+
 def _capture_go_test_ids(repo_dir: Path, test_cmd: str, repo_basename: str) -> None:
     """Capture the canonical Go test inventory via `go test -list ./...` on the
     stubbed base and save it to ``commit0/data/test_ids/<repo>.bz2`` — the
@@ -439,6 +488,22 @@ def prepare_single_repo(
             return None
 
         base_commit, reference_commit = create_stubbed_branch(repo_dir, full_name)
+
+        # A11 (go): verify the STUBBED base compiles. Stubs return zero values so
+        # they typecheck — a base that does NOT compile means the agent starts from
+        # a broken tree (bad stub, a stripped build tag, a missing symbol), so any
+        # resulting 0% is an infra/impossible-task artifact, not a model failure.
+        # `go build ./...` also warms the module cache for the capture below.
+        base_compiles = _stubbed_base_compiles_go(repo_dir)
+        if base_compiles is False:
+            logger.warning(
+                "A11: STUBBED BASE DOES NOT COMPILE for %s — the agent would start "
+                "from a broken tree; recording base_compiles=false (any 0%% here is "
+                "infra, not model). Investigate the stub output before trusting a score.",
+                full_name,
+            )
+        elif base_compiles is True:
+            logger.info("A11: stubbed base compiles cleanly for %s.", full_name)
 
         # Capture the canonical test inventory (`go test -list ./...`) on the
         # stubbed base (repo is on commit0_all here) and save it as
@@ -557,6 +622,9 @@ def prepare_single_repo(
             "test": test_dict,
             "src_dir": ".",
             "language": "go",
+            # A11 provenance: True = stubbed base compiles, False = does NOT
+            # (a 0% is infra, not model), None = not checked (go missing/timeout/net).
+            "base_compiles": base_compiles,
         }
 
         if dry_run:
