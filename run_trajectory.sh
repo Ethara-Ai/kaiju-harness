@@ -222,8 +222,12 @@ case "$MODEL" in
 esac
 
 # resolved command lines (single source of truth for --print and for execution)
-PREP_CMD="python -m ${PREP_MOD} --repo $REPO --org $ORG --output $DATASET --clone-dir $CLONE $PREPARE_ARGS"
-BUILD_CMD="python -m ${BUILD_MOD} build --commit0-config-file $CONFIG"
+# c's prepare CLI has no --org (it forks to its default); every other lang accepts it.
+_ORG_FLAG="--org $ORG"; [ "$LNG" = "c" ] && _ORG_FLAG=""
+PREP_CMD="python -m ${PREP_MOD} --repo $REPO $_ORG_FLAG --output $DATASET --clone-dir $CLONE $PREPARE_ARGS"
+# --single-arch: native-only build. The default multi-arch OCI build is slower and
+# flaky for local single-repo validation (some repos fail the multi-arch step).
+BUILD_CMD="python -m ${BUILD_MOD} build --single-arch --commit0-config-file $CONFIG"
 RUN_CMD="python -m agent.container.run_pipeline_containerized --language $LNG --dataset $DATASET --repo-split $SPLIT --model $MODEL --pipeline-args \"$PIPELINE_ARGS\" $RUN_ARGS"
 
 echo "== repo=$REPO lang=$LNG model=$MODEL split=$SPLIT bridge=$BRIDGE${BPORT:+:$BPORT} =="
@@ -342,7 +346,10 @@ uuid,split=sys.argv[1],sys.argv[2]
 runs=glob.glob(f"outputs/{uuid}/runs/*/agent/run_1/pipeline_results.json")
 if not runs:
     print(f"   no pipeline_results.json under outputs/{uuid} (run may have failed early)"); raise SystemExit
-d=json.load(open(runs[0]))
+try:
+    d=json.load(open(runs[0]))
+except Exception as _e:
+    print(f"   pipeline_results.json present but unreadable ({_e})"); raise SystemExit
 for s in ("stage1","stage2","stage3"):
     st=d.get(s)
     if st:

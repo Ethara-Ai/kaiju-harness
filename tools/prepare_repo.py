@@ -430,13 +430,17 @@ def quick_import_check(repo_dir: Path, src_dir: str) -> tuple[bool, str]:
 
     try:
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-        # For src-layout packages (e.g. src/wtforms/), Python needs PYTHONPATH
-        src_layout_dir = repo_dir / "src"
+        # For src-layout packages (e.g. src/wtforms/), Python needs PYTHONPATH.
+        # MUST be ABSOLUTE: the subprocess runs with cwd=repo_dir, so a relative
+        # "repos_staging/x/src" would resolve against cwd and double-nest, making
+        # the import spuriously fail (a false base_compiles=False for every
+        # src-layout repo when --clone-dir is relative).
+        src_layout_dir = (repo_dir / "src").resolve()
         if src_layout_dir.is_dir():
             env["PYTHONPATH"] = str(src_layout_dir)
         result = subprocess.run(
             [sys.executable, "-c", f"import {import_name}"],
-            cwd=str(repo_dir),
+            cwd=str(repo_dir.resolve()),
             capture_output=True,
             text=True,
             timeout=30,
