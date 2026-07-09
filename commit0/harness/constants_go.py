@@ -1,5 +1,6 @@
 """Go-specific constants and data models for commit0 Go integration."""
 
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Dict
@@ -27,7 +28,16 @@ GO_SPLIT: Dict[str, list[str]] = {}
 # previously. It now lives in ``commit0.harness.split_utils.resolve_split``
 # and works the same for every language.
 
-GO_VERSION = "1.25.0"
+# Go toolchain version. Override via the GO_VERSION env var for a bisect / MSRV
+# check (mirrors RUST_VERSION in constants_rust.py). NOTE: unlike RUST_VERSION —
+# which is substituted into the base image tag and is therefore the single
+# source of truth — the Go base image tag is hardcoded in
+# ``dockerfiles/Dockerfile.go`` (``FROM golang:1.25-bookworm``). This constant is
+# used only for the (currently non-blocking) health-check version assertion, so
+# it MUST be kept in sync with the Dockerfile manually. The env override lets an
+# operator point the version check at a different toolchain without editing this
+# file.
+GO_VERSION = os.environ.get("GO_VERSION", "1.25.0")
 GO_SOURCE_EXT = ".go"
 GO_STUB_MARKER = '"STUB: not implemented"'
 GO_TEST_FILE_SUFFIX = "_test.go"

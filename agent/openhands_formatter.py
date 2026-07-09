@@ -714,6 +714,183 @@ def _count_tool_calls(events: list[dict]) -> dict[str, int]:
     return counts
 
 
+# Usage keys carried on an ActionEvent's embedded `usage` block. Kept in one
+# place so the reconciler and the emitters agree on the exact schema.
+_USAGE_INT_KEYS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "thinking_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cached_content_tokens",
+)
+_USAGE_FLOAT_KEYS = ("cost_usd",)
+
+
+def _authoritative_totals(metrics: dict) -> dict | None:
+    """Extract the authoritative per-source token/cost totals from `metrics`.
+
+    `metrics` is produced by ``ThinkingCapture.get_module_metrics`` and, when the
+    litellm call-log is present, carries the reconciled aggregates
+    (``by_source`` + top-level ``total_*``). Those are the SAME numbers a
+    downstream consumer reads from ``metrics`` — the source of truth. Returns a
+    dict with the grand totals across ALL sources plus the main-loop-only subset,
+    or ``None`` when the call-log was absent (degraded capture) so the caller can
+    leave the turn-derived usage untouched.
+    """
+    by_source = metrics.get("by_source")
+    if not isinstance(by_source, dict) or not by_source:
+        return None
+
+    grand = {k: 0 for k in _USAGE_INT_KEYS}
+    grand_cost = 0.0
+    main = {k: 0 for k in _USAGE_INT_KEYS}
+    main_cost = 0.0
+    for src, b in by_source.items():
+        if not isinstance(b, dict):
+            continue
+        is_main = src == "main_loop"
+        for k in _USAGE_INT_KEYS:
+            v = b.get(k, 0) or 0
+            grand[k] += int(v)
+            if is_main:
+                main[k] += int(v)
+        c = float(b.get("cost_usd", 0.0) or 0.0)
+        grand_cost += c
+        if is_main:
+            main_cost += c
+    grand["cost_usd"] = grand_cost
+    main["cost_usd"] = main_cost
+    return {"grand": grand, "main": main}
+
+
+def _scale_usage_across(
+    usage_events: list[dict], target: dict
+) -> None:
+    """Rewrite the `usage` blocks of *usage_events* so their column sums equal
+    *target* EXACTLY (integer columns exact; cost within float epsilon).
+
+    Each event keeps its original share of every column, computed from the
+    pre-reconciliation values (a proportional split), and the arithmetic
+    remainder is assigned to the LAST event so the totals reconcile to the
+    authoritative figure with zero drift. When the events carry no prior signal
+    (all-zero, e.g. usage populated only on the first edit of a multi-edit turn),
+    the entire target is placed on the last event — still summing exactly.
+    """
+    if not usage_events:
+        return
+    n = len(usage_events)
+    # Integer columns: largest-remainder apportionment by existing weight.
+    for key in _USAGE_INT_KEYS:
+        tgt = int(target.get(key, 0) or 0)
+        weights = [int(e["usage"].get(key, 0) or 0) for e in usage_events]
+        wsum = sum(weights)
+        if wsum <= 0:
+            # No prior signal — concentrate on the last event.
+            for e in usage_events:
+                e["usage"][key] = 0
+            usage_events[-1]["usage"][key] = tgt
+            continue
+        alloc = [tgt * w // wsum for w in weights]
+        remainder = tgt - sum(alloc)
+        # Hand the rounding remainder to the events with the largest fractional
+        # part, deterministically (ties broken by index) so the column sums to tgt.
+        fracs = sorted(
+            range(n),
+            key=lambda i: (tgt * weights[i] - alloc[i] * wsum, i),
+            reverse=True,
+        )
+        for i in fracs[:remainder]:
+            alloc[i] += 1
+        for e, a in zip(usage_events, alloc):
+            e["usage"][key] = a
+    # Cost: proportional split, exact remainder on the last event.
+    tgt_cost = float(target.get("cost_usd", 0.0) or 0.0)
+    cweights = [float(e["usage"].get("cost_usd", 0.0) or 0.0) for e in usage_events]
+    cwsum = sum(cweights)
+    if cwsum <= 0:
+        for e in usage_events:
+            e["usage"]["cost_usd"] = 0.0
+        usage_events[-1]["usage"]["cost_usd"] = tgt_cost
+    else:
+        running = 0.0
+        for i, e in enumerate(usage_events):
+            if i == n - 1:
+                e["usage"]["cost_usd"] = tgt_cost - running
+            else:
+                share = tgt_cost * cweights[i] / cwsum
+                e["usage"]["cost_usd"] = share
+                running += share
+
+
+def _reconcile_history_usage(events: list[dict], metrics: dict) -> None:
+    """Force ``Σ history[].usage == metrics`` (the authoritative call-log).
+
+    The per-turn ``usage`` blocks emitted by ``_convert_assistant_turn`` come
+    from aider's own per-message token accounting (``coder.show_usage_report``),
+    which diverges from the litellm call-log that ``metrics`` is built from:
+    aider snapshots completion_tokens WITHOUT reasoning folded in, counts prompt
+    tokens with its own tokenizer, and computes cost from those. The call-log
+    reads the raw provider ``usage`` object and is what ``pipeline_results``
+    consumes, so it is authoritative.
+
+    Additionally the call-log records AUXILIARY calls (summarizer / commit-msg /
+    repomap) that never surface as conversational turns, so even a perfectly
+    faithful per-turn capture would sum LOWER than ``metrics.total_cost``.
+
+    This reconciler, run after the events are built and BEFORE they ship:
+
+      1. Rescales the main-loop assistant ``usage`` blocks so their column sums
+         equal the authoritative ``by_source['main_loop']`` totals.
+      2. Folds the auxiliary-source aggregate (grand − main_loop) onto the LAST
+         assistant usage event, so the grand invariant
+         ``Σ history.usage.<col> == metrics.total_<col>`` holds exactly.
+
+    Idempotent-safe and a no-op when the call-log is absent (``by_source``
+    missing) — there the turn-derived usage is the best signal we have.
+    """
+    totals = _authoritative_totals(metrics)
+    if totals is None:
+        return
+
+    usage_events = [
+        e
+        for e in events
+        if e.get("kind") == "ActionEvent" and isinstance(e.get("usage"), dict)
+    ]
+    if not usage_events:
+        # No assistant turn carried usage (e.g. every turn was an early-return
+        # with zero tokens) but the call-log HAS spend. Rather than silently drop
+        # it, hang the grand total on the first ActionEvent so the invariant holds.
+        anchor = next(
+            (e for e in events if e.get("kind") == "ActionEvent"), None
+        )
+        if anchor is None:
+            return
+        anchor["usage"] = {k: int(totals["grand"].get(k, 0) or 0) for k in _USAGE_INT_KEYS}
+        anchor["usage"]["cost_usd"] = float(totals["grand"].get("cost_usd", 0.0) or 0.0)
+        return
+
+    # Step 1: main-loop assistant turns reconcile to the main-loop call-log total.
+    _scale_usage_across(usage_events, totals["main"])
+
+    # Step 2: fold auxiliary sources (grand − main) onto the last usage event so
+    # the GRAND invariant Σ history.usage == metrics.total_* holds exactly. These
+    # calls (summarizer/commit_msg/repomap) have no conversational turn of their
+    # own; attributing them to the trajectory's last turn keeps the running total
+    # honest without fabricating phantom events.
+    last = usage_events[-1]["usage"]
+    for key in _USAGE_INT_KEYS:
+        aux = int(totals["grand"].get(key, 0) or 0) - int(totals["main"].get(key, 0) or 0)
+        if aux:
+            last[key] = int(last.get(key, 0) or 0) + aux
+    aux_cost = float(totals["grand"].get("cost_usd", 0.0) or 0.0) - float(
+        totals["main"].get("cost_usd", 0.0) or 0.0
+    )
+    if abs(aux_cost) > 1e-12:
+        last["cost_usd"] = float(last.get("cost_usd", 0.0) or 0.0) + aux_cost
+
+
 def format_openhands_output(
     turns: list["Turn"],
     instance_id: str,
@@ -727,6 +904,9 @@ def format_openhands_output(
     module_runtime_seconds: float = 0.0,
 ) -> dict:
     events = turns_to_openhands_events(turns, system_prompt=system_prompt)
+    # Reconcile the embedded per-turn usage against the authoritative call-log
+    # (`metrics`) so Σ history[].usage == metrics.total_* exactly.
+    _reconcile_history_usage(events, metrics)
     tool_counts = _count_tool_calls(events)
 
     metrics = {
@@ -809,6 +989,11 @@ def write_module_output_json(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     events = turns_to_openhands_events(module_turns, system_prompt=system_prompt)
+    # Reconcile the embedded per-turn usage against the authoritative call-log
+    # (`metrics`, which carries `by_source`) so Σ history[].usage == metrics
+    # exactly. Done against the full `metrics` (not the public copy below) so the
+    # call-log aggregates are visible.
+    _reconcile_history_usage(events, metrics)
     tool_counts = _count_tool_calls(events)
 
     metrics_public = dict(metrics)

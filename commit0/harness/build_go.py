@@ -10,7 +10,7 @@ from typing import Iterator
 
 import docker
 
-from commit0.harness.constants_go import GoRepoInstance, GO_SPLIT
+from commit0.harness.constants_go import GoRepoInstance, GO_SPLIT, GO_VERSION
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.docker_build import build_repo_images
 from commit0.harness.health_check_go import run_go_health_checks
@@ -81,7 +81,13 @@ def main(
         image_key = spec.repo_image_key
         if image_key in failed:
             continue
-        results = run_go_health_checks(client, image_key)
+        # Assert the toolchain version too (non-blocking). Use the MINOR version
+        # (e.g. "1.25") rather than the full "1.25.0" so a patch bump in the
+        # golang:1.25-bookworm base image (which pins only the minor version)
+        # does not produce a spurious drift warning; check_go_version does a
+        # substring match, so "go1.25" matches "go1.25.x".
+        go_minor = ".".join(GO_VERSION.split(".")[:2])
+        results = run_go_health_checks(client, image_key, go_version=go_minor)
         for passed, check_name, detail in results:
             if not passed:
                 logger.warning(

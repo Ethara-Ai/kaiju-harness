@@ -391,6 +391,30 @@ get_mtime() {
         || echo "0"
 }
 
+# B15 (parity with run_pipeline_rust.sh): an INTENTIONAL rate-limit pause is not
+# a hang. agent/claude_code/recovery.py drops a `.rate_limit_paused` marker and
+# re-touches it each heartbeat while it waits on the subscription cap to reset
+# (run_agent_go.py passes `_kaiju_log_dir` to run_with_recovery in every stage
+# loop). The watchdog treats a FRESH marker as a legit pause and suppresses the
+# inactivity kill; the absolute wall-time cap (checked unconditionally earlier
+# each loop) still bounds an unbounded pause. Without this, a rate-limit pause
+# with no live socket + no local CPU would be misread as a hang and killed.
+# Returns 0 (true) iff a `.rate_limit_paused` exists under $1 with mtime within
+# $2 seconds of now.
+_pause_marker_fresh() {
+    local search_dir="$1"
+    local fresh_within="$2"
+    local now mt newest_mt=0
+    now=$(date +%s)
+    while IFS= read -r marker; do
+        mt=$(get_mtime "$marker")
+        if [[ "$mt" -gt "$newest_mt" ]]; then newest_mt="$mt"; fi
+    done < <(find "$search_dir" -name ".rate_limit_paused" 2>/dev/null)
+    [[ "$newest_mt" -gt 0 ]] || return 1
+    local age=$(( now - newest_mt ))
+    [[ "$age" -lt "$fresh_within" ]]
+}
+
 get_newest_aider_log() {
     local search_dir="$1"
     local newest=""
@@ -785,6 +809,15 @@ watchdog_run() {
         # Inactivity timeout: kill if no log writes within the limit — but NOT if
         # the agent is healthily waiting on the model or still computing locally.
         if [[ "$latest_mtime" -gt 0 ]] && [[ "$agent_active" == "false" ]]; then
+            # B15: an intentional rate-limit pause is not a hang. If recovery has
+            # a fresh `.rate_limit_paused` marker (re-touched each heartbeat),
+            # suppress the inactivity kill. The absolute wall-time cap (checked
+            # above) still bounds an unbounded pause, so this can't hang forever.
+            if _pause_marker_fresh "$log_dir" "$(( inactivity_limit * 2 ))"; then
+                log "  WATCHDOG: log idle ${idle}s but a fresh rate-limit pause marker is present — intentionally paused, not stuck. Continuing."
+                _veto_start=0
+                continue
+            fi
             # Log-inactivity ALONE is not "stuck". A long server-side extended-
             # thinking turn writes no logs and burns ~0 local CPU (blocked on the
             # socket). Before killing — and wasting a paid turn — require BOTH: no

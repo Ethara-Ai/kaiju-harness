@@ -131,6 +131,67 @@ def _mark_module_done(log_dir: Path) -> None:
     (log_dir / ".done").touch()
 
 
+def _write_module_output(
+    *,
+    thinking_capture: Optional[ThinkingCapture],
+    module_log_dir: Path,
+    module_name: str,
+    stage: str,
+    local_repo,
+    base_commit: str,
+    module_rel_files: dict[str, list[str]],
+    instance_id: str,
+    metadata: dict,
+) -> None:
+    """Write ONE module's output.json right after that module finishes.
+
+    Crash-resilience: mirrors the Rust runner (run_rust_agent.py
+    ``_module_file_patch`` + per-module ``write_module_output_json``). Called
+    from inside each stage loop so a worker killed mid-run keeps output.json for
+    every already-completed module (the old post-loop write lost them all).
+
+    The per-module patch is ``git diff base_commit..HEAD -- <this module's own
+    files>``. Because modules own disjoint files, this is byte-identical to what
+    the old post-loop computed for the same module — same base, same HEAD, same
+    file set. Best-effort: a failure here never breaks the run.
+    """
+    if thinking_capture is None:
+        return
+    module_turns = thinking_capture.get_module_turns(module_name)
+    # Mirror Rust's ``if module_turns:`` guard — a module that produced no turns
+    # (e.g. agent no-op) gets no output.json, exactly as the old post-loop
+    # (which iterated only modules that appeared on a turn) behaved.
+    if not module_turns:
+        return
+    module_metrics = thinking_capture.get_module_metrics(module_name)
+    # Scope this module's patch to the file(s) IT owns, so its output.json
+    # records only its own changes (not the whole branch). Disjoint files ⇒
+    # this equals the post-loop result.
+    module_patch = module_file_patch(
+        local_repo,
+        base_commit,
+        "HEAD",
+        module_rel_files.get(module_name, []),
+        logger=logger,
+    )
+    try:
+        write_module_output_json(
+            output_dir=str(module_log_dir),
+            module_turns=module_turns,
+            module=module_name,
+            instance_id=instance_id,
+            git_patch=module_patch,
+            instruction="",
+            metadata=metadata,
+            metrics=module_metrics,
+            stage=stage,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to write module output JSON for %s: %s", module_name, e
+        )
+
+
 def run_eval_after_each_commit(
     branch: str, backend: str, commit0_config_file: str
 ) -> str:
@@ -237,6 +298,19 @@ def run_agent_for_repo(
         logger.error("Failed to write agent config to %s: %s", agent_config_log_file, e)
         raise
 
+    # Build the output.json metadata ONCE up front so each stage loop can write
+    # its module's output.json the moment that module completes (crash-resilient,
+    # matching the Rust runner). Cheap and side-effect-free, so computing it even
+    # when capture_thinking is off is harmless (the per-module writer no-ops when
+    # thinking_capture is None).
+    metadata = build_metadata(
+        dataset_path=commit0_config_file,
+        max_iterations=agent_config.max_iteration,
+        model_short=getattr(agent_config, "model_short", agent_config.model_name),
+        dataset_id=example.get("id"),
+    )
+    module_instance_id = example.get("instance_id", repo_name)
+
     with DirContext(repo_path):
         if agent_config.run_tests:
             update_queue.put(("start_repo", (repo_name, len(test_files_str))))
@@ -318,6 +392,19 @@ def run_agent_for_repo(
                     )
                 )
                 _mark_module_done(test_log_dir)
+                # Write THIS module's output.json now (crash-resilient): a worker
+                # killed after this point keeps output.json for the module.
+                _write_module_output(
+                    thinking_capture=thinking_capture,
+                    module_log_dir=test_log_dir,
+                    module_name=test_id_safe,
+                    stage="test",
+                    local_repo=local_repo,
+                    base_commit=example["base_commit"],
+                    module_rel_files=module_rel_files,
+                    instance_id=module_instance_id,
+                    metadata=metadata,
+                )
         elif agent_config.run_entire_dir_lint:
             lint_cmd = get_go_lint_cmd(
                 repo_name,
@@ -375,6 +462,18 @@ def run_agent_for_repo(
                     )
                 )
                 _mark_module_done(lint_log_dir)
+                # Write THIS module's output.json now (crash-resilient).
+                _write_module_output(
+                    thinking_capture=thinking_capture,
+                    module_log_dir=lint_log_dir,
+                    module_name=file_name,
+                    stage="lint",
+                    local_repo=local_repo,
+                    base_commit=example["base_commit"],
+                    module_rel_files=module_rel_files,
+                    instance_id=module_instance_id,
+                    metadata=metadata,
+                )
         else:
             message, spec_costs = get_go_message(
                 agent_config,
@@ -443,6 +542,18 @@ def run_agent_for_repo(
                     )
                 )
                 _mark_module_done(file_log_dir)
+                # Write THIS module's output.json now (crash-resilient).
+                _write_module_output(
+                    thinking_capture=thinking_capture,
+                    module_log_dir=file_log_dir,
+                    module_name=file_name,
+                    stage="draft",
+                    local_repo=local_repo,
+                    base_commit=example["base_commit"],
+                    module_rel_files=module_rel_files,
+                    instance_id=module_instance_id,
+                    metadata=metadata,
+                )
 
     if agent_config.record_test_for_each_commit:
         try:
@@ -469,47 +580,42 @@ def run_agent_for_repo(
         from agent.stage_patch import write_stage_patch
         write_stage_patch(local_repo, example.get("base_commit", "HEAD"),
                           experiment_log_dir, logger)
-        metadata = build_metadata(
-            dataset_path=commit0_config_file,
-            max_iterations=agent_config.max_iteration,
-            model_short=getattr(agent_config, "model_short", agent_config.model_name),
-            dataset_id=example.get("id"),
-        )
 
+        # IDEMPOTENT BACKSTOP (not the primary write). output.json is now written
+        # per-module inside each stage loop the moment the module finishes, so a
+        # worker killed mid-run keeps output.json for every completed module. This
+        # backstop only fills output.json for a turn-bearing module that STILL
+        # lacks one — the one real gap the in-loop write can't cover:
+        #   * a module marked `.done` by a PRIOR run (which predates the in-loop
+        #     write) is skipped by `_is_module_done` before its in-loop write can
+        #     run, leaving it `.done` but output.json-less on resume.
+        # It NEVER touches a module that already has output.json, so it cannot
+        # double-write or double-count metrics. Modules with 0 turns are skipped,
+        # exactly as before. `stage` is derived from the module's own turns (same
+        # value the in-loop write's per-loop constant would produce).
         modules_seen: set[str] = set()
         for turn in thinking_capture.turns:
             if turn.module and turn.module not in modules_seen:
                 modules_seen.add(turn.module)
         for module_name in modules_seen:
-            module_turns = thinking_capture.get_module_turns(module_name)
-            module_metrics = thinking_capture.get_module_metrics(module_name)
-            stage = module_turns[0].stage if module_turns else "unknown"
             module_log_dir = experiment_log_dir / module_name
-            # Scope this module's patch to the file(s) IT owns, so its
-            # output.json records only its own changes (not the whole branch).
-            module_patch = module_file_patch(
-                local_repo,
-                example["base_commit"],
-                "HEAD",
-                module_rel_files.get(module_name, []),
-                logger=logger,
+            if (module_log_dir / "output.json").exists():
+                continue  # already written in-loop; don't rewrite / double-count
+            module_turns = thinking_capture.get_module_turns(module_name)
+            if not module_turns:
+                continue
+            stage = module_turns[0].stage or "unknown"
+            _write_module_output(
+                thinking_capture=thinking_capture,
+                module_log_dir=module_log_dir,
+                module_name=module_name,
+                stage=stage,
+                local_repo=local_repo,
+                base_commit=example["base_commit"],
+                module_rel_files=module_rel_files,
+                instance_id=module_instance_id,
+                metadata=metadata,
             )
-            try:
-                write_module_output_json(
-                    output_dir=str(module_log_dir),
-                    module_turns=module_turns,
-                    module=module_name,
-                    instance_id=example.get("instance_id", repo_name),
-                    git_patch=module_patch,
-                    instruction="",
-                    metadata=metadata,
-                    metrics=module_metrics,
-                    stage=stage,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to write module output JSON for %s: %s", module_name, e
-                )
 
     update_queue.put(("finish_repo", repo_name))
 
@@ -642,6 +748,27 @@ def run_agent(
                 elapsed_time = int(time.time() - start_time)
                 display.update_time_display(elapsed_time)
 
+                # Collect every worker. A bare `result.get()` re-raised the
+                # FIRST failing worker and abandoned the rest, discarding their
+                # already-written trajectories/output.json. Isolate per-worker
+                # failures (mirrors run_rust_agent.py's E8) so one bad repo can't
+                # sink the batch; only a TOTAL wipeout is treated as systemic.
+                n_failed = 0
                 for result in results:
-                    result.get()
-                logger.info("All %d agent workers completed", len(results))
+                    try:
+                        result.get()
+                    except Exception as werr:  # noqa: BLE001
+                        n_failed += 1
+                        logger.error(
+                            "Go agent worker failed: %s", werr, exc_info=True
+                        )
+                logger.info(
+                    "All %d agent workers completed (%d failed)",
+                    len(results),
+                    n_failed,
+                )
+                if n_failed and n_failed == len(results):
+                    raise RuntimeError(
+                        f"All {len(results)} Go agent workers failed — "
+                        f"systemic fault, aborting."
+                    )
