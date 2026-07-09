@@ -376,26 +376,46 @@ def main(argv=None) -> int:
         str(host_harbor_dir): {"bind": "/opt/kaiju/Harbor_Data", "mode": "rw"},
     }
     _mounted = False
+    # Docker-socket mount (from teammate commit f1d92d1) so an in-container eval
+    # can reach the host dockerd. SECURITY/DESIGN NOTE: this grants the container
+    # root-equivalent control of host docker and is NOT needed by the local_inplace
+    # backend (which evals in an in-container git worktree — "no docker-in-docker").
+    # Preserved here to not silently drop a teammate change; flagged for review.
+    _sock = os.environ.get("KAIJU_DOCKER_SOCK", "/var/run/docker.sock")
+    _volumes = {_sock: {"bind": "/var/run/docker.sock", "mode": "rw"}} if Path(_sock).exists() else None
+    if _volumes:
+        logger.info("Mounting docker socket %s -> /var/run/docker.sock", _sock)
     try:
-        _sock = os.environ.get("KAIJU_DOCKER_SOCK", "/var/run/docker.sock")
-        _volumes = {_sock: {"bind": "/var/run/docker.sock", "mode": "rw"}} if Path(_sock).exists() else None
-        if _volumes:
-            logger.info("Mounting docker socket %s -> /var/run/docker.sock (enables in-container eval)", _sock)
-        else:
-            logger.warning("Docker socket %s not found; in-container eval will fail to reach dockerd", _sock)
-        container = create_container(
-            client=client, image_name=agent_tag,
-            container_name=container_name,
-            logger=logger, environment=env, extra_hosts=_extra_hosts(),
-            # Merge BOTH mount sets: the host output/Harbor bind-mount (trajectory
-            # persistence — survives an orchestrator kill) AND the docker-socket
-            # mount from f1d92d1 (only if present; see the security note below).
-            volumes={**_mount_volumes, **(_volumes or {})},
-        )
-        container.start()
-        _mounted = True
-        logger.info("Bind-mounted host outputs/%s + Harbor_Data into container "
-                    "(trajectory persists live; survives an orchestrator kill)", dataset_id)
+        try:
+            container = create_container(
+                client=client, image_name=agent_tag,
+                container_name=container_name,
+                logger=logger, environment=env, extra_hosts=_extra_hosts(),
+                # Merge BOTH mount sets: host output/Harbor bind-mount (trajectory
+                # persistence, survives an orchestrator kill) + the docker socket.
+                volumes={**_mount_volumes, **(_volumes or {})},
+            )
+            container.start()
+            _mounted = True
+            logger.info("Bind-mounted host outputs/%s + Harbor_Data into container "
+                        "(trajectory persists live; survives an orchestrator kill)", dataset_id)
+        except Exception as _mnt_err:  # noqa: BLE001 - degrade gracefully if bind-mount unsupported
+            logger.warning("Bind-mount failed (%s) — falling back to internal write + "
+                           "end-of-run copy-back. Data will NOT survive an orchestrator "
+                           "kill mid-run on this host (check Docker file sharing).", _mnt_err)
+            try:
+                if container is not None:
+                    container.remove(force=True)
+            except Exception:  # noqa: BLE001
+                pass
+            container = create_container(
+                client=client, image_name=agent_tag,
+                container_name=container_name,
+                logger=logger, environment=env, extra_hosts=_extra_hosts(),
+                volumes=(_volumes or None),  # keep the docker socket if present; drop the output mount
+            )
+            container.start()
+            _mounted = False
 
         # Copy the dataset in and expose /testbed as repos/<name> (the pipeline
         # expects the checkout under REPO_BASE=./repos).
