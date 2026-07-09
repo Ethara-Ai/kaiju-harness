@@ -23,6 +23,12 @@ _TRANSIENT_SIGNALS = (
     "temporarily unavailable", "502 bad gateway", "503 service", "504 gateway",
     "overloaded", "internal server error", "remoteprotocolerror", "econnreset",
     "rate limit", "429",
+    # aider-swallowed transient LLM errors surfaced by
+    # agent.agents.raise_if_transient_llm_error (TransientLLMError) and the raw
+    # litellm/mid-stream signals it matches, so the codex-recovery path retries
+    # the module instead of losing the turn's work.
+    "transientllmerror", "midstreamfallbackerror", "apiconnectionerror",
+    "apitimeouterror",
 )
 
 _DEFAULT_BACKOFF = (5, 10, 20, 40, 60)

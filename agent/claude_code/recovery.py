@@ -165,6 +165,10 @@ _TRANSIENT_EXC_NAMES = (
     "ReadError", "WriteError", "RemoteProtocolError", "ConnectError",
     "NetworkError", "MidStreamFallbackError", "APIConnectionError",
     "APITimeoutError",
+    # Raised by agent.agents.raise_if_transient_llm_error when aider SWALLOWED a
+    # transient LLM/network error (printed but did not re-raise). Retrying it
+    # re-runs the whole module so no litellm error is left unhandled.
+    "TransientLLMError",
 )
 
 _TRANSIENT_MSG_SIGNALS = (

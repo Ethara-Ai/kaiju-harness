@@ -281,7 +281,10 @@ class AiderGoAgents(GoAgents):
 
         from aider.models import Model
 
+        from agent.agents import apply_llm_resilience
+
         self.model = Model(model_name)
+        apply_llm_resilience(self.model)
         self.model_name = model_name
         self.cache_prompts = cache_prompts
 
@@ -547,6 +550,26 @@ class AiderGoAgents(GoAgents):
                     pass
             sys.stdout = _saved_stdout
             sys.stderr = _saved_stderr
+
+        # (c) backstop: aider may have CAUGHT a transient LLM/network error
+        # (e.g. MidStreamFallbackError -> APIConnectionError: timed out), PRINTED
+        # it into the session, and NOT re-raised — leaving the module marked done
+        # with the turn's work lost. Now that stdout/stderr are restored and the
+        # per-module log file is flushed/closed, scan THIS module's session text
+        # and re-raise it as TransientLLMError. This propagates out of run()
+        # (it is placed OUTSIDE the try/finally above, so nothing swallows it) to
+        # run_with_recovery, which recognizes TransientLLMError as transient and
+        # re-runs the whole module with backoff. Only fires on the transient
+        # signal list — a genuine model/edit failure is NOT retried this way.
+        from agent.agents import raise_if_transient_llm_error
+
+        try:
+            session_text = log_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            session_text = ""
+        raise_if_transient_llm_error(
+            session_text, context=f"module {current_module}"
+        )
 
         agent_return = AiderGoReturn(str(log_file))
         agent_return.test_summarizer_cost = sum(c.cost for c in _test_summarizer_costs)

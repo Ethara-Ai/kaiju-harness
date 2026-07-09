@@ -12,6 +12,66 @@ from typing import Any, Optional
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
 from agent.agent_utils import summarize_test_output
 
+logger = logging.getLogger(__name__)
+
+
+class TransientLLMError(Exception):
+    """A transient LLM/network error (timeout, mid-stream abort, connection drop)
+    that AIDER SWALLOWED (printed but did not re-raise). Raising this from an
+    agent's run() converts the swallowed error into an exception that
+    run_with_recovery recognizes (it is in _TRANSIENT_EXC_NAMES) and RETRIES the
+    whole module — so no litellm error is ever left unhandled."""
+
+
+# Substrings that identify a retryable transient LLM/network failure in aider's
+# swallowed output. Kept in sync with the recovery layer's signal list.
+_LLM_TRANSIENT_SIGNALS = (
+    "midstreamfallbackerror", "apiconnectionerror", "apitimeouterror",
+    "timed out", "read timeout", "connection aborted", "connection reset",
+    "server disconnected", "remoteprotocolerror", "incomplete chunked read",
+    "internalservererror", "service unavailable", "bad gateway",
+    "502 ", "503 ", "504 ", "overloaded",
+)
+
+
+def apply_llm_resilience(model: "Model") -> None:
+    """(a)+(b) client-side: make litellm RETRY a failed/timed-out call and wait
+    out slow reasoning turns, BELOW aider (so a transient never surfaces to be
+    swallowed). Sets num_retries + a generous request timeout in the model's
+    extra_params. Env-overridable: KAIJU_LLM_NUM_RETRIES (default 5),
+    KAIJU_LLM_TIMEOUT_SEC (default 1800 — matches the codex bridge's read timeout,
+    so the client rides out a ChatGPT stall instead of tripping)."""
+    try:
+        num_retries = int(os.environ.get("KAIJU_LLM_NUM_RETRIES", "5"))
+    except ValueError:
+        num_retries = 5
+    try:
+        timeout_s = int(os.environ.get("KAIJU_LLM_TIMEOUT_SEC", "1800"))
+    except ValueError:
+        timeout_s = 1800
+    params = dict(getattr(model, "extra_params", None) or {})
+    # litellm honors num_retries (with exponential backoff) + timeout on completion.
+    params.setdefault("num_retries", num_retries)
+    params.setdefault("timeout", timeout_s)
+    model.extra_params = params
+    logger.info("LLM resilience: num_retries=%s timeout=%ss (extra_params)", num_retries, timeout_s)
+
+
+def raise_if_transient_llm_error(text: str, context: str = "") -> None:
+    """(c) backstop: if aider SWALLOWED a transient LLM error (printed it into the
+    session output instead of re-raising), raise TransientLLMError so
+    run_with_recovery re-runs the module. Only fires on the transient signal list
+    — a genuine model/edit failure is NOT retried this way."""
+    if not text:
+        return
+    low = text.lower()
+    for sig in _LLM_TRANSIENT_SIGNALS:
+        if sig in low:
+            raise TransientLLMError(
+                f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
+                f"matched {sig!r} — re-running module (timed out)."
+            )
+
 
 def _patch_litellm_output_config_passthrough() -> None:
     """Preserve ``output_config`` through litellm's Bedrock Converse transform.
@@ -653,6 +713,7 @@ class AiderAgents(Agents):
         register_bedrock_arn_pricing(model_name)
         self._load_model_settings()
         self.model = Model(model_name)
+        apply_llm_resilience(self.model)
         self.model_name = model_name
         self.cache_prompts = cache_prompts
 

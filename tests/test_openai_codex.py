@@ -7,6 +7,7 @@ body normalization, SSE aggregation, header injection, and secret auth.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -626,3 +627,116 @@ class TestMultiAccountAtomic:
         pool = MultiAccountCredentialProvider([_P(0), _P(1)], state_path=None)
         tok, acct = pool.get_token_and_account()
         assert tok.split("-")[1] == acct.split("-")[1]     # same slot
+
+# --------------------------------------------------------------------------
+# SSE keep-alive on idle upstream (slow reasoning turn)
+# --------------------------------------------------------------------------
+
+
+class TestStreamKeepAlive:
+    """The streaming proxy must interleave SSE keep-alive comments while the
+    upstream is idle (reasoning) so the downstream client's read-timeout never
+    fires — without corrupting real `data:` events (byte-for-byte forwarding)."""
+
+    @staticmethod
+    async def _slow_upstream(chunks, gap):
+        """Yield each chunk after `gap` seconds of silence (mimics a slow
+        reasoning turn where upstream sends no bytes before the first token)."""
+        for c in chunks:
+            await asyncio.sleep(gap)
+            yield c
+
+    def _collect(self, chunks, gap, interval):
+        closed = {"n": 0}
+
+        async def _aclose():
+            closed["n"] += 1
+
+        async def _run():
+            out = []
+            async for b in bridge_mod._stream_with_keepalive(
+                self._slow_upstream(chunks, gap), _aclose, interval):
+                out.append(b)
+            return out
+
+        return asyncio.run(_run()), closed
+
+    def test_keepalive_interleaved_and_real_events_intact(self):
+        real = [
+            b'data: {"type":"response.created","response":{"id":"r"}}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"r"}}\n\n',
+        ]
+        # gap (0.05s) > interval (0.02s) -> at least one keep-alive per chunk.
+        out, closed = self._collect(real, gap=0.05, interval=0.02)
+
+        # Every real chunk is forwarded byte-for-byte, in order, uncorrupted.
+        forwarded = [b for b in out if b != bridge_mod._KEEPALIVE_LINE]
+        assert forwarded == real
+        # Keep-alives were interleaved.
+        assert bridge_mod._KEEPALIVE_LINE in out
+        # A keep-alive is a standalone SSE comment (ignored by parsers) and never
+        # appears mid-`data:` — it's only emitted between reads.
+        for b in out:
+            assert b == bridge_mod._KEEPALIVE_LINE or b.startswith(b"data:")
+        # Upstream response closed exactly once when the stream ended.
+        assert closed["n"] == 1
+
+    def test_no_keepalive_when_upstream_fast(self):
+        real = [b'data: {"type":"response.completed"}\n\n']
+        # gap (0s) < interval (10s) -> chunk arrives before a keep-alive is due.
+        out, closed = self._collect(real, gap=0.0, interval=10.0)
+        assert out == real
+        assert bridge_mod._KEEPALIVE_LINE not in out
+        assert closed["n"] == 1
+
+    def test_errored_upstream_still_closes(self):
+        async def _boom():
+            if False:  # pragma: no cover - make this an async generator
+                yield b""
+            raise RuntimeError("upstream exploded")
+
+        closed = {"n": 0}
+
+        async def _aclose():
+            closed["n"] += 1
+
+        async def _run():
+            out = []
+            async for b in bridge_mod._stream_with_keepalive(_boom(), _aclose, 0.02):
+                out.append(b)
+            return out
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(_run())
+        assert closed["n"] == 1  # finally: aclose ran despite the error
+
+    def test_stalled_upstream_keepalives_then_client_disconnect(self):
+        # Upstream never yields (permanently stalled). We must emit keep-alives
+        # and, on cancellation (client disconnect), cancel cleanly + close.
+        async def _stalled():
+            await asyncio.sleep(3600)
+            yield b"never"
+
+        closed = {"n": 0}
+
+        async def _aclose():
+            closed["n"] += 1
+
+        async def _run():
+            got = []
+            agen = bridge_mod._stream_with_keepalive(_stalled(), _aclose, 0.02)
+            # Pull two keep-alives, then simulate a client disconnect by aclose().
+            got.append(await agen.__anext__())
+            got.append(await agen.__anext__())
+            await agen.aclose()
+            return got
+
+        got = asyncio.run(_run())
+        assert got == [bridge_mod._KEEPALIVE_LINE, bridge_mod._KEEPALIVE_LINE]
+        assert closed["n"] == 1  # finally ran on GeneratorExit/cancellation
+
+    def test_interval_env_knob(self, monkeypatch):
+        monkeypatch.setenv("KAIJU_CODEX_KEEPALIVE_SEC", "42")
+        assert bridge_mod._keepalive_interval() == 42.0
+        monkeypatch.setenv("KAIJU_CODEX_KEEPALIVE_SEC", "garbage")
+        assert bridge_mod._keepalive_interval() == 15.0  # falls back to default

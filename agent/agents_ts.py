@@ -11,6 +11,7 @@ from agent.agents import (
     AiderReturn,
     handle_logging,
     _apply_thinking_capture_patches,
+    raise_if_transient_llm_error,
 )
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
 from agent.agent_utils_ts import summarize_test_output_ts
@@ -291,6 +292,18 @@ class TsAiderAgents(AiderAgents):
                     _logger.debug("Failed to close redirected stderr", exc_info=True)
             sys.stdout = _saved_stdout
             sys.stderr = _saved_stderr
+
+        # (c) backstop: if aider SWALLOWED a transient LLM error into the session
+        # output (printed but did not re-raise), convert it into a TransientLLMError
+        # so run_with_recovery re-runs the module. Read the captured session text
+        # from log_file AFTER stdout/stderr are restored. Raised OUTSIDE the try/
+        # except above so it propagates to the run_with_recovery wrapper. Only fires
+        # on transient signals (helper guards this) — genuine failures aren't retried.
+        try:
+            _session_text = Path(log_file).read_text(errors="replace")
+        except OSError:
+            _session_text = ""
+        raise_if_transient_llm_error(_session_text, context=f"module {current_module}")
 
         agent_return = AiderReturn(log_file)
         agent_return.test_summarizer_cost = sum(c.cost for c in _test_summarizer_costs)

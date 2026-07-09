@@ -308,6 +308,10 @@ class AiderJsAgents(JsAgents):
         from aider.models import Model
 
         self.model = Model(model_name)
+        # (a)+(b): make litellm RETRY a failed/timed-out call and wait out slow
+        # reasoning turns BELOW aider, so a transient never surfaces to be swallowed.
+        from agent.agents import apply_llm_resilience
+        apply_llm_resilience(self.model)
         self.model_name = model_name
         self.cache_prompts = cache_prompts
 
@@ -580,6 +584,19 @@ class AiderJsAgents(JsAgents):
                     pass
             sys.stdout = _saved_stdout
             sys.stderr = _saved_stderr
+
+        # (c) backstop: if aider SWALLOWED a transient LLM error into the session
+        # output (printed but did not re-raise), convert it into a TransientLLMError
+        # so run_with_recovery re-runs the module. Read the captured session text
+        # from log_file AFTER stdout/stderr are restored. Raised OUTSIDE the try/
+        # except above so it propagates to the run_with_recovery wrapper. Only fires
+        # on transient signals (helper guards this) — genuine failures aren't retried.
+        from agent.agents import raise_if_transient_llm_error
+        try:
+            _session_text = Path(log_file).read_text(errors="replace")
+        except OSError:
+            _session_text = ""
+        raise_if_transient_llm_error(_session_text, context=f"module {current_module}")
 
         agent_return = AiderJsReturn(str(log_file))
         agent_return.test_summarizer_cost = sum(c.cost for c in _test_summarizer_costs)

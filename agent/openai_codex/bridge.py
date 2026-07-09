@@ -37,13 +37,14 @@ spend the subscription.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import os
 import re
 import uuid
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -96,6 +97,75 @@ def _force_store_false() -> bool:
 
 def _bridge_secret() -> str:
     return os.environ.get("KAIJU_CODEX_BRIDGE_SECRET", "").strip()
+
+
+# A standalone SSE comment line. SSE parsers (and litellm's Responses-API stream
+# reader) ignore any line beginning with ":", but forwarding it downstream resets
+# the client's read-timeout clock. It is ONLY ever emitted between upstream reads
+# (never mid-`data:` chunk), so it can't corrupt a real event.
+_KEEPALIVE_LINE = b": keepalive\n\n"
+
+
+def _keepalive_interval() -> float:
+    """Seconds of upstream idle before we emit a downstream SSE keep-alive.
+
+    Default 15s (well under a typical client read-timeout); override via
+    KAIJU_CODEX_KEEPALIVE_SEC. A value <= 0 disables keep-alives.
+    """
+    raw = os.environ.get("KAIJU_CODEX_KEEPALIVE_SEC", "15").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 15.0
+
+
+async def _stream_with_keepalive(
+    chunks: AsyncIterator[bytes],
+    aclose,
+    interval: float,
+) -> AsyncIterator[bytes]:
+    """Forward upstream ``chunks`` byte-for-byte, interleaving an SSE keep-alive
+    comment whenever the upstream has been idle for ``interval`` seconds.
+
+    Real chunks are yielded exactly as received. The keep-alive is emitted only
+    when NO upstream chunk is in flight (between reads), so it can never land in
+    the middle of a ``data:`` event. Stops when the upstream iterator is exhausted
+    (``response.completed`` etc.) or raises; always closes the upstream response.
+    Cancellation (client disconnect) propagates and the ``finally`` still closes.
+    """
+    ait = chunks.__aiter__()
+    nxt: Optional[asyncio.Future] = None
+    try:
+        while True:
+            nxt = asyncio.ensure_future(ait.__anext__())
+            while True:
+                try:
+                    # Wait for the next upstream chunk, but no longer than the
+                    # keep-alive interval. asyncio.shield keeps the pending
+                    # __anext__ alive across a timeout so we don't drop a chunk.
+                    if interval and interval > 0:
+                        chunk = await asyncio.wait_for(asyncio.shield(nxt), interval)
+                    else:
+                        chunk = await nxt
+                except asyncio.TimeoutError:
+                    # Upstream idle (stalled or still reasoning): keep the client
+                    # connection warm and keep waiting on the SAME pending read.
+                    yield _KEEPALIVE_LINE
+                    continue
+                except StopAsyncIteration:
+                    nxt = None
+                    return
+                else:
+                    nxt = None
+                    yield chunk
+                    break
+    except asyncio.CancelledError:
+        # Client disconnected / server shutdown: cancel the in-flight read.
+        if nxt is not None and not nxt.done():
+            nxt.cancel()
+        raise
+    finally:
+        await aclose()
 
 
 def _secret_eq(candidate: str, secret: str) -> bool:
@@ -347,14 +417,10 @@ def build_app(provider=None) -> FastAPI:
             return err_resp
 
         if client_wanted_stream:
-            async def _stream():
-                try:
-                    async for chunk in upstream.aiter_raw():
-                        yield chunk
-                finally:
-                    await upstream.aclose()
             media = upstream.headers.get("content-type", "text/event-stream")
-            return StreamingResponse(_stream(), status_code=200, media_type=media)
+            gen = _stream_with_keepalive(
+                upstream.aiter_raw(), upstream.aclose, _keepalive_interval())
+            return StreamingResponse(gen, status_code=200, media_type=media)
 
         raw_sse = await upstream.aread()
         await upstream.aclose()
