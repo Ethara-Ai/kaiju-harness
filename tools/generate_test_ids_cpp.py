@@ -36,6 +36,135 @@ DATA_DIR = PROJECT_ROOT / "commit0" / "data"
 DEFAULT_OUTPUT_DIR = DATA_DIR / "cpp_test_ids"
 
 
+def _list_gtest(binary: str, cwd: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            [binary, "--gtest_list_tests"],
+            capture_output=True, text=True, timeout=30, cwd=cwd,
+        )
+        if result.returncode != 0:
+            return []
+        ids: list[str] = []
+        current_suite = ""
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            if not line.startswith(" ") and not line.startswith("\t"):
+                current_suite = line.strip().rstrip(".")
+            else:
+                test_name = line.strip().split("#")[0].strip()
+                if test_name and current_suite:
+                    ids.append(f"{current_suite}.{test_name}")
+        return ids
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+
+
+def _list_doctest(binary: str, cwd: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            [binary, "--list-test-cases"],
+            capture_output=True, text=True, timeout=30, cwd=cwd,
+        )
+        if result.returncode != 0:
+            return []
+        ids: list[str] = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            low = stripped.lower()
+            if low.startswith("[doctest]") or low.startswith("===") or "listing" in low:
+                continue
+            if stripped.startswith("-") or stripped.startswith("test cases:"):
+                continue
+            ids.append(stripped)
+        return ids
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+
+
+def _list_catch2(binary: str, cwd: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            [binary, "--list-tests"],
+            capture_output=True, text=True, timeout=30, cwd=cwd,
+        )
+        if result.returncode != 0:
+            return []
+        ids: list[str] = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            low = stripped.lower()
+            if low.startswith("all available") or low.startswith("matching"):
+                continue
+            if stripped.startswith("=") or stripped.startswith("-"):
+                continue
+            if "test cases" in low and ":" in stripped:
+                continue
+            if stripped.startswith("["):
+                continue
+            ids.append(stripped)
+        return ids
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+
+
+def _list_boost(binary: str, cwd: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            [binary, "--list_content"],
+            capture_output=True, text=True, timeout=30, cwd=cwd,
+        )
+        combined = (result.stdout or "") + (result.stderr or "")
+        if not combined.strip():
+            return []
+        ids: list[str] = []
+        suite_stack: list[str] = []
+        for raw in combined.splitlines():
+            if not raw.strip():
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            name = raw.strip().rstrip("*").strip()
+            if not name:
+                continue
+            level = indent // 4
+            suite_stack = suite_stack[:level]
+            if raw.rstrip().endswith("*"):
+                path = "/".join(suite_stack + [name]) if suite_stack else name
+                ids.append(path)
+            else:
+                suite_stack.append(name)
+        return ids
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+
+
+def _expand_test_binary(binary: str, cwd: Path) -> list[str]:
+    if not binary or not os.path.exists(binary) or not os.access(binary, os.X_OK):
+        return []
+    for lister in (_list_gtest, _list_doctest, _list_catch2, _list_boost):
+        ids = lister(binary, cwd)
+        if ids:
+            return ids
+    return []
+
+
+def _ctest_binary_from_command(command: list[str], build_path: Path) -> str:
+    if not command:
+        return ""
+    exe = command[0]
+    p = Path(exe)
+    if p.is_absolute() and p.exists():
+        return str(p)
+    candidate = (build_path / exe).resolve()
+    if candidate.exists():
+        return str(candidate)
+    return exe if os.path.exists(exe) else ""
+
+
 def collect_test_ids_ctest(
     repo_dir: Path,
     build_dir: str = "build",
@@ -72,7 +201,20 @@ def collect_test_ids_ctest(
 
         data = json.loads(result.stdout)
         tests = data.get("tests", [])
-        return sorted(t["name"] for t in tests if "name" in t)
+        expanded: list[str] = []
+        seen_binaries: dict[str, list[str]] = {}
+        for t in tests:
+            name = t.get("name")
+            command = t.get("command") or []
+            binary = _ctest_binary_from_command(command, build_path)
+            if binary and binary not in seen_binaries:
+                seen_binaries[binary] = _expand_test_binary(binary, build_path)
+            drilled = seen_binaries.get(binary, []) if binary else []
+            if drilled:
+                expanded.extend(drilled)
+            elif name:
+                expanded.append(name)
+        return sorted(set(expanded))
 
     except FileNotFoundError:
         logger.warning("ctest not found on PATH")
@@ -92,47 +234,31 @@ def collect_test_ids_gtest(
     test_dir: str = ".",
 ) -> list[str]:
     root = repo_dir if test_dir in (".", "") else repo_dir / test_dir
-    if not test_binary:
-        build_path = root / "build"
-        if not build_path.exists():
-            return []
-        candidates = []
-        for walk_root, dirs, files in os.walk(build_path):
-            dirs[:] = [d for d in dirs if d not in {".git", "_deps", "CMakeFiles"}]
-            for f in files:
-                fp = os.path.join(walk_root, f)
-                if os.access(fp, os.X_OK) and "test" in f.lower():
-                    candidates.append(fp)
-        if not candidates:
-            return []
-        test_binary = candidates[0]
+    if test_binary:
+        return sorted(set(_expand_test_binary(test_binary, root)))
 
-    try:
-        result = subprocess.run(
-            [test_binary, "--gtest_list_tests"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=root,
-        )
-        if result.returncode != 0:
-            return []
-
-        test_ids: list[str] = []
-        current_suite = ""
-        for line in result.stdout.splitlines():
-            if not line.strip():
-                continue
-            if not line.startswith(" ") and not line.startswith("\t"):
-                current_suite = line.strip().rstrip(".")
-            else:
-                test_name = line.strip().split("#")[0].strip()
-                if test_name:
-                    test_ids.append(f"{current_suite}.{test_name}")
-        return sorted(test_ids)
-
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    build_path = root / "build"
+    if not build_path.exists():
+        for alt in ["builddir", "cmake-build-release", "cmake-build-debug"]:
+            alt_path = root / alt
+            if alt_path.exists():
+                build_path = alt_path
+                break
+    if not build_path.exists():
         return []
+
+    candidates: list[str] = []
+    for walk_root, dirs, files in os.walk(build_path):
+        dirs[:] = [d for d in dirs if d not in {".git", "_deps", "CMakeFiles"}]
+        for f in files:
+            fp = os.path.join(walk_root, f)
+            if os.access(fp, os.X_OK) and "test" in f.lower() and not os.path.isdir(fp):
+                candidates.append(fp)
+
+    all_ids: list[str] = []
+    for binary in candidates:
+        all_ids.extend(_expand_test_binary(binary, build_path))
+    return sorted(set(all_ids))
 
 
 def collect_test_ids_catch2(
