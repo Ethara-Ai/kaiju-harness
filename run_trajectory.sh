@@ -263,7 +263,7 @@ echo "== [2/5] bridge ($BRIDGE) =="
 if [ "$BRIDGE" = "codex" ]; then
   if [ "$REUSE_BRIDGE" != "1" ] && lsof -i :$BPORT | grep -q LISTEN; then
     echo "   restarting bridge on $BPORT to guarantee a matching secret (--reuse-bridge to skip)"
-    lsof -ti :$BPORT 2>/dev/null | xargs -r kill 2>/dev/null || true
+    lsof -nP -iTCP:$BPORT -sTCP:LISTEN -t 2>/dev/null | xargs -r kill 2>/dev/null || true
     sleep 1
   fi
   if ! lsof -i :$BPORT | grep -q LISTEN; then
@@ -276,7 +276,7 @@ elif [ "$BRIDGE" = "cc" ]; then
   if [ "$REUSE_BRIDGE" != "1" ] && lsof -i :$BPORT | grep -q LISTEN; then
     echo "   restarting bridge on $BPORT to guarantee a matching secret (--reuse-bridge to skip)"
     KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh stop >/dev/null 2>&1 || true
-    lsof -ti :$BPORT 2>/dev/null | xargs -r kill 2>/dev/null || true
+    lsof -nP -iTCP:$BPORT -sTCP:LISTEN -t 2>/dev/null | xargs -r kill 2>/dev/null || true
     sleep 2
   fi
   if ! lsof -i :$BPORT | grep -q LISTEN; then

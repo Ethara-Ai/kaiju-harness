@@ -160,12 +160,21 @@ def cleanup_container(
         return
 
 
-    # Attempt to stop the container
+    # Attempt to stop the container. With auto_remove=True the daemon may already
+    # have removed it (404) or be removing it (409) — that means "already stopped",
+    # not a failure, so treat those as success instead of escalating to a hard kill.
+    def _already_gone(exc) -> bool:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status in (404, 409) or isinstance(exc, docker.errors.NotFound)
+
     try:
         if container:
             logger.info(f"Attempting to stop container {container.name}...")
             container.kill()
     except Exception as e:
+        if _already_gone(e):
+            logger.info(f"Container {container.name} already stopped/removed (auto_remove).")
+            return
         logger.error(
             f"Failed to stop container {container.name}: {e}. Trying to forcefully kill..."
         )
@@ -175,6 +184,9 @@ def cleanup_container(
             )
             container.kill(signal="SIGKILL")
         except Exception as e2:
+            if _already_gone(e2):
+                logger.info(f"Container {container.name} already removed (auto_remove).")
+                return
             raise Exception(
                 f"Failed to forcefully kill container {container.name}: {e2}\n"
                 f"{traceback.format_exc()}"

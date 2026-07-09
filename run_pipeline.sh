@@ -975,14 +975,14 @@ for root, _d, files in os.walk(log_dir):
                 fallback_count += 1
     except (OSError, ValueError):
         pass
-print(f"{fallback_total:.4f} aider_log:{fallback_count}" if fallback_count else f"{fallback_total:.4f} none")
+print(f"{fallback_total:.4f} aider_fallback:{fallback_count}" if fallback_count else f"{fallback_total:.4f} parse_error")
 PYEOF
 ) || true
     # result is "<cost> <source>"; validate the cost token, keep the source.
     if [[ "$result" =~ ^[0-9]+\.[0-9]+[[:space:]] ]]; then
         echo "$result"
     else
-        echo "0.0000 unknown"
+        echo "0.0000 parse_error"
     fi
 }
 

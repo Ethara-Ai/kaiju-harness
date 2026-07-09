@@ -496,6 +496,10 @@ def create_dataset_entry(
         "original_repo": upstream,
         "base_commit": base_commit,
         "reference_commit": reference_commit,
+        # A11 provenance at the TOP LEVEL (consumers read e["base_compiles"], like
+        # go/python/c/java) — kept in `setup` too for backward compat. Without this
+        # top-level copy the rust A11 signal was invisible to run_trajectory.sh etc.
+        "base_compiles": base_compiles,
         "setup": {
             "rust_version": rust_version,
             "edition": edition,

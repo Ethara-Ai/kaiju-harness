@@ -365,7 +365,6 @@ def _run_agent_for_repo_impl(
                         ),
                     )
                 )
-                _mark_module_done(test_log_dir)
                 _write_module_output(
                     thinking_capture=thinking_capture,
                     module_log_dir=test_log_dir,
@@ -377,6 +376,7 @@ def _run_agent_for_repo_impl(
                     instance_id=module_instance_id,
                     metadata=metadata,
                 )
+                _mark_module_done(test_log_dir)
         elif agent_config.run_entire_dir_lint:
             update_queue.put(("start_repo", (repo_name, len(lint_files))))
             # when unit test feedback is available, iterate over test files
@@ -430,7 +430,6 @@ def _run_agent_for_repo_impl(
                         (repo_name, lint_file, agent_return.last_cost),
                     )
                 )
-                _mark_module_done(lint_log_dir)
                 _write_module_output(
                     thinking_capture=thinking_capture,
                     module_log_dir=lint_log_dir,
@@ -442,6 +441,7 @@ def _run_agent_for_repo_impl(
                     instance_id=module_instance_id,
                     metadata=metadata,
                 )
+                _mark_module_done(lint_log_dir)
         else:
             # when unit test feedback is not available, iterate over target files to edit
             message, spec_costs = get_message(
@@ -500,7 +500,6 @@ def _run_agent_for_repo_impl(
                         (repo_name, file_name, file_cost),
                     )
                 )
-                _mark_module_done(file_log_dir)
                 _write_module_output(
                     thinking_capture=thinking_capture,
                     module_log_dir=file_log_dir,
@@ -512,6 +511,7 @@ def _run_agent_for_repo_impl(
                     instance_id=module_instance_id,
                     metadata=metadata,
                 )
+                _mark_module_done(file_log_dir)
     if agent_config.record_test_for_each_commit:
         try:
             with open(experiment_log_dir / "eval_results.json", "w") as f:

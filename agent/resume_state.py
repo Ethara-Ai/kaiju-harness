@@ -82,12 +82,15 @@ def _collect_highest_stage_patches(
         sibling ``.done``;
       * per-repo (cpp-style): ``current/output.json`` (or per-module output.json)
         covered by a single repo-level ``current/.done``.
-    A patch is included when it is non-empty AND its module has a sibling ``.done``
-    OR the enclosing ``current/.done`` (repo-level) marks the whole repo complete.
-    Later stages overwrite earlier ones (the cumulative base..HEAD patch wins).
+    A patch is included when its module has a sibling ``.done`` OR the enclosing
+    ``current/.done`` (repo-level) marks the whole repo complete. The HIGHEST stage
+    wins even when its patch is EMPTY: a module that had code in stage 1 but was
+    reverted to base in a later stage (e.g. a compile-gate revert) must NOT be
+    restored from the stale stage-1 patch — an empty top-stage patch means "restore
+    nothing", so the module is correctly left at base.
     """
-    by_module: dict[str, str] = {}
-    for stage in _STAGE_DIR_ORDER:  # low -> high, later stages overwrite
+    best: dict[str, tuple[int, str]] = {}  # key -> (highest stage index, patch)
+    for stage_idx, stage in enumerate(_STAGE_DIR_ORDER):  # low -> high
         for current in sorted(run_dir.glob(f"{stage}_*/{repo_name}/{branch}/current")):
             repo_done = (current / ".done").exists()  # cpp/repo-level marker
             for out in sorted(current.rglob("output.json")):
@@ -95,13 +98,17 @@ def _collect_highest_stage_patches(
                 key = "__repo__" if mod_dir == current else mod_dir.name
                 if not (repo_done or (mod_dir / ".done").exists()):
                     continue
+                if key in best and best[key][0] >= stage_idx:
+                    continue  # a same-or-higher stage already decided this module
                 try:
                     d = json.loads(out.read_text(errors="replace"))
                 except Exception:  # noqa: BLE001
                     continue
                 gp = ((d.get("test_result") or {}).get("git_patch")) or d.get("git_patch") or ""
-                if gp and gp.strip():
-                    by_module[key] = gp
+                best[key] = (stage_idx, gp if (gp and gp.strip()) else "")
+    # Only modules whose winning (highest) stage has a non-empty patch are restored;
+    # an empty winning patch = leave that module at base.
+    by_module: dict[str, str] = {k: gp for k, (idx, gp) in best.items() if gp}
     return by_module
 
 

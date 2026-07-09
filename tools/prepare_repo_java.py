@@ -289,10 +289,12 @@ def _stubbed_base_compiles_java(errors: int, validated: int) -> "bool | None":
     compile gate does; a full javac gate would require staging the resolved
     classpath, which is left as a follow-up.
     """
-    if validated == 0:
-        return None
+    # Order matters: a corrupted stub (errors>0) is a real False even when nothing
+    # validated cleanly — checking validated==0 first would mislabel it as None.
     if errors > 0:
         return False
+    if validated == 0:
+        return None
     return True
 
 

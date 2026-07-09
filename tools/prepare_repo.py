@@ -128,6 +128,20 @@ def full_clone(
         if tag:
             git(repo_dir, "fetch", "--tags", timeout=120)
             git(repo_dir, "checkout", tag, check=False)
+        else:
+            # Reused non-tag clone: a PRIOR prep may have left HEAD on the stub
+            # branch (commit0_all). Reset to a pristine default-branch tip so
+            # create_stubbed_branch records the ORIGINAL (un-stubbed) code as
+            # reference_commit, not the stubbed commit. (Since create_stubbed_branch
+            # no longer checks out default itself — that discarded pinned tags — the
+            # pristine reset for reuse lives here.)
+            try:
+                _def = get_default_branch(repo_dir)
+                git(repo_dir, "fetch", "origin", _def, "--prune", check=False, timeout=120)
+                git(repo_dir, "checkout", "-f", _def, check=False)
+                git(repo_dir, "reset", "--hard", f"origin/{_def}", check=False)
+            except Exception as _e:  # noqa: BLE001 - best-effort; fresh clones are unaffected
+                logger.warning("  Could not reset reused clone to pristine default: %s", _e)
         return repo_dir
 
     url = f"https://github.com/{full_name}.git"

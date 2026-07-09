@@ -320,8 +320,10 @@ def run_cpp_agent_for_repo(
     _cpp_base = example.get("base_commit", "") if isinstance(example, dict) else ""
     if os.environ.get("KAIJU_RESUME") == "1" and _cpp_base:
         from agent.resume_state import restore_prior_progress
+        # NB: pass the SANITIZED branch — cpp's log dir uses branch.replace("/","__")
+        # (see _get_stable_log_dir), so restore's glob must use the same form.
         restore_prior_progress(
-            local_repo, _cpp_base, branch,
+            local_repo, _cpp_base, branch.replace("/", "__"),
             Path(log_dir).parent, repo_name, logger)
 
     # Write agent config snapshot — mirrors Java's .agent.yaml
@@ -384,11 +386,21 @@ def run_cpp_agent_for_repo(
 
     eval_results: dict = {}
 
+    # Track whether any module was skipped (persistent transient error) so we do
+    # NOT mark the whole repo .done at the end — otherwise the repo-level early
+    # return above would permanently short-circuit --resume for the skipped module.
+    _repo_had_skips = False
+
     # Process one file at a time to avoid exceeding model context limits
     for tf in target_files:
         stem = _file_stem(tf, repo_path)
         file_log_dir = stable_log_dir / stem
         file_log_dir.mkdir(parents=True, exist_ok=True)
+        # Per-module resume skip (mirrors every other language): honor the .done
+        # markers this loop writes so --resume re-runs only unfinished modules.
+        if _is_module_done(file_log_dir):
+            logger.info("Skipping %s (already done)", stem)
+            continue
 
         message, summarizer_costs = get_cpp_message(
             agent_config,
@@ -434,6 +446,7 @@ def run_cpp_agent_for_repo(
                         branch, backend, commit0_config_file
                     )
             except TransientLLMError as _tle:
+                _repo_had_skips = True
                 _skip_failed_module(file_log_dir, stem, _tle)
                 continue
             except Exception as e:
@@ -462,6 +475,7 @@ def run_cpp_agent_for_repo(
                             test_files_readonly=_test_files_ro,
                     _kaiju_log_dir=file_log_dir,)
             except TransientLLMError as _tle:
+                _repo_had_skips = True
                 _skip_failed_module(file_log_dir, stem, _tle)
                 continue
             except Exception as e:
@@ -489,6 +503,7 @@ def run_cpp_agent_for_repo(
                             test_files_readonly=_test_files_ro,
                     _kaiju_log_dir=file_log_dir,)
             except TransientLLMError as _tle:
+                _repo_had_skips = True
                 _skip_failed_module(file_log_dir, stem, _tle)
                 continue
             except Exception as e:
@@ -561,7 +576,13 @@ def run_cpp_agent_for_repo(
     # Stage-wise cumulative patch alongside the per-module output.json.
     from agent.stage_patch import write_stage_patch
     write_stage_patch(local_repo, example.get("base_commit", ""), stable_log_dir, logger)
-    _mark_module_done(stable_log_dir)
+    # Only mark the WHOLE repo done if no module was skipped — otherwise the
+    # repo-level early-return would permanently short-circuit --resume for the
+    # skipped module(s) (which carry .needs_retry and no .done).
+    if not _repo_had_skips:
+        _mark_module_done(stable_log_dir)
+    else:
+        logger.info("%s: %d module(s) skipped — NOT marking repo done so --resume re-runs them", repo_name, sum(1 for _ in stable_log_dir.glob("*/.needs_retry")))
     logger.info("Completed %s", repo_name)
 
 

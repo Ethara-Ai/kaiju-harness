@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import logging
+import re
 import textwrap
 from typing import Optional
+
+# PEP 508 marker variables we recognize; used to decide whether a dep's marker
+# uses ONLY variables we can authoritatively supply for the target image.
+_MARKER_VARS = (
+    "python_full_version", "python_version", "platform_python_implementation",
+    "implementation_name", "implementation_version", "platform_machine",
+    "platform_system", "platform_release", "platform_version", "sys_platform",
+    "os_name", "extra",
+)
 
 import docker
 
@@ -62,10 +72,18 @@ def _marker_applies(pip_spec: str, python_version: "Optional[str]") -> bool:
         from packaging.markers import Marker
     except Exception:  # noqa: BLE001 - packaging missing -> old behavior
         return True
-    env = {"sys_platform": "linux", "platform_system": "Linux", "os_name": "posix"}
-    if python_version:
-        env["python_version"] = python_version
-        env["python_full_version"] = python_version
+    # Only DECIDE (skip a dep) when the marker uses ONLY variables we can supply
+    # AUTHORITATIVELY for the target image. Otherwise FAIL OPEN (check the dep), so a
+    # marker on a var we'd otherwise leak from the HOST env — platform_machine,
+    # implementation_name, or python_full_version at PATCH level (we only know
+    # major.minor) — can't wrongly skip an installed dep or wrongly check an absent
+    # one. python_full_version is intentionally NOT authoritative (2-part only).
+    _AUTH = {"python_version", "sys_platform", "platform_system", "os_name"}
+    used = {v for v in _MARKER_VARS if re.search(r"\b" + v + r"\b", marker_str)}
+    if not python_version or not used or not used.issubset(_AUTH):
+        return True
+    env = {"python_version": python_version, "sys_platform": "linux",
+           "platform_system": "Linux", "os_name": "posix"}
     try:
         return bool(Marker(marker_str).evaluate(env))
     except Exception:  # noqa: BLE001 - unparseable marker -> check it anyway

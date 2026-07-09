@@ -147,6 +147,30 @@ def _extra_hosts():
     return None
 
 
+_SWEEP_GRACE_SEC = 600  # a RUNNING container younger than this may still be in its
+                        # pre-pipeline setup window (dataset copy, git config, mkdir
+                        # execs) where only the PID-1 keepalive runs — do not mistake
+                        # it for a dead orphan and reap a live concurrent sibling.
+
+
+def _container_age_seconds(container) -> float:
+    """Age of the container from its StartedAt/Created timestamp. On any parse
+    failure returns 0.0 (treat as YOUNG -> keep it) so we never reap a running
+    container we can't age."""
+    import datetime as _dt
+    import re as _re
+    try:
+        container.reload()
+        st = (container.attrs.get("State") or {}).get("StartedAt") or container.attrs.get("Created")
+        if not st:
+            return 0.0
+        s = _re.sub(r"(\.\d{6})\d+", r"\1", st.replace("Z", "+00:00"))
+        started = _dt.datetime.fromisoformat(s)
+        return (_dt.datetime.now(_dt.timezone.utc) - started).total_seconds()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def _pipeline_process_alive(container) -> bool:
     """True if a pipeline process is still running inside `container`.
 
@@ -189,8 +213,11 @@ def _sweep_orphaned_pipeline_containers(client, logger, keep_name: str) -> int:
             if name == keep_name or not name.startswith("kaiju.pipeline."):
                 continue
             status = getattr(c, "status", "")
-            if status == "running" and _pipeline_process_alive(c):
-                continue  # live run (this-or-another concurrent repo) — leave it
+            if status == "running":
+                if _pipeline_process_alive(c):
+                    continue  # live run (this-or-another concurrent repo) — leave it
+                if _container_age_seconds(c) < _SWEEP_GRACE_SEC:
+                    continue  # young + no pipeline proc yet -> still in setup window
             logger.info("Reaping orphaned pipeline container %s (status=%s, "
                         "pipeline process not running)", name, status or "?")
             c.remove(force=True)
@@ -451,7 +478,11 @@ def main(argv=None) -> int:
         _keepalive_cmd = "tail -f /dev/null"
         _auto_remove = False
     else:
-        _ttl = max(int(getattr(args, "eval_timeout", 0) or 0), 86400) + 3600
+        # Size the TTL ABOVE the real worst-case legit runtime so it is a pure
+        # safety net that never kills a live run: the pipeline's per-stage wall cap
+        # is 86400s and there are 3 stages, so a legitimate run can last ~3*86400s.
+        # (--eval-timeout is NOT enforced as a hard cap, so we can't rely on it.)
+        _ttl = max(int(getattr(args, "eval_timeout", 0) or 0), 3 * 86400) + 3600
         _keepalive_cmd = [
             "sh", "-c",
             f"command -v timeout >/dev/null 2>&1 && exec timeout {_ttl} tail -f /dev/null "
@@ -517,8 +548,12 @@ def main(argv=None) -> int:
                 container_name=container_name,
                 logger=logger, environment=env, extra_hosts=_extra_hosts(),
                 volumes=(_volumes or None),  # keep the docker socket if present; drop the output mount
-                # Bounded keep-alive + auto-remove: self-destruct if the host dies.
-                command=_keepalive_cmd, auto_remove=_auto_remove,
+                # FALLBACK (no bind mount): the run's data lives INSIDE this
+                # container and is only copied out at the end. So do NOT self-destruct
+                # — a plain unbounded keepalive + auto_remove=False keeps an orphaned
+                # fallback container (and its recoverable data via `docker cp`) around,
+                # rather than nuking it after the TTL and losing the data entirely.
+                command="tail -f /dev/null", auto_remove=False,
             )
             container.start()
             _mounted = False

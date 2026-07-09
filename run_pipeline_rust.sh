@@ -2304,6 +2304,7 @@ for e in rows: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null || t
                 eval_time_s: 0,
                 cost_usd_incremental: 0.0,
                 cost_usd_cumulative: (.stage2.cost_usd_cumulative // .stage1.cost_usd // 0.0),
+                cost_source: "skipped",
                 returncode: 0,
                 runtime: 0,
                 num_passed: 0,
