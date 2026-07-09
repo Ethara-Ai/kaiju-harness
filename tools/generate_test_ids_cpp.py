@@ -170,7 +170,7 @@ def collect_test_ids_ctest(
     build_dir: str = "build",
     test_dir: str = ".",
 ) -> list[str]:
-    root = repo_dir if test_dir in (".", "") else repo_dir / test_dir
+    root = (repo_dir if test_dir in (".", "") else repo_dir / test_dir).resolve()
     build_path = root / build_dir
     if not build_path.exists():
         for alt in ["builddir", "cmake-build-release", "cmake-build-debug"]:
@@ -233,7 +233,7 @@ def collect_test_ids_gtest(
     test_binary: str = "",
     test_dir: str = ".",
 ) -> list[str]:
-    root = repo_dir if test_dir in (".", "") else repo_dir / test_dir
+    root = (repo_dir if test_dir in (".", "") else repo_dir / test_dir).resolve()
     if test_binary:
         return sorted(set(_expand_test_binary(test_binary, root)))
 
