@@ -30,6 +30,38 @@ type FileResult struct {
 type Stubber struct {
 	SkipTests  bool
 	SkipVendor bool
+	KeepDocs   bool
+}
+
+// stripComments removes ALL doc/ordinary comments from the file so the stubbed
+// output can't leak per-function documentation (and so go/format can't
+// misattribute a floating comment into a modified body). Clearing node.Comments
+// alone isn't enough — the printer also emits each node's own .Doc/.Comment, so
+// those are nil'd too.
+func stripComments(node *ast.File) {
+	node.Comments = nil
+	node.Doc = nil
+	ast.Inspect(node, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.FuncDecl:
+			d.Doc = nil
+		case *ast.GenDecl:
+			d.Doc = nil
+		case *ast.Field:
+			d.Doc = nil
+			d.Comment = nil
+		case *ast.TypeSpec:
+			d.Doc = nil
+			d.Comment = nil
+		case *ast.ValueSpec:
+			d.Doc = nil
+			d.Comment = nil
+		case *ast.ImportSpec:
+			d.Doc = nil
+			d.Comment = nil
+		}
+		return true
+	})
 }
 
 func (s *Stubber) StubDirectory(dir string) (*StubResult, error) {
@@ -93,6 +125,15 @@ func (s *Stubber) stubFile(path string) (*FileResult, error) {
 
 	result := &FileResult{Path: path}
 	modified := false
+
+	// Strip comments up front (unless --keep-docs): removes the answer-leaking
+	// function docs AND prevents go/format from relocating a floating comment into
+	// a rewritten body. Rewrite the file if anything was stripped, even when no
+	// function was stubbable (a doc-only/type-only file still leaks via type docs).
+	if !s.KeepDocs && (len(node.Comments) > 0 || node.Doc != nil) {
+		stripComments(node)
+		modified = true
+	}
 
 	for _, decl := range node.Decls {
 		fn, ok := decl.(*ast.FuncDecl)

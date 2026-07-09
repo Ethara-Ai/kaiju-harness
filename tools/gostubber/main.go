@@ -15,11 +15,17 @@ func main() {
 	skipTests := flag.Bool("skip-tests", true, "Skip _test.go files")
 	skipVendor := flag.Bool("skip-vendor", true, "Skip vendor/ directory")
 	jsonOutput := flag.Bool("json", false, "Output results as JSON")
+	// Strip doc/ordinary comments by default (parity with ruststubber): the docs
+	// describe what each stubbed function should do — leaving them leaks the answer
+	// to the agent. Stripping also sidesteps the go/format comment-misassociation
+	// bug (a floating comment reprinted inside a modified body). --keep-docs opts out.
+	keepDocs := flag.Bool("keep-docs", false, "Keep doc/comments (default: strip to prevent answer leaks)")
 	flag.Parse()
 
 	stubber := &Stubber{
 		SkipTests:  *skipTests,
 		SkipVendor: *skipVendor,
+		KeepDocs:   *keepDocs,
 	}
 
 	args := flag.Args()

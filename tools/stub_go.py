@@ -37,10 +37,25 @@ SKIP_DIRS: set[str] = {"vendor", ".git", "testdata", "node_modules"}
 
 
 def _ensure_gostubber() -> Path:
-    if GOSTUBBER_BIN.exists():
+    # Rebuild if the binary is MISSING or STALE relative to the source. A stale
+    # binary silently corrupts the benchmark: a stubbing/doc-strip fix that lives
+    # in the source but not the compiled artifact leaves the agent looking at the
+    # crate's full documentation (answer leak). Mirrors ruststubber's
+    # _ensure_stubber_fresh.
+    newest_src = 0.0
+    for f in list(GOSTUBBER_DIR.glob("*.go")) + [
+        GOSTUBBER_DIR / "go.mod",
+        GOSTUBBER_DIR / "go.sum",
+    ]:
+        try:
+            newest_src = max(newest_src, f.stat().st_mtime)
+        except OSError:
+            continue
+    if GOSTUBBER_BIN.exists() and GOSTUBBER_BIN.stat().st_mtime >= newest_src:
         return GOSTUBBER_BIN
 
-    logger.info("Building gostubber binary...")
+    reason = "missing" if not GOSTUBBER_BIN.exists() else "stale (source newer than binary)"
+    logger.info("gostubber binary %s — rebuilding (go build)...", reason)
     try:
         subprocess.run(
             ["go", "build", "-o", str(GOSTUBBER_BIN), "."],
