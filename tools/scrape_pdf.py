@@ -926,8 +926,12 @@ def scrape_readme_spec(
     candidate_urls.sort(
         key=lambda u: _score_doc_url(u, _identity_tokens), reverse=True
     )
-    if not _MISSING_DEPS:
-        for url in candidate_urls[:3]:
+    identity_matched = [
+        u for u in candidate_urls
+        if _identity_tokens and _score_doc_url(u, _identity_tokens) >= 100
+    ]
+    if not _MISSING_DEPS and identity_matched:
+        for url in identity_matched[:3]:
             try:
                 logger.info("  Trying README link via Playwright: %s", url)
                 path = scrape_spec(url, repo_name, output_dir=str(specs_dir), compress=compress)
@@ -936,6 +940,11 @@ def scrape_readme_spec(
                     return path, url
             except Exception as exc:
                 logger.debug("  README link Playwright failed for %s: %s", url, exc)
+    elif not identity_matched:
+        logger.info(
+            "  No identity-matched doc URLs in README for %s; skipping generic candidates",
+            repo_name,
+        )
     logger.info("  Falling back to README rendering for %s", repo_name)
     _slug = _github_slug_from_repo(repo_dir)
     if _slug:
