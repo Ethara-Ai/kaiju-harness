@@ -123,6 +123,9 @@ HEAVY_PRE_INSTALL: Dict[str, List[str]] = {
     "chronoxor/CppServer": [
         "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev libasio-dev",
     ],
+    "actor-framework/actor-framework": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev",
+    ],
     "Stiffstream/restinio": [
         "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev libasio-dev libfmt-dev",
     ],
@@ -139,10 +142,14 @@ HEAVY_PRE_INSTALL: Dict[str, List[str]] = {
     "jbeder/yaml-cpp": [
         "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev",
     ],
+    "actor-framework/actor-framework": [
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev",
+    ],
 }
 
 
 REPO_OVERRIDES: Dict[str, Dict[str, object]] = {
+    "simdjson/simdjson":        {"install": "cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DSIMDJSON_DEVELOPER_MODE=ON && cmake --build build -j$(nproc)"},
     "grpc/grpc":                {"docker_timeout": 7200},
     "facebook/folly":           {"docker_timeout": 7200},
     "facebook/proxygen":        {"docker_timeout": 7200},

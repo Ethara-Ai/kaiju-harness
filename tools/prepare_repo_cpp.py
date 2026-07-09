@@ -356,7 +356,18 @@ def _detect_cmake_test_options(repo_dir: Path) -> list[str]:
         upper = name.upper()
         if not any(hint in upper for hint in _TEST_OPTION_HINTS):
             continue
-        if any(bad in upper for bad in _TEST_OPTION_BLOCKLIST):
+        segments = upper.split("_")
+        blocked = False
+        for bad in _TEST_OPTION_BLOCKLIST:
+            for i, seg in enumerate(segments):
+                if i == 0:
+                    continue
+                if seg == bad or (bad in ("SANITIZ", "PROFIL") and bad in seg):
+                    blocked = True
+                    break
+            if blocked:
+                break
+        if blocked:
             continue
         if name in seen:
             continue
