@@ -1178,7 +1178,10 @@ def run_with_compile_gate(
                     logger.exception("CompileGate on_retry callback raised")
             try:
                 re_prompt_callback(err_text)
-            except Exception:  # noqa: BLE001
+            except Exception as _e:  # noqa: BLE001
+                from agent.agents import TransientLLMError as _TLE
+                if isinstance(_e, _TLE):
+                    raise  # don't swallow: let per-module isolation skip this module
                 logger.exception("CompileGate re_prompt_callback raised; treating as failed retry")
             continue
 

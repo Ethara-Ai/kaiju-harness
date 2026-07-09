@@ -47,6 +47,8 @@ sys.path.insert(0, str(TOOLS_DIR.parent))
 from tools.validate_c import validate_c_candidate  # noqa: E402
 from tools.cstubber.cstubber import (  # noqa: E402
     DEFAULT_FALLBACK_ARGS,
+    DEFAULT_SKIP_DIR_RE,
+    _iter_c_files,
     stub_directory,
 )
 
@@ -349,6 +351,92 @@ def _capture_c_test_ids(repo_dir: Path, slug: str) -> None:
         logger.warning("test-id capture: failed to save test IDs for %s (%s).", slug, e)
 
 
+def _stubbed_base_compiles_c(repo_dir: Path) -> "bool | None":
+    """A11 (c): best-feasible deps-free gate on the STUBBED base tree.
+
+    A full ``gcc``/``cmake`` compile of the stubbed base needs the repo's headers
+    and build environment (compile_commands.json, third-party libs), which is
+    frequently unavailable at prep time — running it and branding the result
+    ``False`` on a missing-header/missing-lib error would be a false gate (exactly
+    the failure mode the go/python helpers guard against). So instead of a real
+    compile we do the STRONGEST deps-free check available: re-parse every stubbed
+    ``.c`` file with the SAME tree-sitter C grammar the stubber's recovery engine
+    uses (``tree_sitter_language_pack``, no preprocessor, no headers needed) and
+    verify the rewritten source is still structurally well-formed (no ERROR /
+    MISSING nodes). This catches the concrete way a bad body rewrite corrupts a
+    file — an unbalanced-brace / truncated splice — which is what a stub bug would
+    produce, without a build env.
+
+    Semantics mirror python's quick_import_check / go's _stubbed_base_compiles_go:
+      * every stubbed file parses cleanly            -> True
+      * a stubbed file has a structural parse error  -> False (agent starts broken)
+      * tree-sitter unavailable / couldn't run       -> None (unknown; no false gate)
+
+    LIMITATION: this is a structural (syntax-level) gate, NOT a semantic compile.
+    It cannot detect type errors, undeclared symbols, or link failures — those
+    require the build env and are intentionally left to the container eval. A
+    ``True`` here means "the stub output is syntactically well-formed", not
+    "gcc succeeds". It is deliberately conservative: it only reports ``False`` on
+    a genuine structural corruption of the stubber's own output.
+    """
+    try:
+        from tree_sitter_language_pack import get_parser as _ts_get_parser
+    except Exception as e:  # noqa: BLE001
+        logger.info(
+            "A11: tree-sitter C grammar unavailable (%s); skipping stubbed-base "
+            "structural check (recording unknown).", e,
+        )
+        return None
+
+    try:
+        parser = _ts_get_parser("c")
+    except Exception as e:  # noqa: BLE001
+        logger.info(
+            "A11: could not load tree-sitter C parser (%s); recording unknown.", e
+        )
+        return None
+
+    checked = 0
+    for c_file in _iter_c_files(repo_dir, DEFAULT_SKIP_DIR_RE):
+        try:
+            source = c_file.read_bytes()
+        except OSError as e:
+            logger.warning(
+                "A11: could not read stubbed file %s (%s); recording unknown.",
+                c_file, e,
+            )
+            return None
+        if not source.strip():
+            # An empty stubber output is never valid C — treat as a real failure.
+            logger.warning(
+                "A11: stubbed file %s is empty; base is structurally broken.", c_file
+            )
+            return False
+        try:
+            tree = parser.parse(source)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "A11: tree-sitter failed to parse %s (%s); recording unknown.",
+                c_file, e,
+            )
+            return None
+        root = tree.root_node
+        if root.has_error or getattr(root, "is_missing", False):
+            logger.warning(
+                "A11: stubbed file %s has structural parse errors (unbalanced/"
+                "truncated splice?) — stub output is corrupt.", c_file,
+            )
+            return False
+        checked += 1
+
+    if checked == 0:
+        logger.info(
+            "A11: no .c files to validate structurally; recording unknown."
+        )
+        return None
+    return True
+
+
 def prepare_one(
     slug: str,
     clone_dir: Path,
@@ -439,6 +527,26 @@ def prepare_one(
     base_commit = git(repo_path, "rev-parse", "HEAD")
     logger.info("%s: base_commit=%s (+%d/-%d)", slug, base_commit[:12], additions, deletions)
 
+    # A11 (c): best-feasible deps-free gate on the STUBBED base. A full gcc/cmake
+    # compile needs the repo's headers + build env (often unavailable at prep
+    # time), so we instead structurally re-parse every stubbed .c file with the
+    # tree-sitter C grammar to confirm the stubber output is well-formed (no
+    # unbalanced-brace / truncated-splice corruption). True = all files parse,
+    # False = a stubbed file is structurally broken (agent starts from a corrupt
+    # tree; any 0% is infra, not model), None = couldn't check (grammar missing).
+    # This is a SYNTAX-level gate, not a semantic compile — see the helper docstring.
+    base_compiles = _stubbed_base_compiles_c(repo_path)
+    if base_compiles is False:
+        logger.warning(
+            "A11: STUBBED BASE IS STRUCTURALLY BROKEN for %s — a stubbed .c file "
+            "no longer parses; the agent would start from a corrupt tree. Recording "
+            "base_compiles=false (any 0%% here is infra, not model). Investigate the "
+            "stub output before trusting a score.",
+            slug,
+        )
+    elif base_compiles is True:
+        logger.info("A11: stubbed base is structurally well-formed for %s.", slug)
+
     # Capture the canonical test inventory (ctest enumeration) on the stubbed
     # base and save it as commit0/data/c_test_ids/<repo>.bz2 — the AUTHORITATIVE
     # denominator evaluate_c uses. Stub bodies keep signatures + CMake add_test()
@@ -482,6 +590,12 @@ def prepare_one(
             ),
         },
         "stub_report": report.to_dict(),
+        # A11 provenance (top-level, matching go/python): True = stubbed base is
+        # structurally well-formed, False = a stubbed .c file no longer parses (a
+        # 0% is infra, not model), None = not checked (tree-sitter C grammar
+        # missing / no .c files). NOTE: this is a deps-free SYNTAX gate, not a
+        # full gcc/cmake compile — see _stubbed_base_compiles_c.
+        "base_compiles": base_compiles,
     }
     return entry
 

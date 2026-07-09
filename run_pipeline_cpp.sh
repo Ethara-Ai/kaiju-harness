@@ -1085,7 +1085,7 @@ parse_eval_output() {
 extract_all_stage_costs() {
     local log_dir="$1"
     if [[ ! -d "$log_dir" ]]; then
-        echo "0.0000"
+        echo "0.0000 missing_dir"
         return
     fi
     local err_file="${log_dir}/cost_extract.err"
@@ -1114,13 +1114,14 @@ for root, _d, files in os.walk(log_dir):
         pass
 
 if oj_count > 0:
-    print(f"{oj_total:.4f}")
+    print(f"{oj_total:.4f} output_json:{oj_count}")
     sys.exit(0)
 
 # Fallback (no output.json present): aider.log session regex.
 # Only counts aider's main edit loop; misses summarizer + commit_msg + cache.
 COST_RE = re.compile(r"Cost:\s+\$\d+\.\d+\s+(?:message|request),\s+\$(\d+\.\d+)\s+session")
 fallback_total = 0.0
+fallback_count = 0
 for root, _d, files in os.walk(log_dir):
     if "aider.log" not in files:
         continue
@@ -1134,15 +1135,28 @@ for root, _d, files in os.walk(log_dir):
                     last_match = m
             if last_match:
                 fallback_total += float(last_match.group(1))
+                fallback_count += 1
     except (OSError, ValueError):
         pass
-print(f"{fallback_total:.4f}")
+if fallback_count > 0:
+    print(f"{fallback_total:.4f} aider_fallback:{fallback_count}")
+else:
+    # No cost source at all — distinguish this from a real free run.
+    print("0.0000 none")
 PYEOF
 ) || true
-    if [[ "$result" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        echo "$result"
+    # result is "<cost> <source>"; split it.
+    local cost_part source_part
+    cost_part="${result%% *}"
+    source_part="${result#* }"
+    if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        if [[ "${source_part:-none}" == "none" ]]; then
+            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run."
+        fi
+        echo "$cost_part ${source_part:-none}"
     else
-        echo "0.0000"
+        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000."
+        echo "0.0000 parse_error"
     fi
 }
 
@@ -1246,9 +1260,10 @@ stage_1_draft() {
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
 
-    local cost
-    cost=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 1 cost extraction failed"; return 1; }
-    log "  Stage 1 cost: \$${cost}"
+    local cost cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 1 cost extraction failed"; return 1; }
+    cost="${_co%% *}"; cost_source="${_co#* }"
+    log "  Stage 1 cost: \$${cost} (source: ${cost_source})"
 
     run_evaluate "$BRANCH_NAME" "stage1"
     local eval_time="$EVAL_ELAPSED"
@@ -1260,6 +1275,7 @@ stage_1_draft() {
         --argjson elapsed "$elapsed" \
         --argjson eval_time "$eval_time" \
         --argjson cost "$cost" \
+        --arg cost_source "$cost_source" \
         --argjson rc "$rc" \
         --argjson runtime "${EVAL_RUNTIME:-0.0}" \
         --argjson num_passed "$EVAL_NUM_PASSED" \
@@ -1270,6 +1286,7 @@ stage_1_draft() {
             elapsed_s: $elapsed,
             eval_time_s: $eval_time,
             cost_usd: $cost,
+            cost_source: $cost_source,
             returncode: $rc,
             runtime: $runtime,
             num_passed: $num_passed,
@@ -1296,12 +1313,13 @@ stage_2_lint_refine() {
 
     local s1_cost
     s1_cost=$(echo "$RESULTS_JSON" | jq -r '.stage1.cost_usd // 0') || { log "ERROR: Stage 2 failed to read stage1 cost"; return 1; }
-    local s2_incremental
-    s2_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
+    local s2_incremental cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
+    s2_incremental="${_co%% *}"; cost_source="${_co#* }"
     local total_cost
     total_cost=$(echo "scale=4; $s1_cost + $s2_incremental" | bc) || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
-    log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost})"
+    log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
 
     run_evaluate "$BRANCH_NAME" "stage2"
     local eval_time="$EVAL_ELAPSED"
@@ -1314,6 +1332,7 @@ stage_2_lint_refine() {
         --argjson eval_time "$eval_time" \
         --argjson cost_inc "$s2_incremental" \
         --argjson cost_cum "$total_cost" \
+        --arg cost_source "$cost_source" \
         --argjson rc "$rc" \
         --argjson runtime "${EVAL_RUNTIME:-0.0}" \
         --argjson num_passed "$EVAL_NUM_PASSED" \
@@ -1325,6 +1344,7 @@ stage_2_lint_refine() {
             eval_time_s: $eval_time,
             cost_usd_incremental: $cost_inc,
             cost_usd_cumulative: $cost_cum,
+            cost_source: $cost_source,
             returncode: $rc,
             runtime: $runtime,
             num_passed: $num_passed,
@@ -1357,12 +1377,13 @@ stage_3_test_refine() {
 
     local s2_cumulative
     s2_cumulative=$(echo "$RESULTS_JSON" | jq -r '.stage2.cost_usd_cumulative // 0') || { log "ERROR: Stage 3 failed to read stage2 cost"; return 1; }
-    local s3_incremental
-    s3_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
+    local s3_incremental cost_source _co
+    _co=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
+    s3_incremental="${_co%% *}"; cost_source="${_co#* }"
     local total_cost
     total_cost=$(echo "scale=4; $s2_cumulative + $s3_incremental" | bc) || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
-    log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost})"
+    log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
 
     run_evaluate "$BRANCH_NAME" "stage3"
     local eval_time="$EVAL_ELAPSED"
@@ -1375,6 +1396,7 @@ stage_3_test_refine() {
         --argjson eval_time "$eval_time" \
         --argjson cost_inc "$s3_incremental" \
         --argjson cost_cum "$total_cost" \
+        --arg cost_source "$cost_source" \
         --argjson rc "$rc" \
         --argjson runtime "${EVAL_RUNTIME:-0.0}" \
         --argjson num_passed "$EVAL_NUM_PASSED" \
@@ -1386,6 +1408,7 @@ stage_3_test_refine() {
             eval_time_s: $eval_time,
             cost_usd_incremental: $cost_inc,
             cost_usd_cumulative: $cost_cum,
+            cost_source: $cost_source,
             returncode: $rc,
             runtime: $runtime,
             num_passed: $num_passed,

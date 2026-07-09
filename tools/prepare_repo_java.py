@@ -130,6 +130,172 @@ def find_java_source_dirs(repo_dir: Path) -> list[Path]:
     return monorepo_dirs
 
 
+# ─── Stub-Output Validation (A11) ────────────────────────────────────────────
+
+
+def _structural_java_ok(source: str) -> tuple[bool, str]:
+    """Lightweight, DEPS-FREE structural check of a stubbed Java file.
+
+    This is NOT a real javac/javaparser parse (that would need the JavaParser
+    JAR + Java runtime, i.e. not deps-free from Python). It is the best feasible
+    guard against a stubber that emits truncated/corrupted output: verify the
+    file is non-empty and that its braces/parens/brackets are balanced while
+    ignoring characters inside string/char literals and comments.
+
+    Returns (ok, reason). ``reason`` is empty when ok.
+    """
+    if not source or not source.strip():
+        return False, "empty output"
+
+    depth = {"{": 0, "(": 0, "[": 0}
+    close_to_open = {"}": "{", ")": "(", "]": "["}
+    i = 0
+    n = len(source)
+    in_line_comment = False
+    in_block_comment = False
+    in_string = False
+    in_char = False
+    while i < n:
+        c = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if in_line_comment:
+            if c == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if c == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            i += 1
+            continue
+        if in_char:
+            if c == "\\":
+                i += 2
+                continue
+            if c == "'":
+                in_char = False
+            i += 1
+            continue
+        # Not currently inside any literal/comment.
+        if c == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if c == '"':
+            in_string = True
+            i += 1
+            continue
+        if c == "'":
+            in_char = True
+            i += 1
+            continue
+        if c in depth:
+            depth[c] += 1
+        elif c in close_to_open:
+            opener = close_to_open[c]
+            depth[opener] -= 1
+            if depth[opener] < 0:
+                return False, f"unbalanced '{c}'"
+        i += 1
+
+    if in_string or in_char:
+        return False, "unterminated string/char literal"
+    if in_block_comment:
+        return False, "unterminated block comment"
+    for opener, d in depth.items():
+        if d != 0:
+            return False, f"unbalanced '{opener}' (net depth {d})"
+    return True, ""
+
+
+def validate_stubbed_java_tree(repo_dir: Path, src_dirs: list[Path]) -> tuple[int, int]:
+    """A11 stub-output guard for Java (mirrors python's ast.parse gate).
+
+    The JavaStubber JAR writes stubs in place, so — unlike python's transformer
+    that re-parses each result before writing — the corrupted output could be
+    committed unseen. After stubbing, re-check each stubbed .java file with a
+    DEPS-FREE structural balance check (:func:`_structural_java_ok`). A broken
+    file is reverted to its original via ``git checkout`` and counted as an error
+    so it is never committed as part of the base.
+
+    Returns (validated_ok, errors). ``errors`` == 0 means every stubbed file
+    passed the structural gate.
+    """
+    validated = 0
+    errors = 0
+    seen: set = set()
+    for src_dir in src_dirs:
+        for java_file in sorted(src_dir.rglob("*.java")):
+            if java_file in seen:
+                continue
+            seen.add(java_file)
+            if "test" in java_file.name.lower():
+                continue
+            try:
+                source = java_file.read_text(errors="replace")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("  Could not read stubbed %s: %s", java_file, e)
+                errors += 1
+                continue
+            ok, reason = _structural_java_ok(source)
+            if ok:
+                validated += 1
+                continue
+            rel = java_file.relative_to(repo_dir)
+            logger.warning(
+                "  Stub of %s is structurally invalid (%s); reverting to original",
+                rel, reason,
+            )
+            errors += 1
+            try:
+                git(repo_dir, "checkout", "--", str(rel), check=False)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("  Could not revert %s: %s", rel, e)
+    return validated, errors
+
+
+def _stubbed_base_compiles_java(errors: int, validated: int) -> "bool | None":
+    """A11 (java): provenance for whether the STUBBED base is sound.
+
+    A real ``javac`` compile of the whole stubbed tree needs the project's
+    resolved classpath (Maven/Gradle dependency graph) which is NOT available
+    deps-free at prep time, so — unlike go's ``go build ./...`` — we cannot run a
+    true typecheck gate here. Instead this reflects the DEPS-FREE structural
+    validation of the stubber output (:func:`validate_stubbed_java_tree`):
+
+      * ``errors == 0 and validated > 0`` -> True  (every stubbed file is
+        structurally sound; the strongest signal available without a JDK+deps).
+      * ``errors > 0``                    -> False (at least one stub was
+        corrupted — a 0% from this base is an infra artifact, not a model miss).
+      * ``validated == 0``                -> None  (nothing to check / couldn't
+        determine).
+
+    NOTE: True here means "structurally balanced", NOT "typechecks". It cannot
+    catch semantic breakage (missing symbol, bad stub return type) the way go's
+    compile gate does; a full javac gate would require staging the resolved
+    classpath, which is left as a follow-up.
+    """
+    if validated == 0:
+        return None
+    if errors > 0:
+        return False
+    return True
+
+
 # ─── Stub & Commit ───────────────────────────────────────────────────────────
 
 
@@ -137,10 +303,13 @@ def create_stubbed_branch(
     repo_dir: Path,
     full_name: str,
     entry: dict,
-) -> tuple[str, str]:
+) -> tuple[str, str, "bool | None"]:
     """Create the remote branch with stubbed code.
 
-    Returns (base_commit_sha, reference_commit_sha).
+    Returns (base_commit_sha, reference_commit_sha, base_compiles).
+    ``base_compiles`` is the A11 provenance from the deps-free stub-output
+    validation (True = every stub structurally sound, False = a stub was
+    corrupted, None = couldn't determine).
     All source changes (workflow removal + gitignore + stubs) go into a single
     "Commit 0", matching Python prepare_repo.py. Spec PDF is a separate commit.
     """
@@ -198,12 +367,32 @@ def create_stubbed_branch(
     if total_stubs == 0:
         raise RuntimeError(f"No stubs generated for {full_name}")
 
+    # A11 stub-output validation (mirrors python's ast.parse gate): the JavaStubber
+    # JAR writes in place, so validate its OUTPUT before committing the base. A
+    # structurally-broken stub is reverted to the original and counted as an error
+    # so it never lands in Commit 0.
+    validated, errors = validate_stubbed_java_tree(repo_dir, src_dirs)
+    base_compiles = _stubbed_base_compiles_java(errors, validated)
+    if base_compiles is False:
+        logger.warning(
+            "A11: %d stubbed file(s) were structurally invalid for %s and were "
+            "reverted; recording base_compiles=false (any 0%% here is infra, not "
+            "model). Investigate the stub output before trusting a score.",
+            errors, full_name,
+        )
+    elif base_compiles is True:
+        logger.info(
+            "A11: all %d stubbed Java file(s) are structurally sound for %s "
+            "(deps-free balance check; not a full javac typecheck).",
+            validated, full_name,
+        )
+
     git(repo_dir, "add", "-A")
     git(repo_dir, "commit", "-m", "Commit 0")
     base_commit = get_head_sha(repo_dir)
     logger.info("  Base commit (Commit 0): %s", base_commit[:12])
 
-    return base_commit, reference_commit
+    return base_commit, reference_commit, base_compiles
 
 
 
@@ -313,6 +502,7 @@ def create_dataset_entry(
     reference_commit: str,
     entry: dict,
     repo_dir: Path | None = None,
+    base_compiles: "bool | None" = None,
 ) -> dict:
     """Create a dataset entry with repo pointing to the fork."""
     repo_short = full_name.split("/")[-1]
@@ -334,6 +524,13 @@ def create_dataset_entry(
         "setup": setup,
         "test": entry.get("test", {}),
         "src_dir": entry.get("src_dir", "src/main/java"),
+        # A11: is the STUBBED base structurally sound? True/False/None.
+        # Mirrors go/python/rust base_compiles so a 0% from a broken base is
+        # distinguishable from a genuine model failure at eval time. For Java this
+        # is a deps-free structural check of the stub output, NOT a full javac
+        # typecheck (which would need the resolved classpath — see
+        # _stubbed_base_compiles_java).
+        "base_compiles": base_compiles,
     }
 
 
@@ -386,7 +583,7 @@ def prepare_java_repos(
 
         # Create stubbed branch
         try:
-            base_commit, reference_commit = create_stubbed_branch(
+            base_commit, reference_commit, base_compiles = create_stubbed_branch(
                 repo_dir, full_name, entry,
             )
         except Exception as e:
@@ -434,6 +631,7 @@ def prepare_java_repos(
             reference_commit=reference_commit,
             entry=entry,
             repo_dir=repo_dir,
+            base_compiles=base_compiles,
         )
         logger.info("  Entry: repo=%s, base=%s", fork_name, base_commit[:12])
         dataset_entries.append(dataset_entry)

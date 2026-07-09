@@ -17,6 +17,7 @@ from agent.agent_utils_cpp import (
     get_target_edit_files_cpp,
 )
 from agent.agents_cpp import CppAiderAgents
+from agent.agents import TransientLLMError
 from agent.class_types import AgentConfig
 from agent.module_patch import module_file_patch
 from agent.run_agent import DirContext, run_eval_after_each_commit
@@ -219,6 +220,23 @@ def _mark_module_done(log_dir: Path) -> None:
     (log_dir / ".done").touch()
 
 
+def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None:
+    """One module whose LLM calls kept failing (e.g. a persistent mid-stream /
+    timeout error) after run_with_recovery exhausted its retries. Leave it WITHOUT
+    a .done marker (so --resume re-runs it) + drop a .needs_retry breadcrumb, and
+    let the loop continue. A single stuck module must NOT abort the whole repo —
+    for a single-repo run that would trip the "all workers failed -> systemic
+    fault" abort and discard every module that already succeeded.
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    logger.error("Module %s failed after retries (%s) — skipping so the repo "
+                 "continues; left .needs_retry for --resume.", module_name, err)
+
+
 def _get_stable_log_dir(log_dir: str, repo_name: str, branch: str) -> Path:
     """Return stable log dir mirroring Java's {log_dir}/{repo}/{branch}/current."""
     safe_branch = branch.replace("/", "__")
@@ -415,6 +433,9 @@ def run_cpp_agent_for_repo(
                     eval_results[current_commit] = run_eval_after_each_commit(
                         branch, backend, commit0_config_file
                     )
+            except TransientLLMError as _tle:
+                _skip_failed_module(file_log_dir, stem, _tle)
+                continue
             except Exception as e:
                 logger.error("Agent failed for %s/%s: %s", repo_name, tf, e)
                 (file_log_dir / "error.log").write_text(str(e))
@@ -440,6 +461,9 @@ def run_cpp_agent_for_repo(
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
                             test_files_readonly=_test_files_ro,
                     _kaiju_log_dir=file_log_dir,)
+            except TransientLLMError as _tle:
+                _skip_failed_module(file_log_dir, stem, _tle)
+                continue
             except Exception as e:
                 logger.error("Agent failed for %s/%s (lint mode): %s", repo_name, tf, e)
                 (file_log_dir / "error.log").write_text(str(e))
@@ -464,6 +488,9 @@ def run_cpp_agent_for_repo(
                             inject_test_files_readonly=agent_config.inject_test_files_readonly,
                             test_files_readonly=_test_files_ro,
                     _kaiju_log_dir=file_log_dir,)
+            except TransientLLMError as _tle:
+                _skip_failed_module(file_log_dir, stem, _tle)
+                continue
             except Exception as e:
                 import traceback as _tb
                 tb_str = _tb.format_exc()

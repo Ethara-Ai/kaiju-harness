@@ -567,10 +567,17 @@ init_results() {
 EOF
 }
 
+# A $0.0000 result is ambiguous — it could be a genuinely free stage OR a silent
+# extraction failure (no output.json, unparseable cost). The Python prints
+# "<cost> <source>" where source ∈ {output_json:N, aider_fallback:N, none}.
+# The caller runs this in a command substitution `$(...)` (a SUBSHELL), so any
+# assignment to a global here would be lost — returning "<cost> <source>" on
+# stdout lets the caller recover the real source. A "none" source with $0 is
+# logged LOUD so a broken-cost run is never mistaken for a free one.
 extract_all_stage_costs() {
     local log_dir="$1"
     if [[ ! -d "$log_dir" ]]; then
-        echo "0.0000"
+        echo "0.0000 missing_dir"
         return
     fi
     local err_file="${log_dir}/cost_extract.err"
@@ -597,11 +604,12 @@ for root, _d, files in os.walk(log_dir):
         pass
 
 if oj_count > 0:
-    print(f"{oj_total:.4f}")
+    print(f"{oj_total:.4f} output_json:{oj_count}")
     sys.exit(0)
 
 COST_RE = re.compile(r"Cost:\s+\$\d+\.\d+\s+(?:message|request),\s+\$(\d+\.\d+)\s+session")
 fallback_total = 0.0
+fallback_count = 0
 for root, _d, files in os.walk(log_dir):
     if "aider.log" not in files:
         continue
@@ -615,21 +623,40 @@ for root, _d, files in os.walk(log_dir):
                     last_match = m
             if last_match:
                 fallback_total += float(last_match.group(1))
+                fallback_count += 1
     except (OSError, ValueError):
         pass
-print(f"{fallback_total:.4f}")
+if fallback_count > 0:
+    print(f"{fallback_total:.4f} aider_fallback:{fallback_count}")
+else:
+    # No cost source at all — distinguish this from a real free run.
+    print("0.0000 none")
 PYEOF
 ) || true
-    if [[ "$result" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        echo "$result"
+    # result is "<cost> <source>"; split it.
+    local cost_part source_part
+    cost_part="${result%% *}"
+    source_part="${result#* }"
+    if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        if [[ "${source_part:-none}" == "none" ]]; then
+            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run."
+        fi
+        echo "$cost_part ${source_part:-none}"
     else
-        echo "0.0000"
+        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000."
+        echo "0.0000 parse_error"
     fi
 }
 
 record_stage() {
     local stage_label="$1"
-    local cost_usd="$2"
+    # $2 is "<cost> <source>" from extract_all_stage_costs; split it so the JSON
+    # records both the numeric cost and where it came from (output_json / aider
+    # fallback / none), disambiguating a genuinely free stage from an extraction
+    # failure.
+    local cost_and_source="$2"
+    local cost_usd="${cost_and_source%% *}"
+    local cost_source="${cost_and_source#* }"
     local pass_rate="$3"
     local compile_errors="$4"
 
@@ -637,9 +664,10 @@ record_stage() {
     tmp=$(mktemp)
     jq --arg s "$stage_label" \
        --argjson c "$cost_usd" \
+       --arg cost_source "$cost_source" \
        --argjson p "$pass_rate" \
        --argjson e "$compile_errors" \
-       '.stages[$s] = {"cost_usd": $c, "pass_rate": $p, "mean_compile_errors": $e}' \
+       '.stages[$s] = {"cost_usd": $c, "cost_source": $cost_source, "pass_rate": $p, "mean_compile_errors": $e}' \
        "$PIPELINE_LOG" > "$tmp" && mv "$tmp" "$PIPELINE_LOG"
 }
 

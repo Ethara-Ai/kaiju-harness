@@ -19,6 +19,7 @@ from agent.agent_utils_ts import (
 import shlex
 import sys
 from agent.agents_ts import TsAiderAgents
+from agent.agents import TransientLLMError
 from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
@@ -49,6 +50,23 @@ from agent.claude_code.recovery import run_with_recovery
 logger = logging.getLogger(__name__)
 
 app = typer.Typer()
+
+
+def _skip_failed_module(log_dir, module_name, err):
+    """One module whose LLM calls kept failing (e.g. a persistent mid-stream /
+    timeout error) after run_with_recovery exhausted its retries. Leave it WITHOUT
+    a .done marker (so --resume re-runs it) + drop a .needs_retry breadcrumb, and
+    let the loop continue. A single stuck module must NOT abort the whole repo —
+    for a single-repo run that would trip the "all workers failed -> systemic
+    fault" abort and discard every module that already succeeded.
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    logger.error("Module %s failed after retries (%s) — skipping so the repo "
+                 "continues; left .needs_retry for --resume.", module_name, err)
 
 
 def run_agent_for_repo_ts(
@@ -289,28 +307,32 @@ def run_agent_for_repo_ts(
                                 _kaiju_log_dir=test_log_dir,
                             )
 
-                        if _cg_enabled:
-                            _cg_result = _ts_compile_gate.run_with_compile_gate(
-                                _invoke_agent_test,
-                                repo_dir=repo_path,
-                                local_repo=local_repo,
-                                pre_sha=pre_sha,
-                                max_retries=int(os.environ.get(
-                                    "KAIJU_TS_COMPILE_GATE_MAX_RETRIES", "2"
-                                )),
-                                re_prompt_callback=_reprompt_test,
-                                persist_dir=str(test_log_dir),
-                            )
-                            if _cg_result.get("status") == "reverted":
-                                logger.warning(
-                                    "compile_gate REVERTED %s to %s after %d retries (regressions: %s)",
-                                    test_file_name,
-                                    pre_sha[:8],
-                                    _cg_result.get("retries_used", 0),
-                                    _cg_result.get("regressions"),
+                        try:
+                            if _cg_enabled:
+                                _cg_result = _ts_compile_gate.run_with_compile_gate(
+                                    _invoke_agent_test,
+                                    repo_dir=repo_path,
+                                    local_repo=local_repo,
+                                    pre_sha=pre_sha,
+                                    max_retries=int(os.environ.get(
+                                        "KAIJU_TS_COMPILE_GATE_MAX_RETRIES", "2"
+                                    )),
+                                    re_prompt_callback=_reprompt_test,
+                                    persist_dir=str(test_log_dir),
                                 )
-                        else:
-                            _ = _invoke_agent_test()
+                                if _cg_result.get("status") == "reverted":
+                                    logger.warning(
+                                        "compile_gate REVERTED %s to %s after %d retries (regressions: %s)",
+                                        test_file_name,
+                                        pre_sha[:8],
+                                        _cg_result.get("retries_used", 0),
+                                        _cg_result.get("regressions"),
+                                    )
+                            else:
+                                _ = _invoke_agent_test()
+                        except TransientLLMError as _tle:
+                            _skip_failed_module(test_log_dir, test_file_name, _tle)
+                            continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -375,19 +397,23 @@ def run_agent_for_repo_ts(
                         module=lint_file_name,
                         log_dir=lint_log_dir,
                     ):
-                        _ = run_with_recovery(agent.run, 
-                            "",
-                            "",
-                            lint_cmd,
-                            [lint_file],
-                            lint_log_dir,
-                            lint_first=True,
-                            thinking_capture=thinking_capture,
-                            current_stage="lint",
-                            current_module=lint_file_name,
-                            test_files_readonly=test_files_readonly,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=lint_log_dir,)
+                        try:
+                            _ = run_with_recovery(agent.run,
+                                "",
+                                "",
+                                lint_cmd,
+                                [lint_file],
+                                lint_log_dir,
+                                lint_first=True,
+                                thinking_capture=thinking_capture,
+                                current_stage="lint",
+                                current_module=lint_file_name,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=lint_log_dir,)
+                        except TransientLLMError as _tle:
+                            _skip_failed_module(lint_log_dir, lint_file_name, _tle)
+                            continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(lint_log_dir)
 
@@ -449,18 +475,22 @@ def run_agent_for_repo_ts(
                         module=file_name,
                         log_dir=file_log_dir,
                     ):
-                        _ = run_with_recovery(agent.run, 
-                            iter_message,
-                            "",
-                            lint_cmd,
-                            [f],
-                            file_log_dir,
-                            thinking_capture=thinking_capture,
-                            current_stage="draft",
-                            current_module=file_name,
-                            test_files_readonly=test_files_readonly,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=file_log_dir,)
+                        try:
+                            _ = run_with_recovery(agent.run,
+                                iter_message,
+                                "",
+                                lint_cmd,
+                                [f],
+                                file_log_dir,
+                                thinking_capture=thinking_capture,
+                                current_stage="draft",
+                                current_module=file_name,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=file_log_dir,)
+                        except TransientLLMError as _tle:
+                            _skip_failed_module(file_log_dir, file_name, _tle)
+                            continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

@@ -22,6 +22,7 @@ from typing import Optional
 import git
 import yaml
 
+from agent.agents import TransientLLMError
 from agent.agents_c import AiderCAgents
 from agent.agent_utils_c import (
     collect_c_test_files,
@@ -121,6 +122,23 @@ def _is_module_done(log_dir: Path) -> bool:
 def _mark_module_done(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / ".done").touch()
+
+
+def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None:
+    """One module whose LLM calls kept failing (e.g. a persistent mid-stream /
+    timeout error) after run_with_recovery exhausted its retries. Leave it WITHOUT
+    a .done marker (so --resume re-runs it) + drop a .needs_retry breadcrumb, and
+    let the loop continue. A single stuck module must NOT abort the whole repo —
+    for a single-repo run that would trip the "all workers failed -> systemic
+    fault" abort and discard every module that already succeeded.
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    logger.error("Module %s failed after retries (%s) — skipping so the repo "
+                 "continues; left .needs_retry for --resume.", module_name, err)
 
 
 def run_eval_after_each_commit(
@@ -297,21 +315,25 @@ def run_agent_for_repo(
                     module=test_id_safe,
                     log_dir=test_log_dir,
                 ):
-                    agent_return = run_with_recovery(agent.run, 
-                        message,
-                        test_cmd,
-                        lint_cmd,
-                        target_edit_files,
-                        test_log_dir,
-                        test_first=True,
-                        thinking_capture=thinking_capture,
-                        current_stage="test",
-                        current_module=test_id_safe,
-                        max_test_output_length=agent_config.max_test_output_length,
-                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                        test_files_readonly=test_files_readonly,
-                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=test_log_dir,)
+                    try:
+                        agent_return = run_with_recovery(agent.run,
+                            message,
+                            test_cmd,
+                            lint_cmd,
+                            target_edit_files,
+                            test_log_dir,
+                            test_first=True,
+                            thinking_capture=thinking_capture,
+                            current_stage="test",
+                            current_module=test_id_safe,
+                            max_test_output_length=agent_config.max_test_output_length,
+                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=test_log_dir,)
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(test_log_dir, test_id_safe, _tle)
+                        continue
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -349,21 +371,25 @@ def run_agent_for_repo(
                     module=file_name,
                     log_dir=lint_log_dir,
                 ):
-                    agent_return = run_with_recovery(agent.run, 
-                        "",
-                        "",
-                        lint_cmd,
-                        [edit_file],
-                        lint_log_dir,
-                        lint_first=True,
-                        thinking_capture=thinking_capture,
-                        current_stage="lint",
-                        current_module=file_name,
-                        max_test_output_length=agent_config.max_test_output_length,
-                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                        test_files_readonly=test_files_readonly,
-                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=lint_log_dir,)
+                    try:
+                        agent_return = run_with_recovery(agent.run,
+                            "",
+                            "",
+                            lint_cmd,
+                            [edit_file],
+                            lint_log_dir,
+                            lint_first=True,
+                            thinking_capture=thinking_capture,
+                            current_stage="lint",
+                            current_module=file_name,
+                            max_test_output_length=agent_config.max_test_output_length,
+                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=lint_log_dir,)
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(lint_log_dir, file_name, _tle)
+                        continue
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -412,20 +438,24 @@ def run_agent_for_repo(
                     module=file_name,
                     log_dir=file_log_dir,
                 ):
-                    agent_return = run_with_recovery(agent.run, 
-                        message,
-                        "",
-                        lint_cmd,
-                        [f],
-                        file_log_dir,
-                        thinking_capture=thinking_capture,
-                        current_stage="draft",
-                        current_module=file_name,
-                        max_test_output_length=agent_config.max_test_output_length,
-                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                        test_files_readonly=test_files_readonly,
-                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=file_log_dir,)
+                    try:
+                        agent_return = run_with_recovery(agent.run,
+                            message,
+                            "",
+                            lint_cmd,
+                            [f],
+                            file_log_dir,
+                            thinking_capture=thinking_capture,
+                            current_stage="draft",
+                            current_module=file_name,
+                            max_test_output_length=agent_config.max_test_output_length,
+                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                            test_files_readonly=test_files_readonly,
+                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=file_log_dir,)
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(file_log_dir, file_name, _tle)
+                        continue
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(

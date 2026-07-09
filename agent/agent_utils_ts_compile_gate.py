@@ -225,7 +225,10 @@ def run_with_compile_gate(
             result["retries_used"] = attempt + 1
             try:
                 re_prompt_callback(err_text)
-            except Exception:
+            except Exception as _e:
+                from agent.agents import TransientLLMError as _TLE
+                if isinstance(_e, _TLE):
+                    raise  # don't swallow: let per-module isolation skip this module
                 logger.exception(
                     "compile_gate: re_prompt_callback raised on attempt %d",
                     attempt + 1,

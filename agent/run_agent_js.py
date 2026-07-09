@@ -36,6 +36,7 @@ from agent.agent_utils_js import (
     load_agent_config,
 )
 from agent.agents_js import AiderJsAgents
+from agent.agents import TransientLLMError
 from agent.class_types import AgentConfig
 from agent.llm_cost_capture import capture_module_calls
 from agent.module_patch import module_file_patch
@@ -104,6 +105,23 @@ def _is_module_done(log_dir: Path) -> bool:
 def _mark_module_done(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / ".done").touch()
+
+
+def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None:
+    """One module whose LLM calls kept failing (e.g. a persistent mid-stream /
+    timeout error) after run_with_recovery exhausted its retries. Leave it WITHOUT
+    a .done marker (so --resume re-runs it) + drop a .needs_retry breadcrumb, and
+    let the loop continue. A single stuck module must NOT abort the whole repo —
+    for a single-repo run that would trip the "all workers failed -> systemic
+    fault" abort and discard every module that already succeeded.
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    logger.error("Module %s failed after retries (%s) — skipping so the repo "
+                 "continues; left .needs_retry for --resume.", module_name, err)
 
 
 def _get_stable_log_dir(log_dir: str, repo_name: str, branch: str) -> Path:
@@ -334,21 +352,25 @@ def _run_agent_for_repo_js_impl(
                         log_dir=test_log_dir,
                         model_short=agent_config.model_short,
                     ):
-                        _ = run_with_recovery(agent.run, 
-                            "",
-                            test_cmd,
-                            lint_cmd,
-                            target_edit_files,
-                            test_log_dir,
-                            test_first=True,
-                            thinking_capture=thinking_capture,
-                            current_stage="test",
-                            current_module=test_file_name,
-                            max_test_output_length=agent_config.max_test_output_length,
-                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                            test_files_readonly=test_files,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=test_log_dir,)
+                        try:
+                            _ = run_with_recovery(agent.run,
+                                "",
+                                test_cmd,
+                                lint_cmd,
+                                target_edit_files,
+                                test_log_dir,
+                                test_first=True,
+                                thinking_capture=thinking_capture,
+                                current_stage="test",
+                                current_module=test_file_name,
+                                max_test_output_length=agent_config.max_test_output_length,
+                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                test_files_readonly=test_files,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=test_log_dir,)
+                        except TransientLLMError as _tle:
+                            _skip_failed_module(test_log_dir, test_file_name, _tle)
+                            continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -416,19 +438,23 @@ def _run_agent_for_repo_js_impl(
                         log_dir=lint_log_dir,
                         model_short=agent_config.model_short,
                     ):
-                        _ = run_with_recovery(agent.run, 
-                            "",
-                            "",
-                            lint_cmd,
-                            [lint_file],
-                            lint_log_dir,
-                            lint_first=True,
-                            thinking_capture=thinking_capture,
-                            current_stage="lint",
-                            test_files_readonly=test_files,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                            current_module=lint_file_name,
-                    _kaiju_log_dir=lint_log_dir,)
+                        try:
+                            _ = run_with_recovery(agent.run,
+                                "",
+                                "",
+                                lint_cmd,
+                                [lint_file],
+                                lint_log_dir,
+                                lint_first=True,
+                                thinking_capture=thinking_capture,
+                                current_stage="lint",
+                                test_files_readonly=test_files,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                current_module=lint_file_name,
+                        _kaiju_log_dir=lint_log_dir,)
+                        except TransientLLMError as _tle:
+                            _skip_failed_module(lint_log_dir, lint_file_name, _tle)
+                            continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(lint_log_dir)
 
@@ -490,18 +516,22 @@ def _run_agent_for_repo_js_impl(
                         log_dir=file_log_dir,
                         model_short=agent_config.model_short,
                     ):
-                        _ = run_with_recovery(agent.run, 
-                            iter_message,
-                            "",
-                            lint_cmd,
-                            [f],
-                            file_log_dir,
-                            thinking_capture=thinking_capture,
-                            current_stage="draft",
-                            current_module=file_name,
-                            test_files_readonly=test_files,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                    _kaiju_log_dir=file_log_dir,)
+                        try:
+                            _ = run_with_recovery(agent.run,
+                                iter_message,
+                                "",
+                                lint_cmd,
+                                [f],
+                                file_log_dir,
+                                thinking_capture=thinking_capture,
+                                current_stage="draft",
+                                current_module=file_name,
+                                test_files_readonly=test_files,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=file_log_dir,)
+                        except TransientLLMError as _tle:
+                            _skip_failed_module(file_log_dir, file_name, _tle)
+                            continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

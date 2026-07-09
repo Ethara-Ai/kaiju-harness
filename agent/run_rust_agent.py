@@ -26,6 +26,7 @@ from agent.agent_utils_rust import (
     run_with_compile_gate,
 )
 from agent.agents_rust import RustAiderAgents
+from agent.agents import TransientLLMError
 from agent.class_types import AgentConfig
 from agent.run_agent import DirContext, run_eval_after_each_commit
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
@@ -481,6 +482,23 @@ def _mark_module_done(log_dir: Path) -> None:
     (log_dir / ".done").touch()
 
 
+def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None:
+    """One module whose LLM calls kept failing (e.g. a persistent mid-stream /
+    timeout error) after run_with_recovery exhausted its retries. Leave it WITHOUT
+    a .done marker (so --resume re-runs it) + drop a .needs_retry breadcrumb, and
+    let the loop continue. A single stuck module must NOT abort the whole repo —
+    for a single-repo run that would trip the "all workers failed -> systemic
+    fault" abort and discard every module that already succeeded.
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    logger.error("Module %s failed after retries (%s) — skipping so the repo "
+                 "continues; left .needs_retry for --resume.", module_name, err)
+
+
 def _finalize_module(log_dir: Path, gate_result: "Optional[dict]" = None) -> None:
     """E4/E5: decide .done vs .needs_retry from the compile-gate outcome.
 
@@ -769,41 +787,45 @@ def run_rust_agent_for_repo(
                     log_dir=test_log_dir,
                 ):
                     _gate_result = None
-                    if getattr(agent_config, "per_edit_compile_gate", False):
-                        def _reprompt_test(err_text):
-                            return run_with_recovery(agent.run,
-                                f"cargo check failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
-                                test_cmd,
-                                lint_cmd,
-                                [src_file],
-                                test_log_dir,
-                                test_first=False,
-                                thinking_capture=thinking_capture,
-                                current_stage="test",
-                                current_module=src_file_name,
-                                max_test_output_length=agent_config.max_test_output_length,
-                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                                repo_map_tokens=agent_config.repo_map_tokens,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                                test_files_readonly=test_files_readonly,
-                                _kaiju_log_dir=test_log_dir,
+                    try:
+                        if getattr(agent_config, "per_edit_compile_gate", False):
+                            def _reprompt_test(err_text):
+                                return run_with_recovery(agent.run,
+                                    f"cargo check failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
+                                    test_cmd,
+                                    lint_cmd,
+                                    [src_file],
+                                    test_log_dir,
+                                    test_first=False,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="test",
+                                    current_module=src_file_name,
+                                    max_test_output_length=agent_config.max_test_output_length,
+                                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                    repo_map_tokens=agent_config.repo_map_tokens,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                    test_files_readonly=test_files_readonly,
+                                    _kaiju_log_dir=test_log_dir,
+                                )
+                            _gate_result = run_with_compile_gate(
+                                _invoke_agent_test,
+                                repo_path=repo_path,
+                                local_repo=local_repo,
+                                pre_sha=pre_sha,
+                                max_retries=getattr(agent_config, "compile_gate_max_retries", 2),
+                                re_prompt_callback=_reprompt_test,
                             )
-                        _gate_result = run_with_compile_gate(
-                            _invoke_agent_test,
-                            repo_path=repo_path,
-                            local_repo=local_repo,
-                            pre_sha=pre_sha,
-                            max_retries=getattr(agent_config, "compile_gate_max_retries", 2),
-                            re_prompt_callback=_reprompt_test,
-                        )
-                        try:
-                            (Path(test_log_dir) / ".compile_gate.json").write_text(
-                                json.dumps(_gate_result, indent=2), encoding="utf-8",
-                            )
-                        except OSError as _io:
-                            logger.warning("CompileGate: could not persist gate result: %s", _io)
-                    else:
-                        _ = _invoke_agent_test()
+                            try:
+                                (Path(test_log_dir) / ".compile_gate.json").write_text(
+                                    json.dumps(_gate_result, indent=2), encoding="utf-8",
+                                )
+                            except OSError as _io:
+                                logger.warning("CompileGate: could not persist gate result: %s", _io)
+                        else:
+                            _ = _invoke_agent_test()
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(Path(test_log_dir), src_file_name, _tle)
+                        continue
                 module_elapsed = time.time() - module_start
                 _finalize_module(Path(test_log_dir), _gate_result)
 
@@ -889,39 +911,43 @@ def run_rust_agent_for_repo(
                     log_dir=lint_log_dir,
                 ):
                     _gate_result = None
-                    if getattr(agent_config, "per_edit_compile_gate", False):
-                        def _reprompt_lint(err_text):
-                            return run_with_recovery(agent.run,
-                                f"cargo check failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
-                                "",
-                                lint_cmd,
-                                [lint_file],
-                                lint_log_dir,
-                                lint_first=False,
-                                thinking_capture=thinking_capture,
-                                current_stage="lint",
-                                current_module=lint_file_name,
-                                repo_map_tokens=agent_config.repo_map_tokens,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                                test_files_readonly=test_files_readonly,
-                                _kaiju_log_dir=lint_log_dir,
+                    try:
+                        if getattr(agent_config, "per_edit_compile_gate", False):
+                            def _reprompt_lint(err_text):
+                                return run_with_recovery(agent.run,
+                                    f"cargo check failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
+                                    "",
+                                    lint_cmd,
+                                    [lint_file],
+                                    lint_log_dir,
+                                    lint_first=False,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="lint",
+                                    current_module=lint_file_name,
+                                    repo_map_tokens=agent_config.repo_map_tokens,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                    test_files_readonly=test_files_readonly,
+                                    _kaiju_log_dir=lint_log_dir,
+                                )
+                            _gate_result = run_with_compile_gate(
+                                _invoke_agent_lint,
+                                repo_path=repo_path,
+                                local_repo=local_repo,
+                                pre_sha=pre_sha,
+                                max_retries=getattr(agent_config, "compile_gate_max_retries", 2),
+                                re_prompt_callback=_reprompt_lint,
                             )
-                        _gate_result = run_with_compile_gate(
-                            _invoke_agent_lint,
-                            repo_path=repo_path,
-                            local_repo=local_repo,
-                            pre_sha=pre_sha,
-                            max_retries=getattr(agent_config, "compile_gate_max_retries", 2),
-                            re_prompt_callback=_reprompt_lint,
-                        )
-                        try:
-                            (Path(lint_log_dir) / ".compile_gate.json").write_text(
-                                json.dumps(_gate_result, indent=2), encoding="utf-8",
-                            )
-                        except OSError as _io:
-                            logger.warning("CompileGate: could not persist gate result: %s", _io)
-                    else:
-                        _ = _invoke_agent_lint()
+                            try:
+                                (Path(lint_log_dir) / ".compile_gate.json").write_text(
+                                    json.dumps(_gate_result, indent=2), encoding="utf-8",
+                                )
+                            except OSError as _io:
+                                logger.warning("CompileGate: could not persist gate result: %s", _io)
+                        else:
+                            _ = _invoke_agent_lint()
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(Path(lint_log_dir), lint_file_name, _tle)
+                        continue
                 module_elapsed = time.time() - module_start
                 _finalize_module(Path(lint_log_dir), _gate_result)
 
@@ -1004,38 +1030,42 @@ def run_rust_agent_for_repo(
                     log_dir=file_log_dir,
                 ):
                     _gate_result = None
-                    if getattr(agent_config, "per_edit_compile_gate", False):
-                        def _reprompt_draft(err_text):
-                            return run_with_recovery(agent.run,
-                                f"cargo check failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
-                                "",
-                                lint_cmd,
-                                [f],
-                                file_log_dir,
-                                thinking_capture=thinking_capture,
-                                current_stage="draft",
-                                current_module=file_name,
-                                repo_map_tokens=agent_config.repo_map_tokens,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                                test_files_readonly=test_files_readonly,
-                                _kaiju_log_dir=file_log_dir,
+                    try:
+                        if getattr(agent_config, "per_edit_compile_gate", False):
+                            def _reprompt_draft(err_text):
+                                return run_with_recovery(agent.run,
+                                    f"cargo check failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
+                                    "",
+                                    lint_cmd,
+                                    [f],
+                                    file_log_dir,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="draft",
+                                    current_module=file_name,
+                                    repo_map_tokens=agent_config.repo_map_tokens,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                    test_files_readonly=test_files_readonly,
+                                    _kaiju_log_dir=file_log_dir,
+                                )
+                            _gate_result = run_with_compile_gate(
+                                _invoke_agent_draft,
+                                repo_path=repo_path,
+                                local_repo=local_repo,
+                                pre_sha=pre_sha,
+                                max_retries=getattr(agent_config, "compile_gate_max_retries", 2),
+                                re_prompt_callback=_reprompt_draft,
                             )
-                        _gate_result = run_with_compile_gate(
-                            _invoke_agent_draft,
-                            repo_path=repo_path,
-                            local_repo=local_repo,
-                            pre_sha=pre_sha,
-                            max_retries=getattr(agent_config, "compile_gate_max_retries", 2),
-                            re_prompt_callback=_reprompt_draft,
-                        )
-                        try:
-                            (Path(file_log_dir) / ".compile_gate.json").write_text(
-                                json.dumps(_gate_result, indent=2), encoding="utf-8",
-                            )
-                        except OSError as _io:
-                            logger.warning("CompileGate: could not persist gate result: %s", _io)
-                    else:
-                        _ = _invoke_agent_draft()
+                            try:
+                                (Path(file_log_dir) / ".compile_gate.json").write_text(
+                                    json.dumps(_gate_result, indent=2), encoding="utf-8",
+                                )
+                            except OSError as _io:
+                                logger.warning("CompileGate: could not persist gate result: %s", _io)
+                        else:
+                            _ = _invoke_agent_draft()
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(Path(file_log_dir), file_name, _tle)
+                        continue
                 module_elapsed = time.time() - module_start
                 _finalize_module(Path(file_log_dir), _gate_result)
 
