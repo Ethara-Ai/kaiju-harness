@@ -33,35 +33,123 @@ type Stubber struct {
 	KeepDocs   bool
 }
 
-// stripComments removes ALL doc/ordinary comments from the file so the stubbed
-// output can't leak per-function documentation (and so go/format can't
-// misattribute a floating comment into a modified body). Clearing node.Comments
-// alone isn't enough — the printer also emits each node's own .Doc/.Comment, so
-// those are nil'd too.
+// stripComments removes PROSE comments (the per-function docs that leak the
+// answer) while PRESERVING Go's semantically-significant comments, which are
+// compile-critical and vary across libs old→new:
+//   - build constraints: `//go:build ...` (new) and `// +build ...` (old)
+//   - compiler/tool directives: `//go:embed`, `//go:linkname`, `//go:noinline`,
+//     `//go:generate`, `//line ...`, `//nolint:...`, etc.
+//   - the cgo preamble (the comment block immediately above `import "C"`, which
+//     contains C code)
+// Stripping these breaks the build (wrong platform gating, broken //go:embed,
+// broken cgo). We filter LINE-BY-LINE so a mixed group ("// Foo does X" +
+// "//go:noinline") keeps only the directive line.
 func stripComments(node *ast.File) {
-	node.Comments = nil
-	node.Doc = nil
+	cgoDoc := cgoPreamble(node)
+
+	var kept []*ast.CommentGroup
+	keptSet := map[*ast.CommentGroup]bool{}
+	for _, cg := range node.Comments {
+		if cg == cgoDoc {
+			kept = append(kept, cg)
+			keptSet[cg] = true
+			continue
+		}
+		var lines []*ast.Comment
+		for _, c := range cg.List {
+			if lineIsDirective(c.Text) {
+				lines = append(lines, c)
+			}
+		}
+		if len(lines) > 0 {
+			cg.List = lines
+			kept = append(kept, cg)
+			keptSet[cg] = true
+		}
+	}
+	node.Comments = kept
+
+	// Drop .Doc/.Comment references to stripped groups (else the printer resurrects
+	// them); keep references to preserved directive/cgo groups.
+	keep := func(cg *ast.CommentGroup) *ast.CommentGroup {
+		if cg != nil && keptSet[cg] {
+			return cg
+		}
+		return nil
+	}
+	node.Doc = keep(node.Doc)
 	ast.Inspect(node, func(n ast.Node) bool {
 		switch d := n.(type) {
 		case *ast.FuncDecl:
-			d.Doc = nil
+			d.Doc = keep(d.Doc)
 		case *ast.GenDecl:
-			d.Doc = nil
+			d.Doc = keep(d.Doc)
 		case *ast.Field:
-			d.Doc = nil
-			d.Comment = nil
+			d.Doc = keep(d.Doc)
+			d.Comment = keep(d.Comment)
 		case *ast.TypeSpec:
-			d.Doc = nil
-			d.Comment = nil
+			d.Doc = keep(d.Doc)
+			d.Comment = keep(d.Comment)
 		case *ast.ValueSpec:
-			d.Doc = nil
-			d.Comment = nil
+			d.Doc = keep(d.Doc)
+			d.Comment = keep(d.Comment)
 		case *ast.ImportSpec:
-			d.Doc = nil
-			d.Comment = nil
+			d.Doc = keep(d.Doc)
+			d.Comment = keep(d.Comment)
 		}
 		return true
 	})
+}
+
+// cgoPreamble returns the C-preamble comment group immediately above `import "C"`
+// (it contains C code and MUST survive), or nil.
+func cgoPreamble(node *ast.File) *ast.CommentGroup {
+	for _, d := range node.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.IMPORT {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			imp, ok := spec.(*ast.ImportSpec)
+			if !ok || imp.Path == nil || imp.Path.Value != `"C"` {
+				continue
+			}
+			if imp.Doc != nil {
+				return imp.Doc
+			}
+			if gd.Doc != nil {
+				return gd.Doc
+			}
+		}
+	}
+	return nil
+}
+
+// lineIsDirective reports whether a single comment line (raw, incl. "//") is a Go
+// directive that affects compilation — go/ast's internal isDirective heuristic
+// (`//word:...` with no space) plus the old `// +build` and `//line` forms.
+func lineIsDirective(raw string) bool {
+	if !strings.HasPrefix(raw, "//") {
+		return false // block comments survive only via the cgo path
+	}
+	c := raw[2:]
+	if strings.HasPrefix(strings.TrimLeft(c, " \t"), "+build") {
+		return true // old-style build constraint "// +build ..."
+	}
+	if strings.HasPrefix(c, "line ") {
+		return true // "//line file:line" directive
+	}
+	colon := strings.Index(c, ":")
+	if colon <= 0 {
+		return false
+	}
+	for i := 0; i < colon; i++ {
+		b := c[i]
+		if !((b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Stubber) StubDirectory(dir string) (*StubResult, error) {
