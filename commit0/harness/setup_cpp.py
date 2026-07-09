@@ -46,6 +46,13 @@ def main(
 
         repo = clone_repo(clone_url, clone_dir, branch, logger)
 
+        if os.path.exists(os.path.join(clone_dir, ".gitmodules")):
+            try:
+                repo.git.submodule("update", "--init", "--recursive")
+                logger.info(f"Initialized submodules for {repo_name}")
+            except Exception as e:
+                logger.warning(f"Submodule init failed for {repo_name}: {e}")
+
         if CPP_BASE_BRANCH in repo.branches:
             repo.git.branch("-D", CPP_BASE_BRANCH)
         repo.git.checkout("-b", CPP_BASE_BRANCH)

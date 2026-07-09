@@ -459,7 +459,7 @@ def generate_and_install_test_ids(
             dataset_path=str(dataset_path),
             output_dir=output_dir,
             strategy="auto",
-            base_dir="repos",
+            base_dir="repos_staging",
         )
         install_test_ids(output_dir)
         print(f"  [OK] Test IDs generated: {results}")
@@ -486,12 +486,21 @@ def print_summary(
     print(f"  Repos failed: {len(failures)}")
     print()
 
+    zero_tid = 0
     if entries:
         print("  Successful repos:")
         for entry in entries:
             repo = entry.get("repo", "unknown")
             tid = test_id_results.get(repo.split("/")[-1], 0)
+            if tid == 0:
+                zero_tid += 1
             print(f"    {repo:40s} tests={tid}")
+
+        if zero_tid and (zero_tid / len(entries)) >= 0.25:
+            print(
+                f"\n  [WARN] {zero_tid}/{len(entries)} prepared repos have 0 test IDs "
+                f"({zero_tid/len(entries)*100:.0f}%). Eval denominators will be missing."
+            )
 
     if skips:
         print("\n  Skipped repos:")

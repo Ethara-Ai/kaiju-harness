@@ -163,6 +163,7 @@ def collect_test_ids_catch2(
 def collect_test_ids_local(
     repo_dir: Path,
     strategy: str = "auto",
+    entry: dict | None = None,
 ) -> list[str]:
     repo_path = Path(repo_dir)
 
@@ -178,8 +179,8 @@ def collect_test_ids_local(
             logger.info("  GTest: found %d test IDs", len(ids))
             return ids
 
-    if strategy == "auto":
-        ids = _collect_test_ids_from_source(repo_path)
+    if strategy in ("auto", "source"):
+        ids = _collect_test_ids_from_source(repo_path, entry=entry)
         if ids:
             logger.info("  Source scan: found %d test IDs", len(ids))
             return ids
@@ -192,13 +193,16 @@ _GTEST_PATTERN = re.compile(
     r"(?:TEST|TEST_F|TEST_P|TYPED_TEST|TYPED_TEST_P)\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)"
 )
 _CATCH2_PATTERN = re.compile(
-    r'TEST_CASE\s*\(\s*"([^"]+)"'
+    r'(?:TEST_CASE|SCENARIO)\s*\(\s*"([^"]+)"'
 )
 _DOCTEST_PATTERN = re.compile(
     r'(?:TEST_CASE|SUBCASE)\s*\(\s*"([^"]+)"'
 )
 _BOOST_PATTERN = re.compile(
-    r"BOOST_AUTO_TEST_CASE\s*\(\s*(\w+)\s*\)"
+    r"(?:BOOST_AUTO_TEST_CASE|BOOST_FIXTURE_TEST_CASE|BOOST_DATA_TEST_CASE)\s*\(\s*(\w+)"
+)
+_CAF_PATTERN = re.compile(
+    r'CAF_TEST\s*\(\s*(\w+)'
 )
 
 _CPP_EXTENSIONS = {".cpp", ".cc", ".cxx", ".c++", ".hpp", ".h"}
@@ -206,30 +210,45 @@ _SKIP_DIRS = {"build", "cmake-build-debug", "cmake-build-release", "builddir",
               ".cache", "_deps", "third_party", "vendor", "extern", ".git"}
 
 
-def _collect_test_ids_from_source(repo_dir: Path) -> list[str]:
+def _collect_test_ids_from_source(
+    repo_dir: Path,
+    entry: dict | None = None,
+) -> list[str]:
     test_ids: list[str] = []
 
-    for root, dirs, files in os.walk(repo_dir):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-        for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in _CPP_EXTENSIONS:
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                    content = fh.read()
-            except OSError:
-                continue
+    scan_roots: list[Path] = []
+    if entry:
+        for key in ("test_dir", "src_dir"):
+            sub = entry.get(key, "")
+            if sub and (repo_dir / sub).is_dir():
+                scan_roots.append(repo_dir / sub)
+    if not scan_roots:
+        scan_roots = [repo_dir]
 
-            for m in _GTEST_PATTERN.finditer(content):
-                test_ids.append(f"{m.group(1)}.{m.group(2)}")
-            for m in _CATCH2_PATTERN.finditer(content):
-                test_ids.append(m.group(1))
-            for m in _DOCTEST_PATTERN.finditer(content):
-                test_ids.append(m.group(1))
-            for m in _BOOST_PATTERN.finditer(content):
-                test_ids.append(m.group(1))
+    for scan_root in scan_roots:
+        for root, dirs, files in os.walk(scan_root):
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in _CPP_EXTENSIONS:
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                        content = fh.read()
+                except OSError:
+                    continue
+
+                for m in _GTEST_PATTERN.finditer(content):
+                    test_ids.append(f"{m.group(1)}.{m.group(2)}")
+                for m in _CATCH2_PATTERN.finditer(content):
+                    test_ids.append(m.group(1))
+                for m in _DOCTEST_PATTERN.finditer(content):
+                    test_ids.append(m.group(1))
+                for m in _BOOST_PATTERN.finditer(content):
+                    test_ids.append(m.group(1))
+                for m in _CAF_PATTERN.finditer(content):
+                    test_ids.append(m.group(1))
 
     return sorted(set(test_ids))
 
@@ -286,9 +305,14 @@ def generate_for_dataset(
             continue
 
         logger.info("Collecting test IDs for %s...", repo_name)
-        ids = collect_test_ids_local(repo_dir, strategy=strategy)
+        ids = collect_test_ids_local(repo_dir, strategy=strategy, entry=entry)
         if ids:
             save_test_ids(repo_name, ids, output_dir)
+        else:
+            logger.warning(
+                "  [SKIP] %s: extraction returned 0 tests; not installing bz2",
+                repo_name,
+            )
         results[repo_name] = len(ids)
 
     return results
