@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 from git import Repo
 from tqdm import tqdm
 
-from agent.agent_utils import create_branch
+from agent.agent_utils import create_branch, MODULE_SCOPE_NOTE
 from agent.agent_utils_java import (
     collect_java_files,
     is_java_stubbed,
@@ -220,7 +220,7 @@ def _get_java_message(
                     except Exception as e:
                         logger.warning("Failed to read %s: %s", readme_path, e)
 
-    return "\n".join(prompt_parts), spec_costs
+    return "\n".join(prompt_parts) + MODULE_SCOPE_NOTE, spec_costs
 
 
 def _find_related_tests(repo_path: str, source_file: str) -> List[str]:

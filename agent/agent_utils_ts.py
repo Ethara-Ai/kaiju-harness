@@ -317,7 +317,13 @@ def get_message_ts(
     else:
         spec_info = ""
 
-    message_to_agent = prompt + repo_info + unit_tests_info + spec_info
+    # Lazy import (mirrors the get_specification import above) to keep the TS
+    # module's top-level import surface free of the PyMuPDF-bearing agent_utils.
+    from agent.agent_utils import MODULE_SCOPE_NOTE
+
+    message_to_agent = (
+        prompt + repo_info + unit_tests_info + spec_info + MODULE_SCOPE_NOTE
+    )
     return message_to_agent, spec_costs
 
 

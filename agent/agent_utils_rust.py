@@ -603,7 +603,14 @@ def get_message_rust(
                     except Exception as e:
                         logger.warning("Failed to read %s: %s", readme_path, e)
 
-    message_to_agent = prompt + repo_info + unit_tests_info + spec_info
+    # Imported lazily (like summarize_specification above) to avoid a top-level
+    # circular import with agent.agent_utils. Appended AFTER template fill so the
+    # brace-free note can never be reinterpreted as a template placeholder.
+    from agent.agent_utils import MODULE_SCOPE_NOTE
+
+    message_to_agent = (
+        prompt + repo_info + unit_tests_info + spec_info + MODULE_SCOPE_NOTE
+    )
     return message_to_agent, spec_costs
 
 

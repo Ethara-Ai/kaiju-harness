@@ -24,6 +24,16 @@ from agent.thinking_capture import SummarizerCost
 logger = logging.getLogger(__name__)
 
 PROMPT_HEADER = ">>> Here is the Task:\n"
+
+MODULE_SCOPE_NOTE = (
+    "\n\n## Scope — implement only what is provided\n"
+    "The file(s) you must implement are ALREADY added to this chat. Every stubbed "
+    "file is handled in a SEPARATE session, so do NOT ask to add, request, or wait "
+    "for any other file, and do NOT try to edit files outside the ones provided — "
+    "the ones you need are already here. Implement the stubbed functions in the "
+    "provided file(s) now, in this turn."
+)
+
 REFERENCE_HEADER = "\n\n>>> Here is the Reference for you to finish the task:\n"
 REPO_INFO_HEADER = "\n\n>>> Here is the Repository Information:\n"
 UNIT_TESTS_INFO_HEADER = "\n\n>>> Here are the Unit Tests Information:\n"
@@ -535,7 +545,7 @@ def get_message(
     else:
         spec_info = ""
 
-    message_to_agent = prompt + repo_info + unit_tests_info + spec_info
+    message_to_agent = prompt + repo_info + unit_tests_info + spec_info + MODULE_SCOPE_NOTE
 
     return message_to_agent, spec_costs
 

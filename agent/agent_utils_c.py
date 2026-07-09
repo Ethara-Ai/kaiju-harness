@@ -16,7 +16,11 @@ from pathlib import Path
 import git
 import yaml
 
-from agent.agent_utils import get_specification, summarize_specification
+from agent.agent_utils import (
+    get_specification,
+    summarize_specification,
+    MODULE_SCOPE_NOTE,
+)
 from agent.class_types import AgentConfig
 from agent.thinking_capture import SummarizerCost
 from commit0.harness.constants_c import (
@@ -428,7 +432,7 @@ def get_c_message(
                     except Exception as e:
                         logger.warning("Failed to read %s: %s", readme_path, e)
 
-    return "\n".join(parts), spec_costs
+    return "\n".join(parts) + MODULE_SCOPE_NOTE, spec_costs
 
 
 # ---------------------------------------------------------------------------

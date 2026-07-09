@@ -294,7 +294,14 @@ def get_message_js(
                         "Cannot read %s, trying next README variant", readme_path
                     )
 
-    message_to_agent = prompt + repo_info + unit_tests_info + spec_info
+    # Lazy import: importing agent.agent_utils at module top level would pull in
+    # PyMuPDF (fitz), which the JS pipeline intentionally avoids (see create_branch
+    # below). The module-scope note has no braces, so append order is safe.
+    from agent.agent_utils import MODULE_SCOPE_NOTE
+
+    message_to_agent = (
+        prompt + repo_info + unit_tests_info + spec_info + MODULE_SCOPE_NOTE
+    )
     return message_to_agent, spec_costs
 
 
