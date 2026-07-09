@@ -288,6 +288,7 @@ def create_container(
     environment: Optional[dict[str, str]] = None,
     sandbox_hardening: Optional[dict] = None,
     extra_hosts: Optional[dict[str, str]] = None,
+    volumes: Optional[dict] = None,
 ) -> Container:
     """Start a Docker container using the specified image.
 
@@ -338,6 +339,8 @@ def create_container(
         # container can reach a host-side bridge). Default None => unchanged.
         if extra_hosts:
             run_kwargs["extra_hosts"] = extra_hosts
+        if volumes:
+            run_kwargs["volumes"] = volumes
         # Opt-in hardening flags only (default: none -> identical to prior behavior).
         if sandbox_hardening:
             run_kwargs.update(sandbox_hardening)

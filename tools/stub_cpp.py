@@ -1,7 +1,7 @@
 """C++ code stubbing tool — wraps cppstubber (Clang LibTooling) with tree-sitter fallback.
 
 Replaces function bodies with stub markers:
-- Regular functions: throw std::runtime_error("STUB: not implemented");
+- Regular functions: std::abort(); /* STUB: not implemented */
 - constexpr functions: return {};
 - noexcept functions: std::abort();
 

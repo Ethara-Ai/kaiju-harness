@@ -28,7 +28,7 @@ __all__ = [
     "TestStatus",
 ]
 
-CPP_STUB_MARKER = 'throw std::runtime_error("STUB: not implemented")'
+CPP_STUB_MARKER = "std::abort() /* STUB: not implemented */"
 CPP_STUB_MARKER_CONSTEXPR = "return {}"
 CPP_STUB_MARKER_NOEXCEPT = "std::abort()"
 
@@ -134,7 +134,7 @@ HEAVY_PRE_INSTALL: Dict[str, List[str]] = {
         "ldconfig",
     ],
     "google/leveldb": [
-        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libsnappy-dev zlib1g-dev libcrc32c-dev",
+        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libsnappy-dev zlib1g-dev",
     ],
     "jbeder/yaml-cpp": [
         "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libboost-all-dev",

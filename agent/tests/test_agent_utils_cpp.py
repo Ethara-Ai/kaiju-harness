@@ -13,8 +13,9 @@ from agent.agent_utils_cpp import (
     get_target_edit_files_cpp,
     _parse_cpp_test_output,
 )
+from commit0.harness.constants_cpp import CPP_STUB_MARKER
 
-CPP_STUB = 'throw std::runtime_error("STUB: not implemented")'
+CPP_STUB = CPP_STUB_MARKER
 
 
 class TestFindCppFilesToEdit:

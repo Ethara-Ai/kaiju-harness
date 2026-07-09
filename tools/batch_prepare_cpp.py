@@ -26,6 +26,7 @@ from typing import Any
 from tools.prepare_repo_cpp import (
     BazelOnlyRepo,
     DEFAULT_ORG,
+    SPECS_DIR,
     _detect_cmake_test_options,
     clone_repo,
     create_dataset_entry,
@@ -35,6 +36,7 @@ from tools.prepare_repo_cpp import (
     generate_compile_commands,
     get_head_sha,
     git,
+    scrape_spec,
     stub_source_dir,
     update_cpp_split,
     verify_compiles,
@@ -300,7 +302,29 @@ def prepare_single_repo(
     # 8. Commit and push
     print("  [7/8] Committing and pushing...")
     git(repo_dir, "add", "-A")
-    git(repo_dir, "commit", "-m", "commit0: stub function bodies for C++ benchmark")
+    git(repo_dir, "commit", "-m", "Commit 0")
+
+    print("  [7b/8] Adding spec PDF...")
+    try:
+        SPECS_DIR.mkdir(parents=True, exist_ok=True)
+        scrape_spec(repo_dir, repo_name, "", SPECS_DIR)
+        if not (repo_dir / "spec.pdf.bz2").exists():
+            try:
+                from tools.scrape_pdf import scrape_readme_spec as _scrape_readme_spec
+                import shutil as _shutil
+                readme_spec_path, _ = _scrape_readme_spec(repo_dir, SPECS_DIR, repo_name)
+                if readme_spec_path:
+                    _shutil.copy2(str(readme_spec_path), str(repo_dir / "spec.pdf.bz2"))
+                    git(repo_dir, "add", "spec.pdf.bz2")
+                    git(repo_dir, "commit", "-m", f"Add spec PDF for {repo_name}")
+                    print(f"  [INFO] README-based spec committed for {repo_name}")
+                else:
+                    print(f"  [WARN] No spec PDF generated for {repo_name}")
+            except Exception as e:
+                print(f"  [WARN] README spec fallback failed: {e}")
+    except Exception as e:
+        print(f"  [WARN] Spec scrape failed: {e}")
+
     base_commit = get_head_sha(repo_dir)
 
     print("  [8/8] Pushing to fork...")
@@ -697,6 +721,16 @@ CSV format:
         # Test ID generation
         if not args.skip_test_ids:
             test_id_results = generate_and_install_test_ids(args.output)
+            try:
+                from kaiju.paths import copy_inference_inputs
+                for e in entries:
+                    if e.get("id"):
+                        copy_inference_inputs(
+                            e["id"], e["repo"].split("/")[-1],
+                            test_ids_subdir="cpp_test_ids", repo_base="repos",
+                        )
+            except Exception as _e:
+                print(f"  [WARN] copy_inference_inputs failed: {_e}")
     else:
         print("\n  [SKIP] Docker build (--skip-build)")
 

@@ -15,8 +15,8 @@ namespace cppstubber {
 
 /// Configuration controlling what gets stubbed.
 struct StubConfig {
-    /// Stub regular function bodies with: throw std::runtime_error("STUB: not implemented");
-    std::string stub_marker = "throw std::runtime_error(\"STUB: not implemented\");";
+    /// Stub regular function bodies with: std::abort(); /* STUB: not implemented */
+    std::string stub_marker = "std::abort(); /* STUB: not implemented */";
     /// Stub constexpr/consteval function bodies with: return {};
     std::string constexpr_marker = "return {};";
     /// Stub noexcept function bodies with: std::abort();

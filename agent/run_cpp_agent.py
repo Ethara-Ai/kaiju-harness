@@ -24,7 +24,7 @@ from agent.thinking_capture import SummarizerCost, ThinkingCapture
 from agent.llm_cost_capture import capture_module_calls
 from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
-from commit0.harness.constants_cpp import CPP_SPLIT
+from commit0.harness.constants_cpp import CPP_SPLIT, CPP_STUB_MARKER
 from commit0.harness.utils import load_dataset_from_config
 from agent.claude_code.recovery import run_with_recovery
 
@@ -273,7 +273,7 @@ def run_cpp_agent_for_repo(
         return
 
     if agent_config.strip_non_stubs:
-        _stub_marker = 'throw std::runtime_error("STUB: not implemented")'
+        _stub_marker = CPP_STUB_MARKER
         _filtered: list[str] = []
         for _tf in target_files:
             _full = Path(repo_path) / _tf

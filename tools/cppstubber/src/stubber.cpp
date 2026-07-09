@@ -58,6 +58,12 @@ bool StubVisitor::shouldSkip(const clang::FunctionDecl *FD) const {
     if (FD->isMain())
         return true;
 
+    for (const clang::DeclContext *DC = FD->getLexicalDeclContext(); DC;
+         DC = DC->getLexicalParent()) {
+        if (llvm::isa<clang::FunctionDecl>(DC))
+            return true;
+    }
+
     if (auto *CD = llvm::dyn_cast<clang::CXXDestructorDecl>(FD))
         return true;
 

@@ -25,6 +25,7 @@ from agent.guarded_io import GuardedInputOutput
 from agent.agents import AiderAgents, AiderReturn, AgentReturn, handle_logging, _apply_thinking_capture_patches
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
 from agent.agent_utils import summarize_test_output
+from commit0.harness.constants_cpp import CPP_STUB_MARKER
 
 _logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ class CppAiderAgents(AiderAgents):
                     "\n\nTest files are UNAVAILABLE. NEVER ask to see them. NEVER request paths under tests/. "
                     "If aider prompts you to add a test file, the request will be REFUSED \u2014 do not retry."
                     "\n\nYour job is SPEC-DRIVEN implementation:"
-                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`throw std::runtime_error(\"STUB: not implemented\")`).",
+                    "\n  1. Read the source files in /chat; identify unimplemented stubs (`" + CPP_STUB_MARKER + "`).",
                     "\n  2. Infer expected behavior from function signatures, type hints, docstrings, and the library specification."
                     "\n  3. Implement from first principles \u2014 do NOT reverse-engineer from test outputs."
                     "\n  4. Test feedback is intentionally minimal (counts only). Use it as a yes/no signal, not as a debugging aid."

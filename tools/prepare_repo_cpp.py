@@ -486,10 +486,26 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
         compdb_dir = repo_dir / "build"
         if not (compdb_dir / "compile_commands.json").exists():
             compdb_dir = repo_dir
+        extra_args = ["--extra-arg=-Wno-error=unused-command-line-argument"]
+        if sys.platform.startswith("linux"):
+            extra_args.append("--extra-arg=--gcc-toolchain=/usr")
+        elif sys.platform == "darwin":
+            try:
+                sdk_path = subprocess.run(
+                    ["xcrun", "--show-sdk-path"], capture_output=True, text=True,
+                    check=True, timeout=10,
+                ).stdout.strip()
+                if sdk_path:
+                    extra_args.append(f"--extra-arg=-isysroot{sdk_path}")
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+            for candidate in sorted(Path("/opt/homebrew/opt/llvm/lib/clang").glob("*/include/stdarg.h"), reverse=True):
+                extra_args.append(f"--extra-arg=-resource-dir={candidate.parent.parent}")
+                break
         for cf in cpp_files:
             cf_abs = str(Path(cf).resolve())
             cmd = [str(CPPSTUBBER), "-p", str(compdb_dir.resolve()), "--in-place",
-                   "--extra-arg=--gcc-toolchain=/usr", cf_abs]
+                   *extra_args, cf_abs]
             try:
                 r = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=60, cwd=repo_dir,
@@ -542,12 +558,8 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
     for line in (result.stdout + result.stderr).splitlines():
         m_ok = re.search(r"(\d+)\s+functions?\s+stubbed", line) or \
                re.search(r"[Ff]unctions?\s+stubbed:\s*(\d+)", line)
-        m_files = re.search(r"(\d+)\s+files?\s+processed", line) or \
-                  re.search(r"[Ff]iles?\s+processed:\s*(\d+)", line)
-        if m_files:
-            ok = int(m_files.group(1))
         if m_ok:
-            ok = int(m_ok.group(1))
+            ok += int(m_ok.group(1))
 
     if result.returncode != 0:
         logger.warning("cppstubber exited %d: %s", result.returncode, result.stderr.strip()[:500])
@@ -970,7 +982,7 @@ def prepare_cpp_repo(
                     git(repo_dir, "checkout", "commit0_all")
                     shutil.copy2(str(readme_spec_path), str(repo_dir / "spec.pdf.bz2"))
                     git(repo_dir, "add", "spec.pdf.bz2")
-                    git(repo_dir, "commit", "-m", f"Add README-based spec for {repo_name}")
+                    git(repo_dir, "commit", "-m", f"Add spec PDF for {repo_name}")
                     logger.info("  README spec committed")
                 except Exception as e:
                     logger.warning("  README spec fallback failed: %s", e)

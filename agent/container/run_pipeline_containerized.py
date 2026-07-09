@@ -363,10 +363,17 @@ def main(argv=None) -> int:
     except Exception:  # noqa: BLE001 - not-found (normal) or transient API error
         pass
     try:
+        _sock = os.environ.get("KAIJU_DOCKER_SOCK", "/var/run/docker.sock")
+        _volumes = {_sock: {"bind": "/var/run/docker.sock", "mode": "rw"}} if Path(_sock).exists() else None
+        if _volumes:
+            logger.info("Mounting docker socket %s -> /var/run/docker.sock (enables in-container eval)", _sock)
+        else:
+            logger.warning("Docker socket %s not found; in-container eval will fail to reach dockerd", _sock)
         container = create_container(
             client=client, image_name=agent_tag,
             container_name=container_name,
             logger=logger, environment=env, extra_hosts=_extra_hosts(),
+            volumes=_volumes,
         )
         container.start()
 
