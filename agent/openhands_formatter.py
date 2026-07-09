@@ -268,6 +268,38 @@ def _offset_timestamp(iso_timestamp: str, offset_ms: int) -> str:
     return dt.isoformat()
 
 
+def _enforce_monotonic_timestamps(events: list[dict]) -> None:
+    """Clamp event timestamps to be strictly non-decreasing in list order.
+
+    Timestamps are a mix of real per-turn values and synthetic sub-second
+    offsets (file-read views at +50ms, edit observations at +10ms, multi-edit
+    actions at +100ms, module-boundary finish at -1ms, final finish at +5000ms).
+    Because those offsets are applied relative to *their own turn's* timestamp,
+    an offset event can overrun the real timestamp of a turn that comes LATER in
+    the list — e.g. a synthetic file-read observation (turn N, +10ms) landing
+    after the user-message turn N+1 that was recorded only a few ms later. The
+    list order is authoritative (it is how OpenHands replays the trajectory), so
+    here we only nudge any out-of-order timestamp UP to the previous event's
+    value plus 1µs, leaving already-ordered timestamps untouched. This makes the
+    emitted history satisfy the monotonic-timestamp invariant without disturbing
+    the real values that are already in order.
+    """
+    prev: datetime | None = None
+    step = timedelta(microseconds=1)
+    for e in events:
+        ts_raw = e.get("timestamp")
+        if not ts_raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts_raw)
+        except (ValueError, TypeError):
+            continue
+        if prev is not None and dt <= prev:
+            dt = prev + step
+            e["timestamp"] = dt.isoformat()
+        prev = dt
+
+
 def _make_thinking_blocks(thinking: str | None) -> list[dict]:
     if not thinking:
         return []
@@ -667,6 +699,8 @@ def turns_to_openhands_events(
                 timestamp=_make_timestamp_from_turn(turns[-1], offset_ms=5000),
             )
         )
+
+    _enforce_monotonic_timestamps(events)
 
     return events
 

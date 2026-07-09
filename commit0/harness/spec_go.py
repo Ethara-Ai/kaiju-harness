@@ -53,13 +53,29 @@ def _require_safe_test_cmd(value: str) -> str:
         raise ValueError(
             f"Refusing to build eval script: unsafe characters in test_cmd: {value!r}"
         )
-    # `-exec`/`-toolexec` run an arbitrary program in place of / wrapping the test
-    # binary => code exec that bypasses the scored source. Never allow them.
+    # `go test` flags that either run an arbitrary program or rewrite build/link
+    # output are code-exec or scoring-influence vectors that bypass the scored
+    # source. Reject them all (dataset content is trusted, but this is cheap
+    # defense-in-depth against a poisoned row):
+    #   -exec / -toolexec   run a program in place of / wrapping the test binary
+    #   -toolexec / -vettool point the tool/vet chain at an arbitrary binary
+    #   -ldflags            `-X pkg.Var=val` overwrites impl string vars at link
+    #                       time (can make an assertion pass without solving);
+    #                       `-extldflags` reaches the external linker
+    #   -gcflags            can inject compiler behaviour / point at plugins
+    # Match on token boundaries so a legit substring (e.g. a package path that
+    # merely CONTAINS "exec") isn't rejected, while `-exec`, `--exec`, and
+    # `-exec=...` all are.
     lowered = value.lower()
-    if "-exec" in lowered or "-toolexec" in lowered:
-        raise ValueError(
-            f"Refusing to build eval script: test_cmd uses -exec/-toolexec: {value!r}"
-        )
+    _FORBIDDEN_FLAGS = ("exec", "toolexec", "ldflags", "gcflags", "vettool")
+    _tokens = re.split(r"[\s=]+", lowered)
+    for tok in _tokens:
+        stripped = tok.lstrip("-")
+        if tok.startswith("-") and stripped in _FORBIDDEN_FLAGS:
+            raise ValueError(
+                f"Refusing to build eval script: test_cmd uses forbidden go flag "
+                f"{tok!r}: {value!r}"
+            )
     return value
 
 

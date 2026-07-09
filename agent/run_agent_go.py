@@ -260,6 +260,11 @@ def run_agent_for_repo(
                 if _is_module_done(test_log_dir):
                     logger.info("Skipping %s (already done)", test_id_safe)
                     continue
+
+                # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(test_log_dir) / "turns.jsonl")
+
                 lint_cmd = (
                     get_go_lint_cmd(
                         repo_name,
@@ -333,6 +338,10 @@ def run_agent_for_repo(
                     logger.info("Skipping %s (already done)", file_name)
                     continue
 
+                # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
+
                 with capture_module_calls(
                     thinking_capture=thinking_capture,
                     module=file_name,
@@ -387,6 +396,11 @@ def run_agent_for_repo(
                 if _is_module_done(file_log_dir):
                     logger.info("Skipping %s (already done)", file_name)
                     continue
+
+                # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(file_log_dir) / "turns.jsonl")
+
                 lint_cmd = (
                     get_go_lint_cmd(
                         repo_name,

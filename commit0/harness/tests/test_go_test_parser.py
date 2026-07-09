@@ -176,6 +176,35 @@ class TestForgedOutputDefense:
         results = parse_go_test_json(stream)
         assert results["pkg/TestCrash"] == TestStatus.ERROR
 
+    # A `--- PASS: TestReal` line printed by impl code as the OUTPUT of a
+    # DIFFERENT running test must NOT create a `pass` result for TestReal. The
+    # parser keys only off the `Action` field (test2json output text is inert),
+    # so a canonical test the model never ran stays absent -> scored not-passed.
+    def test_forged_pass_line_in_other_test_output_is_inert(self):
+        stream = _stream(
+            _ev("run", test="TestOther"),
+            json.dumps({
+                "Action": "output", "Package": "pkg", "Test": "TestOther",
+                "Output": "--- PASS: TestReal (0.00s)\n",
+            }),
+            _ev("pass", test="TestOther", elapsed=0.0),
+        )
+        results = parse_go_test_json(stream)
+        assert "pkg/TestReal" not in results
+        assert results["pkg/TestOther"] == TestStatus.PASSED
+        # And it does not count toward the canonical inventory.
+        rate = compute_go_pass_rate(
+            results, expected_tests=["pkg/TestReal", "pkg/TestOther"]
+        )
+        assert rate == 0.5
+
+    # A package-level `pass` with no `Test` field must not manufacture any
+    # per-test pass (can't imply "everything passed").
+    def test_package_pass_without_test_creates_no_results(self):
+        stream = _stream(_ev("pass", package="pkg", elapsed=0.1))
+        results = parse_go_test_json(stream)
+        assert results == {}
+
     # The fix flows through compute_go_pass_rate: forged-pass-after-fail is not
     # counted as passed against the canonical inventory.
     def test_vector_closed_end_to_end_pass_rate(self):

@@ -97,7 +97,16 @@ def test_timeout_not_double_injected_when_test_cmd_has_own():
         "go test ./... > /etc/passwd",
         "go test ./... &",
         "go test -exec 'sh -c id' ./...",
+        "go test -exec=/bin/sh ./...",
         "go test -toolexec=/bin/sh ./...",
+        "go test --toolexec /bin/sh ./...",
+        # link/compile-time influence & arbitrary-tool vectors — `-ldflags -X`
+        # can overwrite impl string vars (score without solving), `-gcflags` /
+        # `-vettool` point the tool chain at an arbitrary binary.
+        "go test -ldflags=-X pkg.Var=x ./...",
+        'go test -ldflags "-X main.version=1" ./...',
+        "go test -gcflags=-m ./...",
+        "go test -vettool=/bin/sh ./...",
         "go test ${IFS}./...",
     ],
 )
@@ -116,6 +125,11 @@ def test_malicious_test_cmd_is_rejected(cmd):
         'go test -run "TestA|TestB" ./...',
         "go test -run 'TestA|TestB' ./...",
         "make test",
+        # package paths that merely CONTAIN a forbidden-flag substring must not
+        # be rejected — the guard matches dash-prefixed flag TOKENS, not any
+        # substring.
+        "go test -count=1 ./execpkg/...",
+        "go test ./cmd/executor/...",
     ],
 )
 def test_legitimate_test_cmd_is_allowed(cmd):

@@ -94,3 +94,80 @@ class TestEditErrorCapture:
         turn = Turn(role="assistant", content="test")
         assert not hasattr(turn, "_missing_field")
         assert turn.edit_error is None
+
+
+class TestMonotonicTimestamps:
+    """History timestamps must be non-decreasing in list order (OpenHands invariant).
+
+    Regression for the go-multierror artifact: a `[files:read]` turn's synthetic
+    file-view observation (+10ms offset on the read-turn timestamp) landed AFTER
+    the real timestamp of the user-message turn that followed only a few ms later,
+    producing a backwards step in the emitted history.
+    """
+
+    def _timestamps(self, events):
+        from datetime import datetime
+
+        return [
+            datetime.fromisoformat(e["timestamp"])
+            for e in events
+            if e.get("timestamp")
+        ]
+
+    def test_file_read_then_close_user_turn_stays_monotonic(self):
+        # Read turn at T; user message only 8ms later — the +10ms observation
+        # offset would overrun it without the monotonic clamp.
+        read_turn = _make_turn(
+            content="[files:read]\nmultierror.go",
+            timestamp="2026-07-09T04:11:22.669274+00:00",
+        )
+        msg_turn = _make_turn(
+            content="Implement the stubs",
+            timestamp="2026-07-09T04:11:22.677059+00:00",
+        )
+        events = turns_to_openhands_events([read_turn, msg_turn])
+        ts = self._timestamps(events)
+        assert ts == sorted(ts), "timestamps must be non-decreasing in list order"
+
+    def test_module_boundary_and_finish_offsets_monotonic(self):
+        # Two modules back-to-back: the -1ms module-boundary finish and the
+        # +5000ms trailing finish must not break monotonicity.
+        turns = [
+            _make_turn(
+                role="assistant",
+                content="done a",
+                module="a",
+                timestamp="2026-07-09T04:11:22.000000+00:00",
+            ),
+            _make_turn(
+                role="assistant",
+                content="done b",
+                module="b",
+                timestamp="2026-07-09T04:11:22.000500+00:00",
+            ),
+        ]
+        events = turns_to_openhands_events(turns)
+        ts = self._timestamps(events)
+        assert ts == sorted(ts)
+        # And strictly increasing where clamped (no two identical adjacent).
+        assert all(ts[i] <= ts[i + 1] for i in range(len(ts) - 1))
+
+    def test_multi_edit_turn_monotonic(self):
+        content = (
+            "```python\nfoo.py\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n"
+            "<<<<<<< SEARCH\nc\n=======\nd\n>>>>>>> REPLACE\n```"
+        )
+        turns = [
+            _make_turn(
+                role="assistant",
+                content=content,
+                timestamp="2026-07-09T04:11:22.000000+00:00",
+            ),
+            _make_turn(
+                content="next",
+                timestamp="2026-07-09T04:11:22.000050+00:00",
+            ),
+        ]
+        events = turns_to_openhands_events(turns)
+        ts = self._timestamps(events)
+        assert ts == sorted(ts)
