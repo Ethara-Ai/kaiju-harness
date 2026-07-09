@@ -27,12 +27,69 @@ from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.utils import load_dataset_from_config
 from commit0.cli import read_commit0_config_file
 from pathlib import Path
-from datetime import datetime
 from agent.display import TerminalDisplay
+from agent.thinking_capture import ThinkingCapture
+from agent.output_writer import build_metadata
+from agent.module_patch import module_file_patch
+from agent.openhands_formatter import write_module_output_json
+from agent.llm_cost_capture import capture_module_calls
 import queue
 import time
 
 logger = logging.getLogger(__name__)
+
+
+def _is_module_done(log_dir: Path) -> bool:
+    return (log_dir / ".done").exists()
+
+
+def _mark_module_done(log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / ".done").touch()
+
+
+def _write_module_output(
+    *,
+    thinking_capture: "Optional[ThinkingCapture]",
+    module_log_dir: Path,
+    module_name: str,
+    stage: str,
+    local_repo,
+    base_commit: str,
+    module_rel_files: dict,
+    instance_id: str,
+    metadata: dict,
+) -> None:
+    """Write ONE module's output.json right after it finishes (crash-resilient).
+
+    Mirrors run_agent_go.py: a worker killed mid-run keeps output.json (with the
+    module's ``git diff base_commit..HEAD`` patch, scoped to the files it owns)
+    for every already-completed module — the state resume replays. Best-effort.
+    """
+    if thinking_capture is None:
+        return
+    module_turns = thinking_capture.get_module_turns(module_name)
+    if not module_turns:
+        return
+    module_metrics = thinking_capture.get_module_metrics(module_name)
+    module_patch = module_file_patch(
+        local_repo, base_commit, "HEAD",
+        module_rel_files.get(module_name, []), logger=logger,
+    )
+    try:
+        write_module_output_json(
+            output_dir=str(module_log_dir),
+            module_turns=module_turns,
+            module=module_name,
+            instance_id=instance_id,
+            git_patch=module_patch,
+            instruction="",
+            metadata=metadata,
+            metrics=module_metrics,
+            stage=stage,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to write module output JSON for %s: %s", module_name, e)
 
 
 class DirContext:
@@ -141,6 +198,15 @@ def _run_agent_for_repo_impl(
         )
         local_repo.git.reset("--hard", example["base_commit"])
 
+    # Resume: rebuild the branch from host-persisted per-module patches so a run
+    # stopped by a subscription limit/kill continues without redoing finished
+    # modules (their .done markers then skip them). No-op unless resuming.
+    if os.environ.get("KAIJU_RESUME") == "1":
+        from agent.resume_state import restore_prior_progress
+        restore_prior_progress(
+            local_repo, example["base_commit"], branch,
+            Path(log_dir).parent, repo_name, logger)
+
     # get target files to edit and test files to run
     target_edit_files, import_dependencies = get_target_edit_files(
         local_repo,
@@ -174,15 +240,29 @@ def _run_agent_for_repo_impl(
             logger.warning("Test file not found, skipping: %s", tf)
     test_files.sort()
 
-    # prepare the log dir
-    experiment_log_dir = (
-        Path(log_dir)
-        / repo_name
-        / branch
-        / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    )
+    # prepare the log dir — STABLE "current" (not a per-run timestamp) so a
+    # re-run finds the prior stage's .done/output.json for crash-resilience and
+    # resume, exactly like go/rust. ATIF globs by content, not dir name.
+    experiment_log_dir = Path(log_dir) / repo_name / branch / "current"
     experiment_log_dir.mkdir(parents=True, exist_ok=True)
     logger.debug("Experiment log directory: %s", experiment_log_dir)
+
+    # Per-module crash-resilience machinery (mirrors run_agent_go.py): capture
+    # thinking/turns/metrics, and write each module's output.json + .done the
+    # moment it finishes so a killed worker keeps every completed module.
+    thinking_capture: Optional[ThinkingCapture] = (
+        ThinkingCapture() if getattr(agent_config, "capture_thinking", False) else None
+    )
+    metadata = build_metadata(
+        dataset_path=commit0_config_file,
+        max_iterations=agent_config.max_iteration,
+        model_short=getattr(agent_config, "model_short", agent_config.model_name),
+        dataset_id=example.get("id"),
+    )
+    module_instance_id = example.get("instance_id", repo_name)
+    # Maps each module -> the repo-relative file(s) it owns, so its output.json
+    # patch records only its own changes.
+    module_rel_files: dict = {}
 
     eval_results = {}
     # write agent_config to .agent.yaml in the log_dir for record
@@ -206,26 +286,43 @@ def _run_agent_for_repo_impl(
                 test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
                 test_file_name = test_file.replace(".py", "").replace("/", "__")
                 test_log_dir = experiment_log_dir / test_file_name
+                module_rel_files[test_file_name] = list(target_edit_files)
+                if _is_module_done(test_log_dir):
+                    logger.info("Skipping %s (already done)", test_file_name)
+                    continue
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(test_log_dir) / "turns.jsonl")
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
                 message, spec_costs = get_message(
                     agent_config, repo_path, test_files=[test_file]
                 )
+                if thinking_capture is not None:
+                    for c in spec_costs:
+                        thinking_capture.summarizer_costs.add(c)
 
                 # display the test file to terminal
-                agent_return = run_with_recovery(
-                    agent.run,
-                    "",
-                    test_cmd,
-                    lint_cmd,
-                    target_edit_files,
-                    test_log_dir,
-                    _kaiju_log_dir=test_log_dir,
-                    test_first=True,
-                    max_test_output_length=agent_config.max_test_output_length,
-                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                )
+                with capture_module_calls(
+                    thinking_capture=thinking_capture,
+                    module=test_file_name,
+                    log_dir=test_log_dir,
+                ):
+                    agent_return = run_with_recovery(
+                        agent.run,
+                        "",
+                        test_cmd,
+                        lint_cmd,
+                        target_edit_files,
+                        test_log_dir,
+                        _kaiju_log_dir=test_log_dir,
+                        test_first=True,
+                        thinking_capture=thinking_capture,
+                        current_stage="test",
+                        current_module=test_file_name,
+                        max_test_output_length=agent_config.max_test_output_length,
+                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                    )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -246,6 +343,18 @@ def _run_agent_for_repo_impl(
                         ),
                     )
                 )
+                _mark_module_done(test_log_dir)
+                _write_module_output(
+                    thinking_capture=thinking_capture,
+                    module_log_dir=test_log_dir,
+                    module_name=test_file_name,
+                    stage="test",
+                    local_repo=local_repo,
+                    base_commit=example["base_commit"],
+                    module_rel_files=module_rel_files,
+                    instance_id=module_instance_id,
+                    metadata=metadata,
+                )
         elif agent_config.run_entire_dir_lint:
             update_queue.put(("start_repo", (repo_name, len(lint_files))))
             # when unit test feedback is available, iterate over test files
@@ -253,21 +362,35 @@ def _run_agent_for_repo_impl(
                 update_queue.put(("set_current_file", (repo_name, lint_file)))
                 lint_file_name = lint_file.replace(".py", "").replace("/", "__")
                 lint_log_dir = experiment_log_dir / lint_file_name
+                module_rel_files[lint_file_name] = [lint_file]
+                if _is_module_done(lint_log_dir):
+                    logger.info("Skipping %s (already done)", lint_file_name)
+                    continue
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
 
                 # display the test file to terminal
-                agent_return = run_with_recovery(
-                    agent.run,
-                    "",
-                    "",
-                    lint_cmd,
-                    [lint_file],
-                    lint_log_dir,
-                    _kaiju_log_dir=lint_log_dir,
-                    lint_first=True,
-                )
+                with capture_module_calls(
+                    thinking_capture=thinking_capture,
+                    module=lint_file_name,
+                    log_dir=lint_log_dir,
+                ):
+                    agent_return = run_with_recovery(
+                        agent.run,
+                        "",
+                        "",
+                        lint_cmd,
+                        [lint_file],
+                        lint_log_dir,
+                        _kaiju_log_dir=lint_log_dir,
+                        lint_first=True,
+                        thinking_capture=thinking_capture,
+                        current_stage="lint",
+                        current_module=lint_file_name,
+                    )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -280,6 +403,18 @@ def _run_agent_for_repo_impl(
                         "update_money_display",
                         (repo_name, lint_file, agent_return.last_cost),
                     )
+                )
+                _mark_module_done(lint_log_dir)
+                _write_module_output(
+                    thinking_capture=thinking_capture,
+                    module_log_dir=lint_log_dir,
+                    module_name=lint_file_name,
+                    stage="lint",
+                    local_repo=local_repo,
+                    base_commit=example["base_commit"],
+                    module_rel_files=module_rel_files,
+                    instance_id=module_instance_id,
+                    metadata=metadata,
                 )
         else:
             # when unit test feedback is not available, iterate over target files to edit
@@ -297,10 +432,27 @@ def _run_agent_for_repo_impl(
                     message = update_message_with_dependencies(message, dependencies)
                 file_name = f.replace(".py", "").replace("/", "__")
                 file_log_dir = experiment_log_dir / file_name
+                module_rel_files[file_name] = [f]
+                if _is_module_done(file_log_dir):
+                    logger.info("Skipping %s (already done)", file_name)
+                    continue
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(Path(file_log_dir) / "turns.jsonl")
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
-                agent_return = run_with_recovery(agent.run, message, "", lint_cmd, [f], file_log_dir, _kaiju_log_dir=file_log_dir)
+                with capture_module_calls(
+                    thinking_capture=thinking_capture,
+                    module=file_name,
+                    log_dir=file_log_dir,
+                ):
+                    agent_return = run_with_recovery(
+                        agent.run, message, "", lint_cmd, [f], file_log_dir,
+                        _kaiju_log_dir=file_log_dir,
+                        thinking_capture=thinking_capture,
+                        current_stage="draft",
+                        current_module=file_name,
+                    )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -317,6 +469,18 @@ def _run_agent_for_repo_impl(
                         "update_money_display",
                         (repo_name, file_name, file_cost),
                     )
+                )
+                _mark_module_done(file_log_dir)
+                _write_module_output(
+                    thinking_capture=thinking_capture,
+                    module_log_dir=file_log_dir,
+                    module_name=file_name,
+                    stage="draft",
+                    local_repo=local_repo,
+                    base_commit=example["base_commit"],
+                    module_rel_files=module_rel_files,
+                    instance_id=module_instance_id,
+                    metadata=metadata,
                 )
     if agent_config.record_test_for_each_commit:
         try:

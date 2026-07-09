@@ -34,10 +34,42 @@ _PIP_IMPORT_MAP = {
 
 
 def _normalize_pip_name(pip_name: str) -> str:
-    normalized = pip_name.lower().split("[")[0]
-    for sep in (">", "<", "=", "!", "~"):
+    # Strip the PEP 508 environment marker (`; python_version ...`) and direct-URL
+    # (`name @ url`) FIRST, then extras (`[test]`) and version specifiers, to get
+    # the bare distribution name. Without the `;` strip, `tzdata; python_version>=
+    # "3.9"` became the garbage import name `tzdata; python_version`.
+    normalized = pip_name.split(";")[0].split("@")[0].lower().split("[")[0]
+    for sep in (">", "<", "=", "!", "~", " "):
         normalized = normalized.split(sep)[0]
     return normalized.strip()
+
+
+def _marker_applies(pip_spec: str, python_version: "Optional[str]") -> bool:
+    """Does this dep's PEP 508 environment marker apply to the target image env?
+
+    A conditional dep like ``backports.zoneinfo; python_version < "3.9"`` is NOT
+    installed on Python 3.9, so checking its import there always (falsely) fails.
+    Evaluate the marker against the target python (and linux, since the image is
+    linux) and skip deps that don't apply. Fail-OPEN (return True) when there is no
+    marker, no target version, or ``packaging`` is unavailable — i.e. never hide a
+    dep from the check due to our own inability to evaluate it."""
+    if ";" not in pip_spec:
+        return True
+    marker_str = pip_spec.split(";", 1)[1].strip()
+    if not marker_str:
+        return True
+    try:
+        from packaging.markers import Marker
+    except Exception:  # noqa: BLE001 - packaging missing -> old behavior
+        return True
+    env = {"sys_platform": "linux", "platform_system": "Linux", "os_name": "posix"}
+    if python_version:
+        env["python_version"] = python_version
+        env["python_full_version"] = python_version
+    try:
+        return bool(Marker(marker_str).evaluate(env))
+    except Exception:  # noqa: BLE001 - unparseable marker -> check it anyway
+        return True
 
 
 def pip_to_import(pip_name: str) -> str:
@@ -107,12 +139,17 @@ def check_imports(
     client: docker.DockerClient,
     image_name: str,
     packages: list[str],
+    python_version: "Optional[str]" = None,
 ) -> tuple[bool, str]:
     skip_prefixes = ("pytest", "coverage", "pip", "setuptools", "wheel")
     to_check = [
         _normalize_pip_name(p)
         for p in packages
         if not any(p.lower().startswith(s) for s in skip_prefixes)
+        # Skip conditional deps whose environment marker excludes this image (e.g.
+        # `backports.zoneinfo; python_version < "3.9"` on Python 3.9) — they aren't
+        # installed there, so checking their import is a guaranteed false failure.
+        and _marker_applies(p, python_version)
     ]
     if not to_check:
         return True, "No packages to check"
@@ -171,7 +208,7 @@ def run_health_checks(
 ) -> list[tuple[bool, str, str]]:
     results: list[tuple[bool, str, str]] = []
     if pip_packages:
-        passed, detail = check_imports(client, image_name, pip_packages)
+        passed, detail = check_imports(client, image_name, pip_packages, python_version)
         results.append((passed, "imports", detail))
     if python_version:
         passed, detail = check_python_version(client, image_name, python_version)

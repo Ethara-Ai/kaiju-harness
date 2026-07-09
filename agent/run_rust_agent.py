@@ -582,6 +582,15 @@ def run_rust_agent_for_repo(
         )
         local_repo.git.reset("--hard", example["base_commit"])
 
+    # Resume: rebuild the branch from host-persisted per-module patches so a run
+    # stopped by a subscription limit/kill continues without redoing finished
+    # modules (their .done markers then skip them). No-op unless resuming.
+    if os.environ.get("KAIJU_RESUME") == "1":
+        from agent.resume_state import restore_prior_progress
+        restore_prior_progress(
+            local_repo, example["base_commit"], branch,
+            Path(log_dir).parent, repo_name, logger)
+
     target_edit_files = get_target_edit_files_rust(repo_path)
     all_source_files = find_rust_files_to_edit(repo_path)
     if agent_config.strip_non_stubs:

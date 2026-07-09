@@ -297,6 +297,15 @@ def run_java_agent(
         logger.warning("Resetting %s to stub base %s", repo_name, stub_base)
         local_repo.git.reset("--hard", stub_base)
 
+    # Resume: rebuild the branch from host-persisted per-module patches so a run
+    # stopped by a subscription limit/kill continues without redoing finished
+    # modules (their .done markers then skip them). No-op unless resuming.
+    if os.environ.get("KAIJU_RESUME") == "1":
+        from agent.resume_state import restore_prior_progress
+        restore_prior_progress(
+            local_repo, stub_base, branch,
+            Path(log_dir).parent, repo_name, logger)
+
     java_files = collect_java_files(repo_path)
     stubbed_files = [f for f in java_files if is_java_stubbed(f)]
     if agent_config.strip_non_stubs:

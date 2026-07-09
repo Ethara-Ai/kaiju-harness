@@ -27,6 +27,7 @@ import logging
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -144,6 +145,61 @@ def _extra_hosts():
     if platform.system() == "Linux":
         return {"host.docker.internal": "host-gateway"}
     return None
+
+
+def _pipeline_process_alive(container) -> bool:
+    """True if a pipeline process is still running inside `container`.
+
+    Uses the host-side Docker `top` API (no in-container binary dependency) so it
+    works on minimal images. If we cannot determine it, we assume alive (never
+    reap something that might be a live sibling run).
+    """
+    try:
+        procs = container.top() or {}
+        rows = procs.get("Processes") or []
+        cmds = " ".join(" ".join(str(c) for c in row) for row in rows)
+        return ("run_pipeline_" in cmds or "agent/config_" in cmds
+                or "config_go.py" in cmds or "aider" in cmds)
+    except Exception:  # noqa: BLE001 - container gone / API hiccup
+        return True
+
+
+def _sweep_orphaned_pipeline_containers(client, logger, keep_name: str) -> int:
+    """Reap `kaiju.pipeline.*` containers orphaned by a killed host orchestrator.
+
+    A container whose in-container pipeline finished but whose PID-1 keep-alive
+    lingers (because the host process that owned the cleanup `finally` was killed
+    with SIGKILL, terminal-close, etc.) shows up here. We remove:
+      * any exited/dead `kaiju.pipeline.*` container, and
+      * any running one whose pipeline process has exited (PID 1 lingering).
+    Concurrency-safe: a genuinely-running sibling still has a live pipeline
+    process, so `_pipeline_process_alive` keeps it. `keep_name` (this run's
+    container) is always skipped. Returns the number reaped.
+    """
+    reaped = 0
+    try:
+        candidates = client.containers.list(
+            all=True, filters={"label": "kaiju.harness=1"})
+    except Exception as e:  # noqa: BLE001
+        logger.debug("orphan sweep: list failed: %s", e)
+        return 0
+    for c in candidates:
+        try:
+            name = getattr(c, "name", "") or ""
+            if name == keep_name or not name.startswith("kaiju.pipeline."):
+                continue
+            status = getattr(c, "status", "")
+            if status == "running" and _pipeline_process_alive(c):
+                continue  # live run (this-or-another concurrent repo) — leave it
+            logger.info("Reaping orphaned pipeline container %s (status=%s, "
+                        "pipeline process not running)", name, status or "?")
+            c.remove(force=True)
+            reaped += 1
+        except Exception as e:  # noqa: BLE001
+            logger.debug("orphan sweep: skip %s: %s", getattr(c, "name", "?"), e)
+    if reaped:
+        logger.info("Orphan sweep removed %d stale pipeline container(s)", reaped)
+    return reaped
 
 
 # language -> (spec module, spec factory, pipeline script, in-container repo base)
@@ -362,6 +418,46 @@ def main(argv=None) -> int:
         _stale.remove(force=True)
     except Exception:  # noqa: BLE001 - not-found (normal) or transient API error
         pass
+    # Also reap any OTHER kaiju.pipeline.* container orphaned by a killed host
+    # orchestrator (SIGKILL/terminal-close can't run our cleanup finally). Skips
+    # this run's name and any concurrently-running sibling. Backstop for the case
+    # where a prior run's host process died and left its container behind.
+    if not args.keep_container:
+        _sweep_orphaned_pipeline_containers(client, logger, keep_name=container_name)
+
+    # Turn catchable termination signals into KeyboardInterrupt so the cleanup
+    # `finally` runs (SIGINT already does this; SIGTERM/SIGHUP otherwise kill the
+    # process WITHOUT running finally -> orphaned container). SIGKILL is
+    # uncatchable and is covered by the orphan sweep + the self-destruct TTL below.
+    def _sig_to_interrupt(signum, _frame):
+        raise KeyboardInterrupt(f"received signal {signum}")
+    for _sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if _sig is not None:
+            try:
+                signal.signal(_sig, _sig_to_interrupt)
+            except Exception:  # noqa: BLE001 - not on main thread / unsupported
+                pass
+
+    # PID-1 keep-alive with a self-destruct TTL: if the host orchestrator is
+    # SIGKILLed (no cleanup possible), the container is auto-removed by dockerd
+    # once this PID 1 exits after the TTL, instead of lingering forever. The TTL
+    # is set safely above any real run (the pipeline's own wall-cap is 86400s and
+    # the whole-pipeline hard cap is --eval-timeout), so it never cuts a live run.
+    # `command -v timeout` guard: if `timeout` is missing, fall back to a plain
+    # unbounded keep-alive (no regression) instead of exiting instantly.
+    # --keep-container (debugging) opts out: keep the classic indefinite keep-alive
+    # so the container persists for inspection until the user removes it.
+    if args.keep_container:
+        _keepalive_cmd = "tail -f /dev/null"
+        _auto_remove = False
+    else:
+        _ttl = max(int(getattr(args, "eval_timeout", 0) or 0), 86400) + 3600
+        _keepalive_cmd = [
+            "sh", "-c",
+            f"command -v timeout >/dev/null 2>&1 && exec timeout {_ttl} tail -f /dev/null "
+            f"|| exec tail -f /dev/null",
+        ]
+        _auto_remove = True
     # Bind-mount the host output dirs into the container so the pipeline writes
     # trajectory data DIRECTLY to the host in real time. Without this, ALL data
     # lives inside the container until a single end-of-run copy-back, so an
@@ -377,14 +473,20 @@ def main(argv=None) -> int:
     }
     _mounted = False
     # Docker-socket mount (from teammate commit f1d92d1) so an in-container eval
-    # can reach the host dockerd. SECURITY/DESIGN NOTE: this grants the container
-    # root-equivalent control of host docker and is NOT needed by the local_inplace
-    # backend (which evals in an in-container git worktree — "no docker-in-docker").
-    # Preserved here to not silently drop a teammate change; flagged for review.
+    # could reach the host dockerd. SECURITY: this grants the container ROOT-
+    # equivalent control of host docker, exposed to untrusted model-generated code.
+    # It is NOT needed by this flow — the pipeline runs `--backend local_inplace`,
+    # which evals in an in-container git worktree (no docker-in-docker), so the
+    # socket is never used (see evaluate.py: docker path only when backend !=
+    # local_inplace). DEFAULT OFF; opt in with KAIJU_MOUNT_DOCKER_SOCK=1 only if you
+    # deliberately run an in-container `--backend docker` eval.
+    _mount_sock = os.environ.get("KAIJU_MOUNT_DOCKER_SOCK") == "1"
     _sock = os.environ.get("KAIJU_DOCKER_SOCK", "/var/run/docker.sock")
-    _volumes = {_sock: {"bind": "/var/run/docker.sock", "mode": "rw"}} if Path(_sock).exists() else None
+    _volumes = ({_sock: {"bind": "/var/run/docker.sock", "mode": "rw"}}
+                if (_mount_sock and Path(_sock).exists()) else None)
     if _volumes:
-        logger.info("Mounting docker socket %s -> /var/run/docker.sock", _sock)
+        logger.warning("Mounting docker socket %s -> /var/run/docker.sock "
+                       "(KAIJU_MOUNT_DOCKER_SOCK=1; grants container root-equiv host docker control)", _sock)
     try:
         try:
             container = create_container(
@@ -394,6 +496,8 @@ def main(argv=None) -> int:
                 # Merge BOTH mount sets: host output/Harbor bind-mount (trajectory
                 # persistence, survives an orchestrator kill) + the docker socket.
                 volumes={**_mount_volumes, **(_volumes or {})},
+                # Bounded keep-alive + auto-remove: self-destruct if the host dies.
+                command=_keepalive_cmd, auto_remove=_auto_remove,
             )
             container.start()
             _mounted = True
@@ -413,6 +517,8 @@ def main(argv=None) -> int:
                 container_name=container_name,
                 logger=logger, environment=env, extra_hosts=_extra_hosts(),
                 volumes=(_volumes or None),  # keep the docker socket if present; drop the output mount
+                # Bounded keep-alive + auto-remove: self-destruct if the host dies.
+                command=_keepalive_cmd, auto_remove=_auto_remove,
             )
             container.start()
             _mounted = False

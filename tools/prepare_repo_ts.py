@@ -885,8 +885,10 @@ def create_ts_stubbed_branch(
         (base_commit_sha, reference_commit_sha, functions_stubbed)
 
     """
-    default_branch = get_default_branch(repo_dir)
-    git(repo_dir, "checkout", default_branch)
+    # Record reference + branch from the CURRENT HEAD (the pinned tag when --tag
+    # checked one out). Checking out the default branch first silently discarded
+    # the tag, so base_commit was built on the default tip while reference_commit
+    # pointed at the tag (divergent history).
     reference_commit = get_head_sha(repo_dir)
     logger.info("  Reference commit (original): %s", reference_commit[:12])
 

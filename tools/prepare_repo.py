@@ -28,6 +28,7 @@ Requires:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import os
@@ -240,12 +241,15 @@ def create_stubbed_branch(
     """
     if branch_name is None:
         branch_name = "commit0_all"
-    default_branch = get_default_branch(repo_dir)
     reference_commit = get_head_sha(repo_dir)
     logger.info("  Reference commit (original): %s", reference_commit[:12])
 
-    git(repo_dir, "checkout", default_branch)
-
+    # Create the stub branch from the CURRENT HEAD — which is the pinned release
+    # tag when full_clone checked one out. Previously this checked out the default
+    # branch first, silently discarding the tag: base_commit was then built on the
+    # default-branch tip while reference_commit pointed at the tag (divergent
+    # history), so the evaluated base was NOT the released version. Branching from
+    # HEAD keeps base = stubbed(reference).
     try:
         git(repo_dir, "branch", "-D", branch_name, check=False)
     except Exception as e:
@@ -328,6 +332,16 @@ def create_stubbed_branch(
             result = stubber.transform_source(original, str(rel))
 
             if result is not None and result != original:
+                # Syntax backstop: the CLI path (stub_file) re-parses the stub and
+                # reverts on SyntaxError; the prepare path bypassed it, so a
+                # corrupted deep submodule could be committed as base and only a
+                # top-level import would (maybe) catch it. Validate here too.
+                try:
+                    ast.parse(result)
+                except SyntaxError as se:
+                    logger.warning("  Stub of %s is not valid python (%s); keeping original", rel, se)
+                    errors += 1
+                    continue
                 py_file.write_text(result, encoding="utf-8")
                 stubbed_count += 1
         except Exception as e:
@@ -359,11 +373,13 @@ def create_stubbed_branch(
         logger.info(
             "  Diff stats — lines added: %d, lines removed: %d", additions, deletions
         )
-        if additions == 0 or deletions == 0:
+        # A correct stub changes code. Removal-heavy modes (bodies deleted, no
+        # `pass` inserted) can legitimately have additions==0, so only fail when
+        # NOTHING changed at all — requiring both >0 false-failed removal-only repos.
+        if additions == 0 and deletions == 0:
             raise RuntimeError(
                 f"Stubbing verification failed for {full_name}: "
-                f"additions={additions}, deletions={deletions}. "
-                f"Expected both >0 (stubbing should replace code with pass)."
+                f"additions={additions}, deletions={deletions} (no change at all)."
             )
 
         git(
@@ -388,6 +404,12 @@ def quick_import_check(repo_dir: Path, src_dir: str) -> tuple[bool, str]:
     # src_dir could be "src/package_name" or "package_name"
     parts = src_dir.split("/")
     package_name = parts[-1]
+
+    # src_dir="." / "" is a single-file module at the repo root (e.g. pycodestyle.py):
+    # the importable name is the repo directory name, not "." — `import .` is a
+    # SyntaxError and would falsely record base_compiles=False for a valid stub.
+    if package_name in (".", ""):
+        package_name = repo_dir.name
 
     # Some packages use hyphens in dir names but underscores in imports
     import_name = package_name.replace("-", "_")
@@ -875,6 +897,7 @@ def create_dataset_entry(
     setup_dict: dict,
     test_dict: dict,
     pinned_tag: str | None = None,
+    base_compiles: "bool | None" = None,
 ) -> dict:
     repo_name = full_name.split("/")[-1]
 
@@ -888,6 +911,10 @@ def create_dataset_entry(
         "setup": setup_dict,
         "test": test_dict,
         "src_dir": src_dir or "",
+        # A11: does the STUBBED base import cleanly? True/False/None(inconclusive).
+        # Mirrors go/rust base_compiles so a 0% from a broken base is distinguishable
+        # from a genuine model failure at eval time.
+        "base_compiles": base_compiles,
     }
     if pinned_tag:
         entry["pinned_tag"] = pinned_tag
@@ -1031,10 +1058,33 @@ def prepare_repos(
             logger.error("  Stubbing failed: %s", e)
             continue
 
-        # Generate setup/test dicts
-        # Switch back to original for accurate analysis
-        default_branch = get_default_branch(repo_dir)
-        git(repo_dir, "checkout", default_branch)
+        # A11: does the STUBBED base still import? The repo HEAD is the stubbed
+        # base here (before the analysis checkout below). A correct stub keeps
+        # imports/signatures intact, so it should import.
+        #   * clean import                 -> True
+        #   * "inconclusive" (a missing EXTERNAL dep) -> True: quick_import_check
+        #     only reports inconclusive when the package's OWN stubbed code imported
+        #     fine and the missing module is a third-party dep — which IS present in
+        #     the eval env. So the stubbed base is a valid starting point. (Combined
+        #     with the ast.parse gate in the stub loop, syntax validity is already
+        #     guaranteed, so this won't hide a corrupted stub.)
+        #   * real import failure          -> False
+        #   * check couldn't run           -> None (unknown)
+        try:
+            _imp_ok, _imp_msg = quick_import_check(repo_dir, src_dir or "")
+            base_compiles = bool(_imp_ok)  # True for clean import AND external-dep-inconclusive
+            logger.info("  A11 stubbed-base import: base_compiles=%s%s",
+                        base_compiles, f" ({_imp_msg})" if _imp_msg else "")
+        except Exception as _imp_e:  # noqa: BLE001 - best-effort provenance
+            base_compiles = None
+            logger.warning("  A11 import check could not run (%s); recording unknown.", _imp_e)
+
+        # Generate setup/test dicts on the SAME un-stubbed commit the base is
+        # derived from (reference_commit) — the pinned release tag when one was
+        # checked out, else the default-branch tip. Checking out the default branch
+        # here analyzed the WRONG code (deps / python version / test layout) for
+        # tag-pinned repos, so the entry's setup/test could mismatch its base.
+        git(repo_dir, "checkout", reference_commit)
 
         setup_dict = generate_setup_dict(repo_dir, full_name)
         test_dict = generate_test_dict(repo_dir, test_dir)
@@ -1118,6 +1168,7 @@ def prepare_repos(
             setup_dict=setup_dict,
             test_dict=test_dict,
             pinned_tag=release_tag,
+            base_compiles=base_compiles,
         )
 
         # Write a breadcrumb file inside the cloned repo so that

@@ -118,6 +118,15 @@ def run_agent_for_repo_ts(
             )
             local_repo.git.reset("--hard", example["base_commit"])
 
+        # Resume: rebuild the branch from host-persisted per-module patches so a
+        # run stopped by a subscription limit/kill continues without redoing
+        # finished modules (their .done markers then skip them). No-op unless resuming.
+        if os.environ.get("KAIJU_RESUME") == "1":
+            from agent.resume_state import restore_prior_progress
+            restore_prior_progress(
+                local_repo, example["base_commit"], branch,
+                Path(log_dir).parent, repo_name, logger)
+
         # No topological sort for TS — flat list of target files, empty dep dict
         target_edit_files, _unused_deps = get_target_edit_files_ts(
             local_repo,

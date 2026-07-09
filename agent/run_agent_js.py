@@ -192,6 +192,15 @@ def _run_agent_for_repo_js_impl(
             )
             local_repo.git.reset("--hard", example["base_commit"])
 
+        # Resume: rebuild the branch from host-persisted per-module patches so a
+        # run stopped by a subscription limit/kill continues without redoing
+        # finished modules (their .done markers then skip them). No-op unless resuming.
+        if os.environ.get("KAIJU_RESUME") == "1":
+            from agent.resume_state import restore_prior_progress
+            restore_prior_progress(
+                local_repo, example["base_commit"], branch,
+                Path(log_dir).parent, repo_name, logger)
+
         if "reference_commit" not in example or not example["reference_commit"]:
             raise ValueError(
                 f"Dataset row for {repo_name} is missing 'reference_commit'. "

@@ -773,7 +773,13 @@ _KAIJU_STAGE_MAP = {
 def discover_units_kaiju(run_dir: Path) -> list[tuple[Path, str, str, str]]:
     """Find every work-unit dir in a kaiju run directory."""
     out = []
+    # Consolidated layout is <model>/agent/run_N, so run_dir.parent.name is the
+    # literal "agent", not the model. Step up one more to the real model slug so
+    # per-model ATIF output dirs (and reward.json/results.json) don't all collapse
+    # under a shared ".../agent/" and collide across models.
     model = run_dir.parent.name
+    if model == "agent":
+        model = run_dir.parent.parent.name
     for llm in run_dir.glob("stage*_*/**/current/*/llm_history.txt"):
         unit = llm.parent
         rel_parts = unit.relative_to(run_dir).parts

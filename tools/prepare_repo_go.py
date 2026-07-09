@@ -176,9 +176,13 @@ def create_stubbed_branch(
         branch_name = "commit0_all"
 
     gostubber_bin = _ensure_gostubber()
-    default_branch = get_default_branch(repo_dir)
 
-    git(repo_dir, "checkout", default_branch)
+    # Record reference + create the stub branch from the CURRENT HEAD — which is
+    # the pinned release tag when full_clone checked one out (--tag). Previously
+    # this checked out the default branch first, silently discarding the tag, so
+    # base_commit was built on the default-branch tip while reference_commit
+    # pointed at the tag (divergent history) — the evaluated base was NOT the
+    # released version. Branch from HEAD so base = stubbed(reference).
     reference_commit = get_head_sha(repo_dir)
     logger.info("  Reference commit (original): %s", reference_commit[:12])
 
@@ -245,11 +249,12 @@ def create_stubbed_branch(
         logger.info(
             "  Diff stats — lines added: %d, lines removed: %d", additions, deletions
         )
-        if additions == 0 or deletions == 0:
+        # Only fail when NOTHING changed. A one-sided diff (e.g. additions==0 for a
+        # removal-heavy stub) is legitimate; requiring both >0 false-failed those.
+        if additions == 0 and deletions == 0:
             raise RuntimeError(
                 f"Stubbing verification failed for {full_name}: "
-                f"additions={additions}, deletions={deletions}. "
-                f"Expected both >0."
+                f"additions={additions}, deletions={deletions} (no change at all)."
             )
 
         git(repo_dir, "commit", "-m", "Commit 0")

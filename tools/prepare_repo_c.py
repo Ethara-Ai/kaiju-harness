@@ -423,14 +423,11 @@ def prepare_one(
     if additions == 0 and deletions == 0:
         logger.warning("%s: stub produced empty diff — skipping commit", slug)
         return None
-    if additions == 0 or deletions == 0:
-        logger.warning(
-            "%s: one-sided diff (+%d / -%d) — likely something is off; skipping",
-            slug,
-            additions,
-            deletions,
-        )
-        return None
+    # NOTE: a one-sided diff (e.g. additions==0, deletions>0) is LEGITIMATE for
+    # removal-heavy stubbing (bodies deleted, no `pass`/placeholder inserted), so
+    # we do NOT skip on it — the empty-diff check above already catches "nothing
+    # changed". (Previously an `additions==0 or deletions==0` skip false-failed
+    # valid removal-only stubs.)
 
     git(
         repo_path,

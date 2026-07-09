@@ -185,6 +185,18 @@ def cleanup_container(
         logger.info(f"Attempting to remove container {container.name}...")
         container.remove(force=True)
         logger.info(f"Container {container.name} removed.")
+    except docker.errors.APIError as e:
+        # With auto_remove=True the daemon may already be removing it (409
+        # "removal ... already in progress") or it may be gone (404). Both mean
+        # the container IS removed — not a failure. Only real errors re-raise.
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (404, 409):
+            logger.info(f"Container {container.name} already removed (auto_remove).")
+            return
+        raise Exception(
+            f"Failed to remove container {container.name}: {e}\n"
+            f"{traceback.format_exc()}"
+        ) from e
     except Exception as e:
         raise Exception(
             f"Failed to remove container {container.name}: {e}\n"
@@ -289,6 +301,7 @@ def create_container(
     sandbox_hardening: Optional[dict] = None,
     extra_hosts: Optional[dict[str, str]] = None,
     volumes: Optional[dict] = None,
+    auto_remove: bool = False,
 ) -> Container:
     """Start a Docker container using the specified image.
 
@@ -333,6 +346,11 @@ def create_container(
             # eval is killed by `timeout` — the container is a child of dockerd,
             # not of the killed python process, so it survives otherwise.
             labels={"kaiju.harness": "1"},
+            # When True, dockerd removes the container automatically once its PID 1
+            # exits. Paired with a bounded keep-alive PID 1 (e.g. `timeout N tail`),
+            # this makes a container orphaned by a killed host orchestrator
+            # self-destruct after the TTL instead of lingering forever.
+            auto_remove=auto_remove,
         )
         # host.docker.internal mapping for Linux (Docker Desktop/Mac resolves it
         # automatically; on Linux it must be mapped to the host gateway so a

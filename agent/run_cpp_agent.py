@@ -296,6 +296,16 @@ def run_cpp_agent_for_repo(
         logger.error("Failed to create branch for %s: %s", repo_name, e)
         return
 
+    # Resume: rebuild the branch from host-persisted per-module patches so a run
+    # stopped by a subscription limit/kill continues without redoing finished
+    # modules (their .done markers then skip them). No-op unless resuming.
+    _cpp_base = example.get("base_commit", "") if isinstance(example, dict) else ""
+    if os.environ.get("KAIJU_RESUME") == "1" and _cpp_base:
+        from agent.resume_state import restore_prior_progress
+        restore_prior_progress(
+            local_repo, _cpp_base, branch,
+            Path(log_dir).parent, repo_name, logger)
+
     # Write agent config snapshot — mirrors Java's .agent.yaml
     agent_config_log_file = stable_log_dir / ".agent.yaml"
     try:

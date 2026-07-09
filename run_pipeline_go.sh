@@ -51,6 +51,7 @@ NO_STAGE3_LINT="false"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
+RESUME="false"
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
@@ -108,6 +109,7 @@ while [[ $# -gt 0 ]]; do
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
         --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
+        --resume)      RESUME="true"; shift ;;
         *)             echo "Error: Unknown argument '$1'"; echo ""; print_usage ;;
     esac
 done
@@ -1530,6 +1532,24 @@ run_single_sample() {
     local sample_idx="$1"
 
     set_sample_vars "$sample_idx"
+
+    # Resume: continue a prior run stopped by a subscription limit / kill, WITHOUT
+    # redoing finished modules. Derive the resume stage from the prior results,
+    # and flag the agent (KAIJU_RESUME) to rebuild the branch from host-persisted
+    # per-module patches; finished modules' .done markers then skip them.
+    if [[ "$RESUME" == "true" ]]; then
+        export KAIJU_RESUME=1
+        local _rs
+        _rs="$("$VENV_PYTHON" -m agent.resume_state which-stage --results "$PIPELINE_LOG" 2>/dev/null || echo "")"
+        if [[ "$_rs" == "2" || "$_rs" == "3" ]]; then
+            SKIP_TO_STAGE="$_rs"
+            log "RESUME: prior progress found -> skipping to stage ${SKIP_TO_STAGE}; finished modules will be skipped."
+        elif [[ -z "$_rs" ]]; then
+            log "RESUME: prior run already completed all stages (nothing to skip); modules will be restored + re-verified."
+        else
+            log "RESUME: re-entering stage 1; finished modules will be skipped."
+        fi
+    fi
 
     if [[ "$NUM_SAMPLES" -gt 1 ]]; then
         log ""
