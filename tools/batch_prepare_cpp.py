@@ -570,6 +570,8 @@ CSV format:
                         help="Docker build timeout in seconds (default: 3600)")
     parser.add_argument("--pre-install-file", type=Path, default=None,
                         help="JSON map { 'org/repo': ['cmd1', 'cmd2'] } of per-repo pre_install steps")
+    parser.add_argument("--fail-on-empty-test-ids", action="store_true",
+                        help="Exit 2 if any prepared repo has 0 test IDs (default: warn only)")
 
     args = parser.parse_args()
 
@@ -749,6 +751,16 @@ CSV format:
     if not failures and not skips and args.state_file.exists():
         args.state_file.unlink()
         print(f"  Cleaned up state file: {args.state_file}")
+
+    if args.fail_on_empty_test_ids and entries and not args.skip_test_ids:
+        zero_repos = [
+            e.get("repo", "unknown")
+            for e in entries
+            if test_id_results.get(e.get("repo", "").split("/")[-1], 0) == 0
+        ]
+        if zero_repos:
+            print(f"\n  [FAIL] {len(zero_repos)} repo(s) have 0 test IDs: {', '.join(zero_repos)}")
+            sys.exit(2)
 
 
 if __name__ == "__main__":

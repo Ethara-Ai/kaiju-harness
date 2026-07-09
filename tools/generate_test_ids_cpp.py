@@ -39,17 +39,19 @@ DEFAULT_OUTPUT_DIR = DATA_DIR / "cpp_test_ids"
 def collect_test_ids_ctest(
     repo_dir: Path,
     build_dir: str = "build",
+    test_dir: str = ".",
 ) -> list[str]:
-    build_path = repo_dir / build_dir
+    root = repo_dir if test_dir in (".", "") else repo_dir / test_dir
+    build_path = root / build_dir
     if not build_path.exists():
         for alt in ["builddir", "cmake-build-release", "cmake-build-debug"]:
-            alt_path = repo_dir / alt
+            alt_path = root / alt
             if alt_path.exists():
                 build_path = alt_path
                 break
 
     if not build_path.exists():
-        logger.warning("No build directory found in %s", repo_dir)
+        logger.warning("No build directory found in %s", root)
         return []
 
     try:
@@ -58,7 +60,7 @@ def collect_test_ids_ctest(
             capture_output=True,
             text=True,
             timeout=60,
-            cwd=repo_dir,
+            cwd=root,
         )
         if result.returncode != 0:
             logger.warning(
@@ -87,16 +89,18 @@ def collect_test_ids_ctest(
 def collect_test_ids_gtest(
     repo_dir: Path,
     test_binary: str = "",
+    test_dir: str = ".",
 ) -> list[str]:
+    root = repo_dir if test_dir in (".", "") else repo_dir / test_dir
     if not test_binary:
-        build_path = repo_dir / "build"
+        build_path = root / "build"
         if not build_path.exists():
             return []
         candidates = []
-        for root, dirs, files in os.walk(build_path):
+        for walk_root, dirs, files in os.walk(build_path):
             dirs[:] = [d for d in dirs if d not in {".git", "_deps", "CMakeFiles"}]
             for f in files:
-                fp = os.path.join(root, f)
+                fp = os.path.join(walk_root, f)
                 if os.access(fp, os.X_OK) and "test" in f.lower():
                     candidates.append(fp)
         if not candidates:
@@ -109,7 +113,7 @@ def collect_test_ids_gtest(
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=repo_dir,
+            cwd=root,
         )
         if result.returncode != 0:
             return []
@@ -166,15 +170,20 @@ def collect_test_ids_local(
     entry: dict | None = None,
 ) -> list[str]:
     repo_path = Path(repo_dir)
+    test_dir = "."
+    if entry:
+        td = entry.get("test", {}).get("test_dir", "") if isinstance(entry.get("test"), dict) else ""
+        if td and (repo_path / td).is_dir():
+            test_dir = td
 
     if strategy in ("auto", "ctest"):
-        ids = collect_test_ids_ctest(repo_path)
+        ids = collect_test_ids_ctest(repo_path, test_dir=test_dir)
         if ids:
             logger.info("  CTest: found %d test IDs", len(ids))
             return ids
 
     if strategy in ("auto", "gtest"):
-        ids = collect_test_ids_gtest(repo_path)
+        ids = collect_test_ids_gtest(repo_path, test_dir=test_dir)
         if ids:
             logger.info("  GTest: found %d test IDs", len(ids))
             return ids

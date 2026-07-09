@@ -677,10 +677,16 @@ def collect_test_ids(repo_dir: Path, test_cmd: str, build_system: str) -> list[s
     return sorted(set(test_ids))
 
 
-def save_test_ids(repo_name: str, test_ids: list[str]) -> Path:
+def save_test_ids(repo_name: str, test_ids: list[str]) -> Path | None:
+    if not test_ids:
+        logger.warning(
+            "  [SKIP] %s: extraction returned 0 tests; not installing bz2",
+            repo_name,
+        )
+        return None
     TEST_IDS_DIR.mkdir(parents=True, exist_ok=True)
     bz2_path = TEST_IDS_DIR / f"{repo_name}.bz2"
-    content = "\n".join(test_ids) + "\n" if test_ids else ""
+    content = "\n".join(test_ids) + "\n"
     bz2_path.write_bytes(bz2.compress(content.encode()))
     logger.info("Saved test IDs to %s", bz2_path)
     return bz2_path
