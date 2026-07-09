@@ -339,6 +339,10 @@ def create_container(
         # container can reach a host-side bridge). Default None => unchanged.
         if extra_hosts:
             run_kwargs["extra_hosts"] = extra_hosts
+        # Bind-mount host dirs into the container (docker-py volumes spec:
+        # {host_path: {"bind": container_path, "mode": "rw"}}). Used to persist
+        # trajectory output to the host in real time so an orchestrator kill/crash
+        # mid-run doesn't strand all data inside the container. Default None => off.
         if volumes:
             run_kwargs["volumes"] = volumes
         # Opt-in hardening flags only (default: none -> identical to prior behavior).

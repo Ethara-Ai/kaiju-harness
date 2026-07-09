@@ -362,6 +362,20 @@ def main(argv=None) -> int:
         _stale.remove(force=True)
     except Exception:  # noqa: BLE001 - not-found (normal) or transient API error
         pass
+    # Bind-mount the host output dirs into the container so the pipeline writes
+    # trajectory data DIRECTLY to the host in real time. Without this, ALL data
+    # lives inside the container until a single end-of-run copy-back, so an
+    # orchestrator kill/crash mid-run (common on a long repo) strands and LOSES
+    # everything. With the mount, data persists live and the copy-back is a no-op.
+    host_out_dir = (Path("outputs") / dataset_id).resolve()
+    host_out_dir.mkdir(parents=True, exist_ok=True)
+    host_harbor_dir = Path("Harbor_Data").resolve()
+    host_harbor_dir.mkdir(parents=True, exist_ok=True)
+    _mount_volumes = {
+        str(host_out_dir): {"bind": f"/opt/kaiju/outputs/{dataset_id}", "mode": "rw"},
+        str(host_harbor_dir): {"bind": "/opt/kaiju/Harbor_Data", "mode": "rw"},
+    }
+    _mounted = False
     try:
         _sock = os.environ.get("KAIJU_DOCKER_SOCK", "/var/run/docker.sock")
         _volumes = {_sock: {"bind": "/var/run/docker.sock", "mode": "rw"}} if Path(_sock).exists() else None
@@ -373,9 +387,15 @@ def main(argv=None) -> int:
             client=client, image_name=agent_tag,
             container_name=container_name,
             logger=logger, environment=env, extra_hosts=_extra_hosts(),
-            volumes=_volumes,
+            # Merge BOTH mount sets: the host output/Harbor bind-mount (trajectory
+            # persistence — survives an orchestrator kill) AND the docker-socket
+            # mount from f1d92d1 (only if present; see the security note below).
+            volumes={**_mount_volumes, **(_volumes or {})},
         )
         container.start()
+        _mounted = True
+        logger.info("Bind-mounted host outputs/%s + Harbor_Data into container "
+                    "(trajectory persists live; survives an orchestrator kill)", dataset_id)
 
         # Copy the dataset in and expose /testbed as repos/<name> (the pipeline
         # expects the checkout under REPO_BASE=./repos).
@@ -401,19 +421,30 @@ def main(argv=None) -> int:
         # KAIJU_TEST_IDS_DIR lookup actually resolves. Fall back to --dataset's
         # dir only if the consolidated dir is absent.
         container_datasets_dir = Path(f"/opt/kaiju/outputs/{dataset_id}/datasets")
-        _stream_exec(client, container.id, f"bash -c {shlex.quote('mkdir -p ' + str(container_datasets_dir))}")
         host_datasets_dir = Path("outputs") / dataset_id / "datasets"
         if not host_datasets_dir.is_dir():
             host_datasets_dir = Path(args.dataset).parent
-        staged_any = False
-        for src in host_datasets_dir.glob("*_test_ids.bz2"):
-            copy_to_container(container, src, container_datasets_dir / src.name)
-            logger.info("Staged inference input: %s -> %s", src.name, container_datasets_dir)
-            staged_any = True
-        if not staged_any:
-            logger.warning("No *_test_ids.bz2 found in %s — the in-container eval will "
-                           "fall back to the observed test count (no canonical denominator)",
-                           host_datasets_dir)
+        if _mounted:
+            # outputs/<uuid>/ is host-mounted, so outputs/<uuid>/datasets/ (with the
+            # captured inventory) is ALREADY visible inside the container. Copying it
+            # in would copy the file onto itself through the mount and truncate it.
+            n_inv = len(list(host_datasets_dir.glob("*_test_ids.bz2")))
+            if n_inv:
+                logger.info("Datasets host-mounted; %d inventory file(s) already in-container", n_inv)
+            else:
+                logger.warning("No *_test_ids.bz2 in %s — in-container eval will fall back "
+                               "to the observed test count (no canonical denominator)", host_datasets_dir)
+        else:
+            _stream_exec(client, container.id, f"bash -c {shlex.quote('mkdir -p ' + str(container_datasets_dir))}")
+            staged_any = False
+            for src in host_datasets_dir.glob("*_test_ids.bz2"):
+                copy_to_container(container, src, container_datasets_dir / src.name)
+                logger.info("Staged inference input: %s -> %s", src.name, container_datasets_dir)
+                staged_any = True
+            if not staged_any:
+                logger.warning("No *_test_ids.bz2 found in %s — the in-container eval will "
+                               "fall back to the observed test count (no canonical denominator)",
+                               host_datasets_dir)
         # aider commits via `git config --get user.name` (reads git CONFIG, not the
         # GIT_AUTHOR_* env) — set a global identity or every auto-commit fails and
         # git_patch comes out empty. Then expose /testbed as repos/<name>.
@@ -439,39 +470,45 @@ def main(argv=None) -> int:
         rc = _stream_exec(client, container.id, f"bash -c {shlex.quote(pipeline_cmd)}")
         logger.info("Pipeline exited rc=%s after %.0fs", rc, time.time() - start)
 
-        # Copy outputs/<dataset-id>/ back to the host (merge into any existing dir).
         host_out = Path("outputs") / dataset_id
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                staged = Path(td) / dataset_id
-                copy_from_container(
-                    container, Path(f"/opt/kaiju/outputs/{dataset_id}"), staged)
-                shutil.copytree(staged, host_out, dirs_exist_ok=True)
-            logger.info("Copied outputs to %s", host_out.resolve())
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Could not copy outputs/%s: %s", dataset_id, e)
-
-        # Copy the ATIF training artifact back too. commit0_to_atif_v2.py writes it
-        # to /opt/kaiju/Harbor_Data/Trajectory/ (NOT under outputs/<uuid>/), so the
-        # copy above misses it and it is LOST on container removal — meaning a
-        # containerized run produces no trajectory training data on the host (the
-        # actual product of trajectory-gen). Merge it into the same host location
-        # local runs use. Best-effort: absent dir (ATIF disabled/failed) just warns.
-        try:
-            host_harbor = Path("Harbor_Data") / "Trajectory"
-            with tempfile.TemporaryDirectory() as td:
-                staged = Path(td) / "Trajectory"
-                copy_from_container(
-                    container, Path("/opt/kaiju/Harbor_Data/Trajectory"), staged)
-                if staged.exists() and any(staged.iterdir()):
-                    host_harbor.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(staged, host_harbor, dirs_exist_ok=True)
-                    logger.info("Copied ATIF trajectory artifacts to %s", host_harbor.resolve())
-                else:
-                    logger.warning("No ATIF trajectory produced in the container "
-                                   "(Harbor_Data/Trajectory empty) — check the ATIF step")
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Could not copy Harbor_Data/Trajectory: %s", e)
+        if _mounted:
+            # Data was written straight to the host via the bind mounts — no copy
+            # needed, and it already survived even if this orchestrator had been
+            # killed mid-run. Just report what landed.
+            n_runs = len(list((host_out / "runs").rglob("pipeline_results.json"))) if (host_out / "runs").is_dir() else 0
+            n_atif = len(list((Path("Harbor_Data") / "Trajectory").rglob("trajectory.json"))) if (Path("Harbor_Data") / "Trajectory").is_dir() else 0
+            logger.info("Outputs host-mounted — persisted live to %s (%d result file(s)); "
+                        "%d ATIF trajectory file(s) in Harbor_Data/Trajectory", host_out.resolve(), n_runs, n_atif)
+            if n_atif == 0:
+                logger.warning("No ATIF trajectory produced (Harbor_Data/Trajectory empty) — check the ATIF step")
+        else:
+            # Fallback (mount unavailable): copy outputs/<dataset-id>/ back at the end.
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    staged = Path(td) / dataset_id
+                    copy_from_container(
+                        container, Path(f"/opt/kaiju/outputs/{dataset_id}"), staged)
+                    shutil.copytree(staged, host_out, dirs_exist_ok=True)
+                logger.info("Copied outputs to %s", host_out.resolve())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not copy outputs/%s: %s", dataset_id, e)
+            # ATIF artifact lives at /opt/kaiju/Harbor_Data/Trajectory/ (outside
+            # outputs/<uuid>/); copy it to the host location local runs use.
+            try:
+                host_harbor = Path("Harbor_Data") / "Trajectory"
+                with tempfile.TemporaryDirectory() as td:
+                    staged = Path(td) / "Trajectory"
+                    copy_from_container(
+                        container, Path("/opt/kaiju/Harbor_Data/Trajectory"), staged)
+                    if staged.exists() and any(staged.iterdir()):
+                        host_harbor.mkdir(parents=True, exist_ok=True)
+                        shutil.copytree(staged, host_harbor, dirs_exist_ok=True)
+                        logger.info("Copied ATIF trajectory artifacts to %s", host_harbor.resolve())
+                    else:
+                        logger.warning("No ATIF trajectory produced in the container "
+                                       "(Harbor_Data/Trajectory empty) — check the ATIF step")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not copy Harbor_Data/Trajectory: %s", e)
     finally:
         if container is not None and not args.keep_container:
             try:
