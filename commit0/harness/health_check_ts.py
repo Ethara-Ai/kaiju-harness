@@ -52,10 +52,20 @@ def _detect_image_pkg_manager(
 
 
 def _build_require_cmd(package_name: str, pkg_manager: str) -> list[str]:
-    """Build a require() probe command that respects the package manager's
+    """Build an *installation* probe that respects the package manager's
     module-resolution layout (pnpm symlinks, yarn pnp, etc.).
+
+    We use ``require.resolve("<pkg>/package.json")`` rather than
+    ``require("<pkg>")``. Resolving the package's ``package.json`` proves the
+    dependency is installed and locatable from /testbed WITHOUT executing the
+    module's entry point. This matters for ESM-only packages such as **vitest**
+    (v1+): their CJS entry deliberately ``throw``s
+    ``"Vitest cannot be imported in a CommonJS module using require()"``, so a
+    plain ``require("vitest")`` ALWAYS fails even when vitest is correctly
+    installed and fully functional — a false-negative that blocked TS repos.
+    ``require.resolve`` works uniformly for CJS and ESM packages.
     """
-    script = f'require({_json.dumps(package_name)})'
+    script = f'require.resolve({_json.dumps(package_name + "/package.json")})'
     if pkg_manager == "pnpm":
         return ["pnpm", "exec", "node", "-e", script]
     if pkg_manager == "yarn":
@@ -124,7 +134,11 @@ def check_require(
     image_name: str,
     package_name: str,
 ) -> tuple[bool, str]:
-    """Check if a package can be require()'d inside the container."""
+    """Check if a package is installed/resolvable inside the container.
+
+    Uses ``require.resolve("<pkg>/package.json")`` (see ``_build_require_cmd``)
+    so ESM-only packages like vitest are not false-negatives.
+    """
     if package_name.startswith("@types/"):
         return (True, f"Skipped (type-only): {package_name}")
     _NPM_PACKAGE_RE = re.compile(

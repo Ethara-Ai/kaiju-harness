@@ -354,7 +354,13 @@ def _build_collect_command(
 
     """
     if framework == "vitest":
-        return ["npx", "vitest", "list", "--json", test_dir]
+        # NOTE: the test_dir positional MUST come before ``--json``. Vitest's
+        # ``--json`` flag optionally takes a value (the output file path); if a
+        # positional immediately follows it (``--json test``) vitest treats the
+        # dir as the output filename and dies with
+        # ``EISDIR: illegal operation on a directory``, yielding 0 IDs.
+        # Passing the dir first keeps ``--json`` value-less → clean JSON to stdout.
+        return ["npx", "vitest", "list", test_dir, "--json"]
 
     if framework == "jest":
         return ["npx", "jest", "--json", "--forceExit", test_dir]
@@ -517,12 +523,32 @@ def collect_ts_test_ids_local(
     # 3. Parse the output
     test_ids = _dispatch_parse(result.stdout, framework, str(repo_dir.resolve()))
 
-    # 4. Fallback for Vitest: try --reporter=json if list subcommand failed
+    # 4. Fallback for Vitest: actually RUN the suite with the JSON reporter and
+    # parse the produced report. ``vitest run --reporter=json`` emits a
+    # jest-shaped object ({testResults:[{assertionResults:[...]}]}), NOT the
+    # array that ``vitest list`` produces — so it must be parsed with the jest
+    # results parser. (Feeding it to ``_parse_vitest_list_output`` is what
+    # caused the "Extra data: line 1 column 3" JSON errors: that parser grabs
+    # the first "[" / last "]" and slices a non-JSON fragment out of the object.)
+    # We write the report to an explicit --outputFile to avoid banner/log noise
+    # on stdout, and fall back to stdout if the file is absent.
     if not test_ids and framework == "vitest":
         logger.info(
             "  vitest list returned 0 IDs, trying vitest run --reporter=json fallback"
         )
-        fallback_cmd = ["npx", "vitest", "run", "--reporter=json", test_dir]
+        report_path = Path(repo_dir) / ".kaiju_vitest_report.json"
+        try:
+            report_path.unlink()
+        except OSError:
+            pass
+        fallback_cmd = [
+            "npx",
+            "vitest",
+            "run",
+            test_dir,
+            "--reporter=json",
+            f"--outputFile={report_path.name}",
+        ]
         try:
             result_fb = subprocess.run(
                 fallback_cmd,
@@ -531,7 +557,18 @@ def collect_ts_test_ids_local(
                 text=True,
                 timeout=timeout,
             )
-            test_ids = _parse_vitest_list_output(result_fb.stdout, str(repo_dir))
+            report_text = ""
+            if report_path.exists():
+                try:
+                    report_text = report_path.read_text()
+                finally:
+                    try:
+                        report_path.unlink()
+                    except OSError:
+                        pass
+            if not report_text.strip():
+                report_text = result_fb.stdout
+            test_ids = _parse_jest_json_results(report_text, str(repo_dir.resolve()))
         except subprocess.TimeoutExpired:
             logger.debug("vitest run --reporter=json fallback timed out")
         except FileNotFoundError:
@@ -668,9 +705,16 @@ def collect_ts_test_ids_docker(
         # 7. Fallback for Vitest: try --reporter=json inside Docker
         if not test_ids and framework == "vitest":
             logger.info("  vitest list returned 0 IDs in Docker, trying fallback")
+            # ``vitest run --reporter=json`` emits a jest-shaped object, so parse
+            # with the jest results parser (NOT _parse_vitest_list_output, which
+            # mis-slices the object and raises "Extra data"). Write to an explicit
+            # outputFile then cat it so banner/log noise on stdout is ignored.
+            report_file = ".kaiju_vitest_report.json"
             fallback_cmd = (
                 f"cd {CONTAINER_WORKDIR} && {checkout}"
-                f"npx vitest run --reporter=json {shlex.quote(test_dir)} 2>/dev/null; true"
+                f"npx vitest run {shlex.quote(test_dir)} --reporter=json "
+                f"--outputFile={report_file} >/dev/null 2>&1; "
+                f"cat {report_file} 2>/dev/null; true"
             )
             try:
                 raw_fb = client.containers.run(
@@ -684,7 +728,7 @@ def collect_ts_test_ids_docker(
                     if isinstance(raw_fb, bytes)
                     else raw_fb
                 )
-                test_ids = _parse_vitest_list_output(stdout_fb)
+                test_ids = _parse_jest_json_results(stdout_fb)
             except (docker.errors.ContainerError, requests.exceptions.ReadTimeout):
                 logger.debug("  vitest fallback also failed in Docker")
 

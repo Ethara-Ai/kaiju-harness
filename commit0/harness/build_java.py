@@ -93,7 +93,13 @@ def _build_single_repo(
 ) -> str:
     client = docker.from_env()
     spec = make_java_spec(instance)
-    tag = f"{JAVA_BASE_IMAGE_PREFIX}-{repo_name.split('/')[-1]}:latest"
+    # Tag the image with the SPEC's repo_image_key — the exact name the runner
+    # (run_pipeline_containerized) looks up as the agent-image FROM base. Deriving
+    # it from spec (not from the raw dataset key) guarantees build and runner agree
+    # even if a repo's instance_id basename differs from its repo basename, since
+    # spec.repo_image_key keys off instance_id-or-repo. Mirrors Go, which builds
+    # via spec.repo_image_key.
+    tag = spec.repo_image_key
     dockerfile_content = spec.repo_dockerfile
     setup_scripts = _scripts_list_to_dict(spec.make_repo_script_list())
     build_dir = repo_image_build_dir() / tag.replace(":", "__")
@@ -120,7 +126,22 @@ def build_java_repo_images(
 ) -> None:
     platform = get_docker_platform()
     mitm_ca_cert = _resolve_mitm_ca_cert()
-    repos = repo_names or JAVA_SPLIT.get("all", [])
+    # Resolve the repo list. Precedence:
+    #   1. explicit repo_names (from `cli_java build --repo <name>`);
+    #   2. every repo in the loaded dataset — this is the "all" behaviour and
+    #      mirrors Go's resolve_split("all", dataset) (derive_all_split), so a
+    #      plain `cli_java build` builds a per-repo image for each dataset entry.
+    #      JAVA_SPLIT has NO static "all" key (it is derived from the dataset),
+    #      so `JAVA_SPLIT.get("all", [])` would return [] and build NOTHING,
+    #      leaving the runner's agent-image FROM (commit0-java-<repo>:latest)
+    #      with no base image -> "pull access denied ... repository does not exist".
+    #   3. only if no dataset was supplied, fall back to the curated lite split.
+    if repo_names:
+        repos = repo_names
+    elif dataset:
+        repos = list(dataset.keys())
+    else:
+        repos = JAVA_SPLIT.get("lite", [])
 
     tasks = []
     for repo_name in repos:
