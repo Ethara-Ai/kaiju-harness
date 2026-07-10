@@ -43,7 +43,7 @@
 #                        -> claude-code :8765 ; vertex/bedrock/gemini -> no bridge.
 #   --iter N             sugar for pipeline --max-iteration N (default: 3). Ignored
 #                        if you set --max-iteration or --skip-to-stage yourself.
-#   --org ORG            GitHub org to fork into (default: Aman-Yadav-Ethara-AI).
+#   --org ORG            GitHub org to fork into (default: Zahgon).
 #   --clone-dir DIR      local clone staging dir (default: repos_staging).
 #   --skip-prepare       reuse an existing prep (skip clone/stub/A11/inventory).
 #   --resume             continue a run stopped by a subscription limit / kill,
@@ -144,6 +144,8 @@
 set -uo pipefail
 # Portable: run from the repo root (this script's own directory), never a
 # hardcoded user path. Works regardless of where the repo is checked out.
+# (Supersedes the coworker's equivalent `cd "$(dirname "$0")"` — BASH_SOURCE also
+# survives `source`, the guard fails loudly, and the PATH loop is cross-platform.)
 cd "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)" || { echo "ERROR: cannot cd to script dir"; exit 1; }
 # Add common toolchain locations to PATH only if they exist (macOS homebrew,
 # rustup, go, openjdk, homebrew-on-Linux) — portable, no duplicates.
@@ -155,7 +157,7 @@ done
 export PATH
 
 # ---- defaults ----
-REPO=""; LNG=""; MODEL="gpt55"; ITER=""; ORG="Aman-Yadav-Ethara-AI"
+REPO=""; LNG=""; MODEL="gpt55"; ITER=""; ORG="zahgon"
 CLONE="repos_staging"; SKIP_PREP=0; PRINT=0; REUSE_BRIDGE=0
 PREPARE_ARGS=""; RUN_ARGS=""; PIPELINE_ARGS=""
 
