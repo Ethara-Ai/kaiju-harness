@@ -150,9 +150,20 @@ class Commit0CSpec(Spec):
             "fi",
             *revert_lines,
             "git status",
+            # Strip -Werror from the generated ninja files after configure. A
+            # stubbed / partially-implemented function has UNUSED PARAMETERS, and
+            # repos that build with -Werror (cJSON and many quality C libs) turn
+            # that -Werror=unused-parameter into a hard error that fails the WHOLE
+            # build -> a false COMPILE_FAILED 0/N even when other functions are
+            # implemented correctly. Warnings don't affect whether a TEST passes,
+            # so the eval must compile-with-warnings and measure runtime pass rate.
+            # sed on build.ninja works for ANY project regardless of how it set
+            # -Werror (CMAKE_C_FLAGS can't override target_compile_options).
             "cmake -S . -B build -G Ninja -DBUILD_TESTING=ON "
+            "-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF "
             f"-DCMAKE_BUILD_TYPE=Debug {quoted_cmake_flags} "
-            "&& cmake --build build -j 2> compile_errors.txt",
+            "&& { find build -name '*.ninja' -exec sed -i 's/-Werror[^ ]*//g' {} + 2>/dev/null || true; "
+            "cmake --build build -j 2> compile_errors.txt; }",
             "BUILD_RC=$?",
             "if [ $BUILD_RC -ne 0 ]; then",
             "  echo COMPILE_FAILED >> compile_errors.txt",
