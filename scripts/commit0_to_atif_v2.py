@@ -89,6 +89,11 @@ MODEL_SHORT_MAP: dict[str, str] = {
     "anthropic/claude-opus-4-8": "claude-opus-4.8",
     "claude-opus-4-7": "claude-opus-4.7",
     "anthropic/claude-opus-4-7": "claude-opus-4.7",
+    # OpenAI Codex bridge (gpt55) — the pipeline passes both the short slug and
+    # the dated model id through trajectory metadata.
+    "gpt-5.5": "gpt-5.5",
+    "gpt-5.5-2026-04-23": "gpt-5.5",
+    "openai/gpt-5.5-2026-04-23": "gpt-5.5",
 }
 
 # Kaiju harness tool surface (from kaiju/agent/openhands_formatter.py).

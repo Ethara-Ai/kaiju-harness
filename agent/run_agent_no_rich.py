@@ -272,6 +272,10 @@ def _run_agent_for_repo_impl(
             for test_file in test_files:
                 test_file_name = test_file.replace(".py", "").replace("/", "__")
                 test_log_dir = experiment_log_dir / test_file_name
+                # Flush each turn live to turns.jsonl (+ .heartbeat) so this
+                # variant produces the same trajectory artifacts as go/rust.
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
 
                 if _is_module_done(test_log_dir):
                     logger.info(
@@ -364,6 +368,8 @@ def _run_agent_for_repo_impl(
             for lint_file in lint_files:
                 lint_file_name = lint_file.replace(".py", "").replace("/", "__")
                 lint_log_dir = experiment_log_dir / lint_file_name
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(lint_log_dir / "turns.jsonl")
 
                 if _is_module_done(lint_log_dir):
                     logger.info(f"Skipping already-linted file: {lint_file_name}")
@@ -439,6 +445,8 @@ def _run_agent_for_repo_impl(
             for f in target_edit_files:
                 file_name = f.replace(".py", "").replace("/", "__")
                 file_log_dir = experiment_log_dir / file_name
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
 
                 if _is_module_done(file_log_dir):
                     logger.info(f"Skipping already-drafted file: {file_name}")
@@ -540,6 +548,16 @@ def _run_agent_for_repo_impl(
             )
         except Exception as e:
             logger.warning(f"Failed to write thinking capture output: {e}")
+
+    # Full model-changes record (base_commit..HEAD), matching go/rust — keeps
+    # tests/manifests, strips binary/cache noise; distinct from the eval's scored
+    # patch.diff. Best-effort; never fatal.
+    try:
+        from agent.stage_patch import write_stage_patch
+        write_stage_patch(local_repo, example.get("base_commit", "HEAD"),
+                          experiment_log_dir, logger)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to write model_changes.diff: %s", e)
 
 
 def run_agent_for_repo(

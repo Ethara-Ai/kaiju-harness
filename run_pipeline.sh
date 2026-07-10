@@ -810,6 +810,39 @@ EVAL_NUM_TESTS=0
 EVAL_PASS_RATE="0.0"
 EVAL_RUNTIME="0.0"
 EVAL_ELAPSED=0
+EVAL_STATUS="ok"
+
+# Preserve per-stage eval artifacts into the run's output tree — matching the
+# go/rust pipelines. The eval writes test_output.txt / report.json / exit codes /
+# eval.sh / patch.diff under logs/pytest/<repo>/<branch>/<hash>/, which is NOT
+# under outputs/<uuid>/ and is lost on container teardown (so a crashed eval is
+# undebuggable). Copied per stage so each keeps its own snapshot.
+collect_eval_artifacts() {
+    local stage_label="${1:-eval}"
+    [[ -n "${LOG_BASE:-}" && -n "${BRANCH_NAME:-}" ]] || return 0
+    local dest="${LOG_BASE}/${stage_label}_eval_artifacts"
+    local bdir hdir repo out found=0
+    shopt -s nullglob
+    for bdir in logs/pytest/*/"${BRANCH_NAME}" logs/*_test*/*/"${BRANCH_NAME}"; do
+        [[ -d "$bdir" ]] || continue
+        repo=$(basename "$(dirname "$bdir")")
+        for hdir in "$bdir"/*/; do
+            [[ -d "$hdir" ]] || continue
+            out="${dest}/${repo}"
+            mkdir -p "$out"
+            find "$hdir" -maxdepth 1 -type f \( \
+                -name 'test_output.txt' -o -name 'test_output.json' \
+                -o -name '*_exit_code.txt' -o -name 'eval.sh' \
+                -o -name 'patch.diff' -o -name '*stderr*' \
+                -o -name 'report.*' -o -name 'run_pytest.log' \
+                \) -exec cp -f {} "$out/" \; 2>/dev/null || true
+            found=1
+        done
+    done
+    shopt -u nullglob
+    [[ "$found" == "1" ]] && log "  Eval artifacts -> ${dest}" || true
+    return 0
+}
 
 run_evaluate() {
     local branch="$1"
@@ -835,6 +868,10 @@ run_evaluate() {
     set +e
     timeout "$EVAL_TIMEOUT" "${cmd[@]}" >"$eval_log" 2>&1
     local eval_rc=$?
+
+    # Snapshot the eval's artifacts (patch.diff/test_output/report/eval.sh/...)
+    # into the run tree before the transient logs/pytest dir is lost.
+    collect_eval_artifacts "${stage_label:-eval}"
     set -e
 
     local end_time
@@ -861,6 +898,7 @@ parse_eval_output() {
     EVAL_NUM_TESTS=0
     EVAL_PASS_RATE="0.0"
     EVAL_RUNTIME="0.0"
+    EVAL_STATUS="ok"
 
     # Aggregate across all "repo,runtime,passed/total" lines
     local total_passed=0
@@ -870,6 +908,13 @@ parse_eval_output() {
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
+        # An eval infra crash (pytest produced no report.json) is NOT a real 0% —
+        # flag it so the recorded score is not mistaken for a legitimate result.
+        if [[ "$line" == PYTEST_INFRA_ERROR,* ]]; then
+            EVAL_STATUS="$(echo "$line" | cut -d',' -f3 | tr -d ' ')"
+            log "  WARNING: eval infra crash (${EVAL_STATUS}) — score is NOT a real 0% (see eval log)"
+            continue
+        fi
         [[ "$line" == repo,* ]] && continue
         if [[ "$line" == *","*"/"* ]]; then
             local runtime passed_total passed total
@@ -1025,7 +1070,18 @@ init_results() {
 
 save_results() {
     mkdir -p "$(dirname "$PIPELINE_LOG")"
-    echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
+    # Write atomically via a temp file and ONLY promote it if it is valid,
+    # non-empty JSON. A jq failure or an empty RESULTS_JSON must never truncate
+    # an already-good pipeline_results.json to 0 bytes (that loses all stage
+    # results and zeroes ATIF rewards).
+    local _tmp="${PIPELINE_LOG}.tmp.$$"
+    if echo "$RESULTS_JSON" | jq '.' > "$_tmp" 2>/dev/null && [[ -s "$_tmp" ]]; then
+        mv -f "$_tmp" "$PIPELINE_LOG"
+    else
+        rm -f "$_tmp"
+        log "ERROR: save_results refused to write empty/invalid JSON to ${PIPELINE_LOG} (kept prior file)"
+        return 1
+    fi
 }
 
 # ============================================================
@@ -1067,6 +1123,7 @@ stage_1_draft() {
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "${EVAL_STATUS:-ok}" \
         '.stage1 = {
             name: $name,
             elapsed_s: $elapsed,
@@ -1077,7 +1134,8 @@ stage_1_draft() {
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1124,6 +1182,7 @@ stage_2_lint_refine() {
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "${EVAL_STATUS:-ok}" \
         '.stage2 = {
             name: $name,
             elapsed_s: $elapsed,
@@ -1135,7 +1194,8 @@ stage_2_lint_refine() {
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1188,6 +1248,7 @@ stage_3_test_refine() {
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "${EVAL_STATUS:-ok}" \
         '.stage3 = {
             name: $name,
             elapsed_s: $elapsed,
@@ -1199,7 +1260,8 @@ stage_3_test_refine() {
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1503,7 +1565,10 @@ run_single_sample() {
         RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg err "$pipeline_error" '.error = $err')
     fi
 
-    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg end "$(ts)" '.end_time = $end')
+    # NB: 'end' is a reserved keyword in jq (the older jq in the container image
+    # rejects '$end' as a syntax error, which silently empties RESULTS_JSON and
+    # truncates pipeline_results.json to 0 bytes). Use a non-reserved var name.
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg endts "$(ts)" '.end_time = $endts')
 
     print_summary_table
     save_results

@@ -11,6 +11,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -355,6 +356,26 @@ class LocalInplace(ExecutionContext):
         # grandchildren survive as orphans spinning at 100% CPU. Across a large
         # batch that leaks a runaway process per timed-out eval and starves the
         # host. We therefore killpg the whole group: SIGTERM, grace, then SIGKILL.
+        # The eval must run the REPO's tests in the repo image's SYSTEM python —
+        # that is where the repo, its test deps, and the pytest-json-report plugin
+        # (needed for `--json-report`) are installed. The containerized pipeline,
+        # however, bakes the harness virtualenv FIRST on PATH (image ENV
+        # `PATH=/opt/kaiju/.venv/bin:...`), so a bare `pytest` resolves to the
+        # harness venv's pytest, which lacks pytest-json-report. That makes pytest
+        # exit 4 ("unrecognized arguments: --json-report") BEFORE running anything,
+        # producing no report.json — which evaluate.py then silently scores as a
+        # legitimate 0/N for EVERY repo. Strip the active virtualenv's bin from the
+        # eval subprocess PATH so `pytest`/`python` resolve to the system tools.
+        # (No-op when the harness itself runs outside a venv, e.g. the Docker
+        # backend's fresh container.)
+        eval_env = dict(os.environ)
+        if sys.prefix != sys.base_prefix:
+            _venv_bin = os.path.join(sys.prefix, "bin")
+            eval_env["PATH"] = os.pathsep.join(
+                p for p in eval_env.get("PATH", "").split(os.pathsep)
+                if p and os.path.normpath(p) != os.path.normpath(_venv_bin)
+            )
+            eval_env.pop("VIRTUAL_ENV", None)
         proc = subprocess.Popen(
             ["/bin/bash", self.eval_script_path],
             cwd=self.worktree,
@@ -362,6 +383,7 @@ class LocalInplace(ExecutionContext):
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
+            env=eval_env,
         )
         try:
             out, err = proc.communicate(timeout=self.timeout)

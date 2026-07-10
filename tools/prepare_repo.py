@@ -1494,6 +1494,23 @@ def main() -> None:
             logger.info("Also wrote legacy copy to %s", output_path)
     else:
         output_path = Path(args.output)
+        # A failed prepare (fork collision, clone error, etc.) yields 0 entries.
+        # Do NOT overwrite an existing, non-empty dataset with an empty list —
+        # that silently destroys a previously-good scoring artifact. Only write
+        # empty output when there is nothing to clobber.
+        if not entries and output_path.is_file():
+            try:
+                _prior = json.loads(output_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                _prior = None
+            if _prior:
+                logger.warning(
+                    "Prepared 0 entries; REFUSING to overwrite existing non-empty "
+                    "%s (%d prior entries kept). Fix the prepare failure above and retry.",
+                    output_path, len(_prior),
+                )
+                print_entries_summary(entries)
+                return
         output_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
         logger.info("Saved %d entries to %s", len(entries), output_path)
 

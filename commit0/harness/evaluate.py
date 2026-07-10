@@ -224,6 +224,11 @@ def main(
             logger.warning(
                 f"{name}: missing report.json ({reason}) — check {log_parent}"
             )
+            # Emit a machine-readable marker so downstream (run_pipeline.sh) can
+            # distinguish an EVAL INFRA CRASH (pytest never produced a report) from
+            # a legitimate 0% score. Without this the crashed eval's 0/N reads as
+            # "the model passed nothing", silently corrupting the recorded result.
+            print(f"PYTEST_INFRA_ERROR,{name},{reason}")
             out.append(
                 {
                     "name": name,
@@ -231,6 +236,7 @@ def main(
                     "passed": 0,
                     "num_passed": 0,
                     "num_tests": len(test_ids),
+                    "error": reason,
                 }
             )
             continue

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import ast
 import io
+import re
 import tokenize
 import logging
 import shutil
@@ -665,31 +666,54 @@ class StubTransformer:
         return removals
 
     def _fix_empty_classes(self, source: str, filename: str) -> str:
-        """After removing functions, replace empty class bodies with `pass`."""
-        try:
-            tree = ast.parse(source, filename=filename)
-        except SyntaxError as e:
-            logger.debug("SyntaxError in _minify_ast for %s: %s", filename, e)
-            return source
+        """After removing functions, insert `pass` into any block (class/def)
+        whose body was left empty.
 
+        Works TEXTUALLY and must NOT rely on ``ast.parse(source)``: the whole
+        point of this pass is to repair source that removing the last body
+        statement made *unparseable* (an empty class/def body is itself a
+        SyntaxError). The previous AST-based implementation caught that
+        SyntaxError and returned the source unchanged, so the emptied file
+        stayed broken and the caller reverted it to the un-stubbed original —
+        silently dropping those files from the stubbing.
+
+        Detection is dedent-based and therefore safe: for each block header line
+        (``class``/``def``/``async def`` that ends in ``:``), we find the next
+        non-blank, non-comment line; if it dedents to the header's indent or
+        less (or the file ends), the body is empty and we insert an indented
+        ``pass`` right after the header. Multi-line headers (a signature that
+        wraps across lines and ends in ``):`` on a later line) never match the
+        header regex, so they are left untouched rather than mis-edited.
+        """
         lines = source.splitlines(keepends=True)
-        fixes: list[tuple[int, str]] = []
+        # Header opens a block only if the *logical* line ends with ':' (ignoring
+        # a trailing comment). A single physical line ending in ':' is the common
+        # case; wrapped signatures are intentionally skipped (see docstring).
+        header_re = re.compile(r"^(\s*)(?:class|def|async\s+def)\b.*:\s*(?:#.*)?$")
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            non_pass = [s for s in node.body if not isinstance(s, ast.Pass)]
-            if non_pass:
-                continue
-            if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
-                continue
-            if not node.body:
-                body_line = node.end_lineno - 1 if node.end_lineno else node.lineno - 1
-                indent = self._get_indent(lines, node.lineno - 1) + "    "
-                fixes.append((body_line, f"{indent}pass\n"))
+        def _indent_width(s: str) -> int:
+            return len(s) - len(s.lstrip(" \t"))
 
-        for line_idx, replacement in sorted(fixes, reverse=True):
-            lines[line_idx : line_idx + 1] = [replacement]
+        insert_after: list[tuple[int, str]] = []
+        n = len(lines)
+        for i in range(n):
+            m = header_re.match(lines[i].rstrip("\n"))
+            if not m:
+                continue
+            hdr_indent = len(m.group(1))
+            j = i + 1
+            while j < n:
+                stripped = lines[j].strip()
+                if stripped == "" or stripped.startswith("#"):
+                    j += 1
+                    continue
+                break
+            body_empty = (j >= n) or (_indent_width(lines[j]) <= hdr_indent)
+            if body_empty:
+                insert_after.append((i, " " * (hdr_indent + 4) + "pass\n"))
+
+        for idx, text in sorted(insert_after, reverse=True):
+            lines.insert(idx + 1, text)
 
         return "".join(lines)
 
