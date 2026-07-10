@@ -559,6 +559,7 @@ EOF
 # ------------------------------------------------------------
 AGENT_ELAPSED=0
 AGENT_RC=0
+AGENT_NEEDS_RETRY=0
 
 run_agent_stage() {
     local stage_label="$1"
@@ -580,6 +581,17 @@ run_agent_stage() {
     end_time=$(date +%s)
     AGENT_ELAPSED=$(( end_time - start_time ))
     log "  Agent finished in ${AGENT_ELAPSED}s (rc=${AGENT_RC})"
+
+    # A module that exhausted its transient-error retries is left WITHOUT a .done
+    # marker plus a .needs_retry breadcrumb (agent/run_agent.py::_skip_failed_module),
+    # and the repo continues so other modules aren't discarded. Count them: the run
+    # is INCOMPLETE and needs --resume, so its eval must NOT be recorded as a clean
+    # measured result even if the parse looks OK (a missing non-core module can
+    # still leave a partial pass).
+    AGENT_NEEDS_RETRY=$(find "$LOG_BASE/${stage_label}" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${AGENT_NEEDS_RETRY:-0}" -gt 0 ]]; then
+        log "  WARNING: ${AGENT_NEEDS_RETRY} module(s) left .needs_retry (transient LLM error persisted through retries) — run is INCOMPLETE; use --resume to finish them."
+    fi
 }
 
 # ------------------------------------------------------------
@@ -673,14 +685,23 @@ run_evaluate() {
 
     parse_eval_output "$eval_log"   # sets EVAL_* incl. EVAL_STATUS=OK|NO_RESULTS
 
-    # Refine status from the eval process exit code. A non-zero rc with no
-    # parseable results is a broken eval, NOT a 0% score.
-    if [[ "$EVAL_STATUS" != "OK" ]]; then
+    # Refine status from the eval process exit code, but ONLY when parsing found
+    # no results at all — a non-zero rc with no parseable rows is a broken eval,
+    # NOT a 0% score. A parsed COMPILE_FAILED/OUTPUT_MISSING is a real (excluded)
+    # outcome and must be preserved, not clobbered into EVAL_FAILED.
+    if [[ "$EVAL_STATUS" == "NO_RESULTS" ]]; then
         if [[ $eval_rc -eq 124 ]]; then
             EVAL_STATUS="EVAL_TIMEOUT"
         elif [[ $eval_rc -ne 0 ]]; then
             EVAL_STATUS="EVAL_FAILED"
         fi
+    fi
+
+    # An incomplete run (a module left .needs_retry) is not a clean measurement,
+    # even when the eval parsed OK — flag it so the recorded score is treated as
+    # partial/resumable, not final. A worse status (COMPILE_FAILED/EVAL_*) is kept.
+    if [[ "${AGENT_NEEDS_RETRY:-0}" -gt 0 && "$EVAL_STATUS" == "OK" ]]; then
+        EVAL_STATUS="INCOMPLETE_NEEDS_RETRY"
     fi
 
     if [[ $eval_rc -ne 0 || "$EVAL_STATUS" != "OK" ]]; then
@@ -848,14 +869,23 @@ parse_eval_output() {
     local total_passed=0
     local total_tests=0
     local found_any="false"
+    local row_status=""
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         [[ "$line" == repo,* ]] && continue
         # A data row has "<repo>,<compile_errors>,<passed>/<total>[,status]".
         if [[ "$line" == *","*"/"* ]]; then
-            local passed_total passed total
+            local passed_total passed total _st
             passed_total=$(echo "$line" | cut -d',' -f3 | tr -d ' ')
+            # 4th column = per-repo status (TESTS_RAN on success; COMPILE_FAILED /
+            # OUTPUT_MISSING when the build broke or a module never completed, e.g.
+            # a .needs_retry that timed out). Any non-TESTS_RAN status means 0/N is
+            # NOT a genuine model score — surface it so eval_status isn't a bogus OK.
+            _st=$(echo "$line" | cut -d',' -f4 | tr -d ' ')
+            if [[ -n "$_st" && "$_st" != "TESTS_RAN" ]]; then
+                row_status="$_st"
+            fi
             if [[ "$passed_total" == *"/"* ]]; then
                 passed=$(echo "$passed_total" | cut -d'/' -f1)
                 total=$(echo "$passed_total" | cut -d'/' -f2)
@@ -869,7 +899,14 @@ parse_eval_output() {
     done < "$eval_file"
 
     if [[ "$found_any" == "true" ]]; then
-        EVAL_STATUS="OK"
+        # A parsed COMPILE_FAILED/OUTPUT_MISSING row means the 0/N is a build/infra
+        # failure (not a real 0% model score); propagate it so downstream never
+        # reads it as a legit result. TESTS_RAN (or an old statusless row) -> OK.
+        if [[ -n "$row_status" ]]; then
+            EVAL_STATUS="$row_status"
+        else
+            EVAL_STATUS="OK"
+        fi
         EVAL_NUM_PASSED="$total_passed"
         EVAL_NUM_TESTS="$total_tests"
         if [[ "$total_tests" -gt 0 ]]; then
