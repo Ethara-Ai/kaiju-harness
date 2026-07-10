@@ -40,6 +40,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Failure-attribution constants — mirror evaluate_go.py / evaluate_rust.py.
+# Surfaced via the `status` field on each `out` entry so downstream summarisers
+# can distinguish a REAL test outcome from a pipeline failure the harness must
+# NOT silently report as a clean 0/N model score.
+OUTCOME_TESTS_RAN = "TESTS_RAN"                    # CTest reached the test phase
+OUTCOME_COMPILE_FAILED = "COMPILE_FAILED"          # build error; tests never ran
+OUTCOME_OUTPUT_MISSING = "OUTPUT_MISSING"          # test_report.xml absent / infra
+
+# Statuses that are NOT a measured model score — excluded from the average and
+# reported at 0.0 (never trusted), matching evaluate_go.py.
+_EXCLUDED_STATUSES = {
+    OUTCOME_COMPILE_FAILED,
+    OUTCOME_OUTPUT_MISSING,
+}
+
 
 def _preflight_check_images(specs: list, backend: str) -> list[str]:
     if backend.upper() != "LOCAL":
@@ -222,6 +237,13 @@ def main(
         compile_errors = _read_compile_errors_count(name)
 
         if not os.path.exists(xml_path):
+            # A missing test_report.xml is NOT a genuine 0% model score. Attribute
+            # it: a build error (compile_errors>0) is COMPILE_FAILED; otherwise a
+            # container/infra failure is OUTPUT_MISSING. Both are excluded from the
+            # average below (mirrors evaluate_go.py) so they never masquerade as 0/N.
+            status = (
+                OUTCOME_COMPILE_FAILED if compile_errors > 0 else OUTCOME_OUTPUT_MISSING
+            )
             reason = "compile_failed" if compile_errors > 0 else "container_or_infra_failure"
             logger.warning(
                 "%s: missing test_report.xml (%s) -- check %s",
@@ -237,6 +259,7 @@ def main(
                     "num_passed": 0,
                     "num_tests": len(test_ids_flat),
                     "compile_errors": compile_errors,
+                    "status": status,
                 }
             )
             continue
@@ -291,19 +314,49 @@ def main(
                 "num_passed": num_passed,
                 "num_tests": total_tests,
                 "compile_errors": compile_errors,
+                # test_report.xml present + parsed ⇒ tests actually ran.
+                "status": OUTCOME_TESTS_RAN,
             }
         )
 
-    print("repo,compile_errors,num_passed/num_tests")
+    print("repo,compile_errors,num_passed/num_tests,status")
     out = sorted(out, key=lambda x: x["passed"], reverse=True)
     for x in out:
-        print(f"{x['name']},{x['compile_errors']},{x['num_passed']}/{x['num_tests']}")
-    averaged_passed = sum(x["passed"] for x in out) / len(out) if out else 0.0
+        status = x.get("status", "")
+        print(
+            f"{x['name']},{x['compile_errors']},"
+            f"{x['num_passed']}/{x['num_tests']},{status}"
+        )
     mean_compile_errors = (
         sum(x["compile_errors"] for x in out) / len(out) if out else 0.0
     )
+    # An infra-broken / compile-failed run is NOT a measured model score — its
+    # 0.0 must not drag the average down like a genuine 0%. Average over SCORED
+    # repos only and report how many were excluded (mirrors evaluate_go.py).
+    scored = [x for x in out if x.get("status") not in _EXCLUDED_STATUSES]
+    excluded = len(out) - len(scored)
+    averaged_passed = (
+        sum(x["passed"] for x in scored) / len(scored) if scored else 0.0
+    )
     print(f"average pass rate: {averaged_passed}")
     print(f"mean compile_errors: {mean_compile_errors}")
+    if excluded:
+        print(
+            f"NOTE: {excluded}/{len(out)} repo(s) EXCLUDED from the average "
+            f"(compile-failed / infra-missing — not a measured model score)."
+        )
+
+    # Status breakdown so a 0/N is legible as compile-failed / infra-missing /
+    # genuinely-zero rather than a bare number.
+    status_counts: dict = {}
+    for x in out:
+        s = x.get("status", "UNCLASSIFIED")
+        status_counts[s] = status_counts.get(s, 0) + 1
+    if status_counts:
+        print(
+            "status breakdown: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(status_counts.items()))
+        )
     logger.info(
         "C evaluation complete: %d repos, avg pass rate %.2f%%, mean compile_errors %.2f",
         len(out),

@@ -1143,11 +1143,14 @@ PYEOF
     source_part="${result#* }"
     if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
         if [[ "${source_part:-none}" == "none" ]]; then
-            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run."
+            # Redirect to stderr: callers capture this function's stdout via
+            # $(...); a log line on stdout would contaminate the "<cost> <source>"
+            # payload and break the downstream jq --argjson.
+            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run." >&2
         fi
         echo "$cost_part ${source_part:-none}"
     else
-        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000."
+        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000." >&2
         echo "0.0000 parse_error"
     fi
 }

@@ -45,7 +45,7 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
-USE_SPEC_INFO="false"
+USE_SPEC_INFO="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -75,7 +75,7 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3
-  --use-spec-info            Enable spec doc provisioning (disabled by default for C)
+  --no-spec-info             Disable spec doc provisioning (enabled by default, matching go/rust)
   --inactivity-timeout <s>   Kill agent if no log activity for N seconds (default: 900)
   --max-wall-time  <secs>    Absolute per-stage wall-time cap (default: 86400)
   --num-samples    <n>       Number of independent samples (default: 1)
@@ -103,6 +103,7 @@ while [[ $# -gt 0 ]]; do
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2"; shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --use-spec-info) USE_SPEC_INFO="true"; shift ;;
+        --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -511,60 +512,206 @@ EOP
         --max-test-output-length "$MAX_TEST_OUTPUT_LENGTH" \
         --agent-config-file "$AGENT_CONFIG" \
         <<< "$user_prompt" > /dev/null
-    # Append anti-leakage flags (not in config_c CLI)
+    # Append anti-leakage flags (not in config_c CLI) plus trajectory-capture
+    # flags. capture_thinking/output_jsonl are OFF by default in class_types, so
+    # without these the C agent writes NO per-module output.json / turns.jsonl /
+    # trajectory.md (mirrors run_pipeline_go.sh:497-499 which sets them ON).
     cat >> "$AGENT_CONFIG" <<EOF
 blind_lint: ${BLIND_LINT}
 blind_tests: ${BLIND_TESTS}
 names_only_tests: ${NAMES_ONLY_TESTS}
 strip_non_stubs: ${STRIP_NON_STUBS}
 inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
+capture_thinking: true
+trajectory_md: true
+output_jsonl: true
 EOF
 }
 
 # ------------------------------------------------------------
 # Agent + eval invocation
 # ------------------------------------------------------------
+AGENT_ELAPSED=0
+AGENT_RC=0
+
 run_agent_stage() {
     local stage_label="$1"
     local agent_config="$2"
 
     log "Stage [${stage_label}]: invoking agent.config_c run on branch=${BRANCH_NAME}"
+    local start_time
+    start_time=$(date +%s)
+    set +e
     "$VENV_PYTHON" -m agent.config_c run "$BRANCH_NAME" \
         --backend "$BACKEND" \
         --agent-config-file "$agent_config" \
         --commit0-config-file "$COMMIT0_CONFIG" \
         --log-dir "$LOG_BASE/${stage_label}" \
         --max-parallel-repos "$MAX_PARALLEL_REPOS"
+    AGENT_RC=$?
+    set -e
+    local end_time
+    end_time=$(date +%s)
+    AGENT_ELAPSED=$(( end_time - start_time ))
+    log "  Agent finished in ${AGENT_ELAPSED}s (rc=${AGENT_RC})"
+}
+
+# ------------------------------------------------------------
+# Eval globals (mirror run_pipeline_go.sh) — populated by run_evaluate /
+# parse_eval_output so each stage records the full canonical result.
+# ------------------------------------------------------------
+EVAL_NUM_PASSED=0
+EVAL_NUM_TESTS=0
+EVAL_PASS_RATE="0.0"
+EVAL_COMPILE_ERRORS="0"
+EVAL_ELAPSED=0
+# Distinguishes a real "0 of N passed" from "eval did not run". Values:
+# OK | NO_RESULTS | EVAL_FAILED | EVAL_TIMEOUT.
+EVAL_STATUS="OK"
+
+# Evaluate a bc expression and emit JSON-safe output (re-add a leading 0 that bc
+# drops on values < 1, which jq --argjson rejects). Mirrors run_pipeline_go.sh.
+bc_json() {
+    local _out
+    _out=$(echo "$1" | bc) || return 1
+    printf '%s\n' "$_out" | sed -E 's/^(-?)\./\10./'
+}
+
+# Preserve per-repo eval artifacts into the run's output tree. The C harness
+# writes test_report.xml / compile_errors.txt / *_exit_code.txt / eval.sh /
+# patch.diff under logs/c_test*/<repo>/<BRANCH_NAME>/<hash>/, which is NOT under
+# outputs/<uuid>/ and is lost on teardown — leaving a COMPILE_FAILED undebuggable.
+# Copied per stage so each keeps its own snapshot. Mirrors run_pipeline_go.sh.
+collect_eval_artifacts() {
+    local stage_label="${1:-eval}"
+    [[ -n "${LOG_BASE:-}" && -n "${BRANCH_NAME:-}" ]] || return 0
+    local dest="${LOG_BASE}/${stage_label}_eval_artifacts"
+    local bdir hdir repo out found=0
+    shopt -s nullglob
+    for bdir in logs/*_test*/*/"${BRANCH_NAME}"; do
+        [[ -d "$bdir" ]] || continue
+        repo=$(basename "$(dirname "$bdir")")
+        for hdir in "$bdir"/*/; do
+            [[ -d "$hdir" ]] || continue
+            out="${dest}/${repo}"
+            mkdir -p "$out"
+            find "$hdir" -maxdepth 1 -type f \( \
+                -name 'test_output.txt' -o -name 'test_output.json' \
+                -o -name 'test_report.xml' -o -name 'compile_errors.txt' \
+                -o -name '*_exit_code.txt' -o -name 'eval.sh' \
+                -o -name 'patch.diff' -o -name '*stderr.log' \
+                -o -name 'report.*' -o -name 'test_results.json' \
+                \) -exec cp -f {} "$out/" \; 2>/dev/null || true
+            found=1
+        done
+    done
+    shopt -u nullglob
+    [[ "$found" == "1" ]] && log "  Eval artifacts -> ${dest}" || true
+    return 0
 }
 
 run_evaluate() {
     local stage_label="$1"
+    local eval_log="${LOG_BASE}/${stage_label}_eval.log"
     log "Stage [${stage_label}]: running 'commit0-c evaluate' (timeout=${EVAL_TIMEOUT}s)"
-    "$VENV_PYTHON" -m commit0.cli_c evaluate \
+
+    local start_time
+    start_time=$(date +%s)
+
+    # Redirect (not tee) + wrap in timeout so the real eval rc is preserved (tee
+    # would mask it) and a hung eval is bounded/classified. Mirrors go.
+    set +e
+    timeout "$EVAL_TIMEOUT" "$VENV_PYTHON" -m commit0.cli_c evaluate \
         --branch "$BRANCH_NAME" \
         --backend "$BACKEND" \
         --timeout "$EVAL_TIMEOUT" \
         --commit0-config-file "$COMMIT0_CONFIG" \
-        | tee "$LOG_BASE/${stage_label}_eval.txt"
+        >"$eval_log" 2>&1
+    local eval_rc=$?
+    set -e
+
+    local end_time
+    end_time=$(date +%s)
+    EVAL_ELAPSED=$(( end_time - start_time ))
+    log "  Evaluation finished in ${EVAL_ELAPSED}s (rc=${eval_rc})"
+
+    collect_eval_artifacts "${stage_label}"
+
+    parse_eval_output "$eval_log"   # sets EVAL_* incl. EVAL_STATUS=OK|NO_RESULTS
+
+    # Refine status from the eval process exit code. A non-zero rc with no
+    # parseable results is a broken eval, NOT a 0% score.
+    if [[ "$EVAL_STATUS" != "OK" ]]; then
+        if [[ $eval_rc -eq 124 ]]; then
+            EVAL_STATUS="EVAL_TIMEOUT"
+        elif [[ $eval_rc -ne 0 ]]; then
+            EVAL_STATUS="EVAL_FAILED"
+        fi
+    fi
+
+    if [[ $eval_rc -ne 0 || "$EVAL_STATUS" != "OK" ]]; then
+        log "  Evaluation issue (rc=${eval_rc}, status=${EVAL_STATUS}) — last 10 lines:"
+        tail -10 "$eval_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
+    fi
 }
 
 # ------------------------------------------------------------
 # Results JSON
 # ------------------------------------------------------------
+RESULTS_JSON=""
+
 init_results() {
-    cat > "$PIPELINE_LOG" <<EOF
-{
-    "run_id": "$RUN_ID",
-    "model": "$MODEL_NAME",
-    "model_short": "$MODEL_SHORT",
-    "dataset": "$DATASET_FILE",
-    "repo_split": "$REPO_SPLIT",
-    "branch": "$BRANCH_NAME",
-    "backend": "$BACKEND",
-    "language": "c",
-    "stages": {}
+    RESULTS_JSON=$(jq -n \
+        --arg run_id "$RUN_ID" \
+        --arg model "$MODEL_SHORT" \
+        --arg model_short "$MODEL_SHORT" \
+        --arg branch "$BRANCH_NAME" \
+        --arg backend "$BACKEND" \
+        --arg repo_split "$REPO_SPLIT" \
+        --arg dataset "$DATASET_FILE" \
+        --arg dataset_short "$DATASET_SHORT" \
+        --argjson max_iter "$MAX_ITERATION" \
+        --arg cache_prompts "true" \
+        --arg start_time "$(ts)" \
+        --arg language "c" \
+        '{
+            language: $language,
+            run_id: $run_id,
+            model: $model,
+            model_short: $model_short,
+            branch: $branch,
+            backend: $backend,
+            repo_split: $repo_split,
+            dataset: $dataset,
+            dataset_short: $dataset_short,
+            max_iteration: $max_iter,
+            cache_prompts: $cache_prompts,
+            start_time: $start_time
+        }')
+    save_results
 }
-EOF
+
+save_results() {
+    mkdir -p "$(dirname "$PIPELINE_LOG")"
+    # Atomic write: write to a temp file, validate non-empty valid JSON, then
+    # rename. Keeps a prior good run intact if jq fails. Mirrors go.
+    local _tmp="${PIPELINE_LOG}.tmp.$$"
+    if echo "$RESULTS_JSON" | jq '.' > "$_tmp" 2>/dev/null && [[ -s "$_tmp" ]]; then
+        [[ -f "$PIPELINE_LOG" ]] && cp -f "$PIPELINE_LOG" "${PIPELINE_LOG}.bak" 2>/dev/null || true
+        mv -f "$_tmp" "$PIPELINE_LOG"
+    else
+        rm -f "$_tmp" 2>/dev/null || true
+        log "  WARNING: save_results produced invalid/empty JSON — kept previous ${PIPELINE_LOG} intact"
+        return 1
+    fi
+}
+
+format_pct() {
+    local val="$1"
+    if ! [[ "$val" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
+        val=0
+    fi
+    printf "%.1f%%" "$(echo "$val * 100" | bc)"
 }
 
 # A $0.0000 result is ambiguous — it could be a genuinely free stage OR a silent
@@ -639,46 +786,81 @@ PYEOF
     source_part="${result#* }"
     if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
         if [[ "${source_part:-none}" == "none" ]]; then
-            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run."
+            # Redirect to stderr: this function's stdout is captured via $(...)
+            # by the stage functions; a log line on stdout would be prepended to
+            # the "<cost> <source>" payload and break the downstream jq --argjson.
+            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run." >&2
         fi
         echo "$cost_part ${source_part:-none}"
     else
-        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000."
+        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000." >&2
         echo "0.0000 parse_error"
     fi
 }
 
-record_stage() {
-    local stage_label="$1"
-    # $2 is "<cost> <source>" from extract_all_stage_costs; split it so the JSON
-    # records both the numeric cost and where it came from (output_json / aider
-    # fallback / none), disambiguating a genuinely free stage from an extraction
-    # failure.
-    local cost_and_source="$2"
-    local cost_usd="${cost_and_source%% *}"
-    local cost_source="${cost_and_source#* }"
-    local pass_rate="$3"
-    local compile_errors="$4"
-
-    local tmp
-    tmp=$(mktemp)
-    jq --arg s "$stage_label" \
-       --argjson c "$cost_usd" \
-       --arg cost_source "$cost_source" \
-       --argjson p "$pass_rate" \
-       --argjson e "$compile_errors" \
-       '.stages[$s] = {"cost_usd": $c, "cost_source": $cost_source, "pass_rate": $p, "mean_compile_errors": $e}' \
-       "$PIPELINE_LOG" > "$tmp" && mv "$tmp" "$PIPELINE_LOG"
-}
-
+# Parse the C evaluate output. CSV shape (evaluate_c.py):
+#   repo,compile_errors,num_passed/num_tests,status
+# Sums num_passed / num_tests across repos (mirrors go's parse), reads the
+# summary "average pass rate" + "mean compile_errors" lines, and sets
+# EVAL_STATUS=OK|NO_RESULTS so a broken eval never masquerades as a 0/N score.
 parse_eval_output() {
     local eval_file="$1"
-    local pass_rate
-    local compile_errors
-    pass_rate=$(grep -oE 'average pass rate: [0-9.]+' "$eval_file" | tail -n1 | awk '{print $NF}' || echo 0)
-    compile_errors=$(grep -oE 'mean compile_errors: [0-9.]+' "$eval_file" | tail -n1 | awk '{print $NF}' || echo 0)
-    PASS_RATE="${pass_rate:-0}"
-    COMPILE_ERRORS="${compile_errors:-0}"
+
+    EVAL_NUM_PASSED=0
+    EVAL_NUM_TESTS=0
+    EVAL_PASS_RATE="0.0"
+    EVAL_COMPILE_ERRORS="0"
+
+    local total_passed=0
+    local total_tests=0
+    local found_any="false"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        [[ "$line" == repo,* ]] && continue
+        # A data row has "<repo>,<compile_errors>,<passed>/<total>[,status]".
+        if [[ "$line" == *","*"/"* ]]; then
+            local passed_total passed total
+            passed_total=$(echo "$line" | cut -d',' -f3 | tr -d ' ')
+            if [[ "$passed_total" == *"/"* ]]; then
+                passed=$(echo "$passed_total" | cut -d'/' -f1)
+                total=$(echo "$passed_total" | cut -d'/' -f2)
+                if [[ "$passed" =~ ^[0-9]+$ ]] && [[ "$total" =~ ^[0-9]+$ ]]; then
+                    total_passed=$((total_passed + passed))
+                    total_tests=$((total_tests + total))
+                    found_any="true"
+                fi
+            fi
+        fi
+    done < "$eval_file"
+
+    if [[ "$found_any" == "true" ]]; then
+        EVAL_STATUS="OK"
+        EVAL_NUM_PASSED="$total_passed"
+        EVAL_NUM_TESTS="$total_tests"
+        if [[ "$total_tests" -gt 0 ]]; then
+            EVAL_PASS_RATE=$(bc_json "scale=6; $total_passed / $total_tests")
+        fi
+    else
+        EVAL_STATUS="NO_RESULTS"
+    fi
+
+    # Prefer the harness-computed (excluded-aware) average pass rate when present.
+    local avg_line rate
+    avg_line=$(grep -i "average pass rate:" "$eval_file" | tail -n1 || true)
+    if [[ -n "$avg_line" ]]; then
+        rate=$(echo "$avg_line" | awk -F':' '{print $NF}' | tr -d ' ')
+        if [[ -n "$rate" ]] && [[ "$rate" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            EVAL_PASS_RATE="$rate"
+        fi
+    fi
+
+    local ce_line ce
+    ce_line=$(grep -oE 'mean compile_errors: [0-9.]+' "$eval_file" | tail -n1 || true)
+    if [[ -n "$ce_line" ]]; then
+        ce=$(echo "$ce_line" | awk '{print $NF}')
+        [[ "$ce" =~ ^[0-9]+(\.[0-9]+)?$ ]] && EVAL_COMPILE_ERRORS="$ce"
+    fi
 }
 
 # ------------------------------------------------------------
@@ -688,20 +870,96 @@ stage_1_draft() {
     log "===== Stage 1: Draft (no lint, no tests) ====="
     write_agent_config "draft" false false true
     run_agent_stage "stage1_draft" "$AGENT_CONFIG"
-    run_evaluate "stage1_draft"
-    parse_eval_output "$LOG_BASE/stage1_draft_eval.txt"
-    record_stage "stage1_draft" "$(extract_all_stage_costs "$LOG_BASE/stage1_draft")" "$PASS_RATE" "$COMPILE_ERRORS"
-    log "Stage 1 complete: pass_rate=$PASS_RATE compile_errors=$COMPILE_ERRORS"
+    local elapsed="$AGENT_ELAPSED"
+    local rc="$AGENT_RC"
+
+    local _co cost cost_source
+    _co=$(extract_all_stage_costs "$LOG_BASE/stage1_draft")
+    cost="${_co%% *}"; cost_source="${_co#* }"
+    log "  Stage 1 cost: \$${cost} (source: ${cost_source})"
+
+    run_evaluate "stage1"
+    local eval_time="$EVAL_ELAPSED"
+    log "  Stage 1 results: ${EVAL_NUM_PASSED}/${EVAL_NUM_TESTS} ($(format_pct "$EVAL_PASS_RATE"))"
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --arg name "Draft (no feedback)" \
+        --argjson elapsed "$elapsed" \
+        --argjson eval_time "$eval_time" \
+        --argjson cost "$cost" \
+        --arg cost_source "$cost_source" \
+        --argjson rc "$rc" \
+        --argjson num_passed "$EVAL_NUM_PASSED" \
+        --argjson num_tests "$EVAL_NUM_TESTS" \
+        --argjson pass_rate "$EVAL_PASS_RATE" \
+        --argjson compile_errors "$EVAL_COMPILE_ERRORS" \
+        --arg eval_status "$EVAL_STATUS" \
+        '.stage1 = {
+            name: $name,
+            elapsed_s: $elapsed,
+            eval_time_s: $eval_time,
+            cost_usd: $cost,
+            cost_source: $cost_source,
+            returncode: $rc,
+            num_passed: $num_passed,
+            num_tests: $num_tests,
+            pass_rate: $pass_rate,
+            mean_compile_errors: $compile_errors,
+            eval_status: $eval_status
+        }')
+    save_results
+    log "Stage 1 complete: pass_rate=$EVAL_PASS_RATE compile_errors=$EVAL_COMPILE_ERRORS"
 }
 
 stage_2_lint_refine() {
     log "===== Stage 2: Lint refine (clang-tidy + cppcheck) ====="
     write_agent_config "lint" true false true
     run_agent_stage "stage2_lint" "$AGENT_CONFIG"
-    run_evaluate "stage2_lint"
-    parse_eval_output "$LOG_BASE/stage2_lint_eval.txt"
-    record_stage "stage2_lint" "$(extract_all_stage_costs "$LOG_BASE/stage2_lint")" "$PASS_RATE" "$COMPILE_ERRORS"
-    log "Stage 2 complete: pass_rate=$PASS_RATE compile_errors=$COMPILE_ERRORS"
+    local elapsed="$AGENT_ELAPSED"
+    local rc="$AGENT_RC"
+
+    local s1_cost
+    s1_cost=$(echo "$RESULTS_JSON" | jq -r '.stage1.cost_usd // 0')
+    local _co s2_incremental cost_source
+    _co=$(extract_all_stage_costs "$LOG_BASE/stage2_lint")
+    s2_incremental="${_co%% *}"; cost_source="${_co#* }"
+    local total_cost
+    total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental")
+    log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
+
+    run_evaluate "stage2"
+    local eval_time="$EVAL_ELAPSED"
+    log "  Stage 2 results: ${EVAL_NUM_PASSED}/${EVAL_NUM_TESTS} ($(format_pct "$EVAL_PASS_RATE"))"
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --arg name "Lint refine (clang-tidy+cppcheck)" \
+        --argjson elapsed "$elapsed" \
+        --argjson eval_time "$eval_time" \
+        --argjson cost_inc "$s2_incremental" \
+        --argjson cost_cum "$total_cost" \
+        --arg cost_source "$cost_source" \
+        --argjson rc "$rc" \
+        --argjson num_passed "$EVAL_NUM_PASSED" \
+        --argjson num_tests "$EVAL_NUM_TESTS" \
+        --argjson pass_rate "$EVAL_PASS_RATE" \
+        --argjson compile_errors "$EVAL_COMPILE_ERRORS" \
+        --arg eval_status "$EVAL_STATUS" \
+        '.stage2 = {
+            name: $name,
+            elapsed_s: $elapsed,
+            eval_time_s: $eval_time,
+            cost_usd_incremental: $cost_inc,
+            cost_usd_cumulative: $cost_cum,
+            cost_source: $cost_source,
+            returncode: $rc,
+            num_passed: $num_passed,
+            num_tests: $num_tests,
+            pass_rate: $pass_rate,
+            mean_compile_errors: $compile_errors,
+            eval_status: $eval_status
+        }')
+    save_results
+    log "Stage 2 complete: pass_rate=$EVAL_PASS_RATE compile_errors=$EVAL_COMPILE_ERRORS"
 }
 
 stage_3_test_refine() {
@@ -710,10 +968,51 @@ stage_3_test_refine() {
     [[ "$NO_STAGE3_LINT" == "true" ]] && lint_info="false"
     write_agent_config "test" "$lint_info" true false
     run_agent_stage "stage3_test" "$AGENT_CONFIG"
-    run_evaluate "stage3_test"
-    parse_eval_output "$LOG_BASE/stage3_test_eval.txt"
-    record_stage "stage3_test" "$(extract_all_stage_costs "$LOG_BASE/stage3_test")" "$PASS_RATE" "$COMPILE_ERRORS"
-    log "Stage 3 complete: pass_rate=$PASS_RATE compile_errors=$COMPILE_ERRORS"
+    local elapsed="$AGENT_ELAPSED"
+    local rc="$AGENT_RC"
+
+    local s2_cumulative
+    s2_cumulative=$(echo "$RESULTS_JSON" | jq -r '.stage2.cost_usd_cumulative // 0')
+    local _co s3_incremental cost_source
+    _co=$(extract_all_stage_costs "$LOG_BASE/stage3_test")
+    s3_incremental="${_co%% *}"; cost_source="${_co#* }"
+    local total_cost
+    total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental")
+    log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
+
+    run_evaluate "stage3"
+    local eval_time="$EVAL_ELAPSED"
+    log "  Stage 3 results: ${EVAL_NUM_PASSED}/${EVAL_NUM_TESTS} ($(format_pct "$EVAL_PASS_RATE"))"
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --arg name "Test refine (CTest feedback)" \
+        --argjson elapsed "$elapsed" \
+        --argjson eval_time "$eval_time" \
+        --argjson cost_inc "$s3_incremental" \
+        --argjson cost_cum "$total_cost" \
+        --arg cost_source "$cost_source" \
+        --argjson rc "$rc" \
+        --argjson num_passed "$EVAL_NUM_PASSED" \
+        --argjson num_tests "$EVAL_NUM_TESTS" \
+        --argjson pass_rate "$EVAL_PASS_RATE" \
+        --argjson compile_errors "$EVAL_COMPILE_ERRORS" \
+        --arg eval_status "$EVAL_STATUS" \
+        '.stage3 = {
+            name: $name,
+            elapsed_s: $elapsed,
+            eval_time_s: $eval_time,
+            cost_usd_incremental: $cost_inc,
+            cost_usd_cumulative: $cost_cum,
+            cost_source: $cost_source,
+            returncode: $rc,
+            num_passed: $num_passed,
+            num_tests: $num_tests,
+            pass_rate: $pass_rate,
+            mean_compile_errors: $compile_errors,
+            eval_status: $eval_status
+        }')
+    save_results
+    log "Stage 3 complete: pass_rate=$EVAL_PASS_RATE compile_errors=$EVAL_COMPILE_ERRORS"
 }
 
 cleanup() {
@@ -745,9 +1044,8 @@ run_single_sample() {
 
     mkdir -p "$LOG_BASE"
     exec > >(tee -a "$LOG_BASE/pipeline.log") 2>&1
-    init_results
 
-    if [[ "$sample_idx" -eq 0 ]]; then
+    if [[ "$sample_idx" -eq 1 ]]; then
         preflight
         ensure_spec_docs_c
         if ! verify_spec_docs_c; then
@@ -755,24 +1053,51 @@ run_single_sample() {
         fi
     fi
 
+    # When skipping to a later stage, load the prior results into RESULTS_JSON so
+    # stage2/stage3 can read the prior cumulative cost; otherwise start fresh.
+    if [[ -n "${SKIP_TO_STAGE:-}" ]] && [[ "${SKIP_TO_STAGE}" != "1" ]]; then
+        if [[ ! -f "$PIPELINE_LOG" ]]; then
+            log "ERROR: Cannot skip to stage ${SKIP_TO_STAGE}: no prior results at ${PIPELINE_LOG}"
+            return 1
+        fi
+        RESULTS_JSON=$(cat "$PIPELINE_LOG")
+        log "  Loaded prior results from: ${PIPELINE_LOG}"
+    else
+        init_results
+    fi
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --argjson sample_idx "$sample_idx" \
+        --argjson num_samples "$NUM_SAMPLES" \
+        '.sample_index = $sample_idx | .num_samples = $num_samples')
+
+    local pipeline_error=""
+
     case "${SKIP_TO_STAGE:-}" in
         ""|1)
-            stage_1_draft
-            stage_2_lint_refine
-            stage_3_test_refine
+            stage_1_draft || pipeline_error="Stage 1 failed"
+            [[ -z "$pipeline_error" ]] && { stage_2_lint_refine || pipeline_error="Stage 2 failed"; }
+            [[ -z "$pipeline_error" ]] && { stage_3_test_refine || pipeline_error="Stage 3 failed"; }
             ;;
         2)
-            stage_2_lint_refine
-            stage_3_test_refine
+            stage_2_lint_refine || pipeline_error="Stage 2 failed"
+            [[ -z "$pipeline_error" ]] && { stage_3_test_refine || pipeline_error="Stage 3 failed"; }
             ;;
         3)
-            stage_3_test_refine
+            stage_3_test_refine || pipeline_error="Stage 3 failed"
             ;;
         *)
             echo "Error: invalid --skip-to-stage value '${SKIP_TO_STAGE}'"
             exit 1
             ;;
     esac
+
+    if [[ -n "$pipeline_error" ]]; then
+        log "PIPELINE ERROR: ${pipeline_error}"
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg err "$pipeline_error" '.error = $err')
+    fi
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg end_ts "$(ts)" '.end_time = $end_ts')
+    save_results
 
     cleanup
     log "Pipeline complete. Results: $PIPELINE_LOG"
@@ -790,9 +1115,10 @@ run_single_sample() {
 
 main() {
     mkdir -p "${BASE_DIR}/logs"
-    for ((i = 0; i < NUM_SAMPLES; i++)); do
-        log "===== Sample ${i} / ${NUM_SAMPLES} ====="
-        run_single_sample "$i"
+    # 1-indexed (mirrors run_pipeline_go.sh) so the first sample lands in run_1.
+    for sample_idx in $(seq 1 "$NUM_SAMPLES"); do
+        log "===== Sample ${sample_idx} / ${NUM_SAMPLES} ====="
+        run_single_sample "$sample_idx"
     done
 }
 
