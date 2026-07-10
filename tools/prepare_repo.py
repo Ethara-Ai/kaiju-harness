@@ -50,7 +50,13 @@ DEFAULT_ORG = "Zahgon"
 # Import stub module
 TOOLS_DIR = Path(__file__).parent
 sys.path.insert(0, str(TOOLS_DIR.parent))
-from tools.stub import StubTransformer, is_test_file, collect_import_time_names
+from tools.stub import (
+    StubTransformer,
+    is_test_file,
+    should_skip_file,
+    collect_import_time_names,
+    collect_test_imported_names,
+)
 from tools.python_version import (
     NoSignalsError,
     VersionConflictError,
@@ -321,10 +327,24 @@ def create_stubbed_branch(
             len(import_time_names),
             ", ".join(sorted(import_time_names)[:15]),
         )
+    # Names the TEST suite imports from the package must survive stubbing as
+    # stubs (signature kept) — deleting an undocumented one (combined mode)
+    # would break test collection with an ImportError -> false 0/N.
+    keep_as_stub_names = collect_test_imported_names(repo_dir, {stub_target.name})
+    # import-time names are fully preserved, so they take precedence; only the
+    # rest need force-stubbing.
+    keep_as_stub_names -= import_time_names
+    if keep_as_stub_names:
+        logger.info(
+            "  Keeping %d test-imported name(s) as stubs: %s",
+            len(keep_as_stub_names),
+            ", ".join(sorted(keep_as_stub_names)[:15]),
+        )
     stubber = StubTransformer(
         keep_docstrings=False,
         removal_mode=removal_mode,
         import_time_names=import_time_names,
+        keep_as_stub_names=keep_as_stub_names,
     )
 
     stubbed_count = 0
@@ -338,7 +358,13 @@ def create_stubbed_branch(
     for py_file in py_files:
         rel = py_file.relative_to(repo_dir)
 
-        if is_test_file(py_file):
+        # Skip entry-point / package-structure files (__init__.py, __main__.py,
+        # conftest.py) as well as test files — matching the CLI stub path
+        # (should_skip_file). __main__.py in particular is an entry point the
+        # test suite often imports from (`from pkg.__main__ import parse_args`);
+        # stubbing it can DELETE those undocumented helpers and break test
+        # collection with an ImportError -> false 0/N.
+        if should_skip_file(py_file):
             continue
 
         try:

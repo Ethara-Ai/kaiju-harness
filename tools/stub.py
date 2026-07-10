@@ -61,6 +61,7 @@ def is_test_file(path: Path) -> bool:
     return (
         name.startswith("test_")
         or name.endswith("_test.py")
+        or name in ("test.py", "tests.py")
         or name == "conftest.py"
         or "/tests/" in str(path)
         or "/test/" in str(path)
@@ -123,6 +124,36 @@ def _is_main_guard(node: ast.If) -> bool:
             if isinstance(comp, ast.Constant) and comp.value == "__main__":
                 return True
     return False
+
+
+def collect_test_imported_names(repo_dir: Path, package_names: set[str]) -> set[str]:
+    """Names imported FROM the stubbed package by the test suite.
+
+    Scans every test file for ``from <package>... import a, b`` and records the
+    bound names.  Such names are the public surface the tests bind at import
+    time (e.g. python-slugify's ``from slugify.__main__ import parse_args``).
+    In ``combined`` mode an undocumented one would otherwise be DELETED,
+    breaking collection with an ImportError before a single test runs — a false
+    0/N.  The caller passes these to ``StubTransformer(keep_as_stub_names=...)``
+    so they are stubbed (signature kept, body raises) rather than removed.
+    """
+    kept: set[str] = set()
+    if not package_names:
+        return kept
+    for py_file in sorted(repo_dir.rglob("*.py")):
+        if not is_test_file(py_file):
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.split(".")[0] in package_names:
+                    for alias in node.names:
+                        if alias.name != "*":
+                            kept.add(alias.name)
+    return kept
 
 
 def _scan_dir_for_import_time_names(
@@ -500,6 +531,7 @@ class StubTransformer:
         keep_docstrings: bool = False,
         removal_mode: str = "all",
         import_time_names: set[str] | None = None,
+        keep_as_stub_names: set[str] | None = None,
     ) -> None:
         if removal_mode not in self.VALID_MODES:
             raise ValueError(
@@ -509,6 +541,11 @@ class StubTransformer:
         self.keep_docstrings = keep_docstrings
         self.removal_mode = removal_mode
         self.import_time_names = import_time_names or set()
+        # Functions that must be STUBBED (signature kept, body stubbed) rather
+        # than REMOVED, even when undocumented — e.g. names a test file imports
+        # (`from pkg.__main__ import parse_args`). Removing them would break
+        # test collection with an ImportError before any test runs (false 0/N).
+        self.keep_as_stub_names = keep_as_stub_names or set()
         self.stub_count = 0
         self.removed_count = 0
         self.preserved_count = 0
@@ -608,10 +645,13 @@ class StubTransformer:
                 continue
 
             has_doc = bool(node.body and is_docstring(node.body[0]))
+            # A test-imported name must be stubbed even without a docstring, so
+            # its signature survives for import while its body is emptied.
+            force_stub = node.name in self.keep_as_stub_names
 
-            if self.removal_mode == "docstring" and not has_doc:
+            if self.removal_mode == "docstring" and not has_doc and not force_stub:
                 continue
-            if self.removal_mode == "combined" and not has_doc:
+            if self.removal_mode == "combined" and not has_doc and not force_stub:
                 continue
 
             body = node.body
@@ -681,6 +721,10 @@ class StubTransformer:
             if isinstance(node, ast.FunctionDef) and is_pure_assignment_init(node):
                 continue
             if node.name in self.import_time_names:
+                continue
+            # Never DELETE a test-imported name — it is stubbed via
+            # _collect_replacements instead so the import (and collection) holds.
+            if node.name in self.keep_as_stub_names:
                 continue
 
             has_doc = bool(node.body and is_docstring(node.body[0]))
