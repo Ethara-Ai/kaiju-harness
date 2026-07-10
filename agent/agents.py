@@ -31,6 +31,11 @@ _LLM_TRANSIENT_SIGNALS = (
     "server disconnected", "remoteprotocolerror", "incomplete chunked read",
     "internalservererror", "service unavailable", "bad gateway",
     "502 ", "503 ", "504 ", "overloaded",
+    # Bridge/daemon briefly down or restarting (monitor respawns it): the raw
+    # socket error can surface WITHOUT the litellm exception name, so match the
+    # connection-refused forms directly. Provider-agnostic (both bridges).
+    "connection refused", "errno 111", "econnrefused", "connectionrefusederror",
+    "remote end closed connection", "max retries exceeded",
 )
 
 

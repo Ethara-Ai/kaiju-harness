@@ -6,7 +6,9 @@ exit codes are surfaced but never block downstream stages.
 """
 
 import logging
+import subprocess
 import sys
+from pathlib import Path
 from typing import Iterator
 
 import docker
@@ -54,6 +56,30 @@ def _run_in_container(
         return 1, str(e)
 
 
+def _run_locally(commands: list[str], cwd: Path, timeout: int = 300) -> tuple[int, str]:
+    """Run the lint commands DIRECTLY (no container) in *cwd*.
+
+    Used when there is no Docker daemon — the agent's lint-refine runs INSIDE the
+    pipeline container, where a nested ``docker.from_env()`` fails. clang-tidy and
+    cppcheck are installed in that image, so a nested container is both
+    unnecessary and impossible. Same commands as the container path.
+    """
+    full_cmd = " && ".join(commands)
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", "-c", full_cmd],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        return 124, f"lint timed out after {timeout}s\n{e.stdout or ''}{e.stderr or ''}"
+    except Exception as e:  # noqa: BLE001 - lint is advisory, never block downstream
+        return 1, f"lint failed to run locally: {e}"
+
+
 def main(
     dataset_name: str,
     dataset_split: str,
@@ -81,18 +107,13 @@ def main(
 
     spec = make_c_spec(example, absolute=True)
 
-    try:
-        client = docker.from_env()
-        client.images.get(spec.repo_image_key)
-    except docker.errors.ImageNotFound:
-        logger.error(
-            "Docker image %s not found. Run C build first.",
-            spec.repo_image_key,
-        )
-        sys.exit(1)
-    except docker.errors.DockerException as e:
-        logger.error("Cannot connect to Docker: %s", e)
-        sys.exit(1)
+    # Local repo dir — present when running IN-CONTAINER (the agent's lint-refine)
+    # or after a host build. repo_or_repo_dir may already be an absolute path.
+    repo_dir = Path(base_dir) / repo_name
+    if not repo_dir.is_dir():
+        _cand = Path(repo_or_repo_dir)
+        if _cand.is_dir():
+            repo_dir = _cand
 
     # Use compile_commands.json if present so clang-tidy resolves -I and -D flags.
     lint_commands = [
@@ -116,15 +137,33 @@ def main(
         ),
     ]
 
-    logger.info("Running C linters on %s (image: %s)", repo_name, spec.repo_image_key)
+    # Docker on the HOST (linters live in the image, not on the host); LOCAL
+    # in-container (no Docker daemon, linters installed right here). Trying Docker
+    # first preserves host behaviour; DockerException -> lint locally instead of
+    # dying with "Cannot connect to Docker" (which left the lint stage feedbackless).
+    output, exit_code, use_local, client = "", 0, False, None
+    try:
+        client = docker.from_env()
+        client.images.get(spec.repo_image_key)
+    except docker.errors.ImageNotFound:
+        if not repo_dir.is_dir():
+            logger.error("Docker image %s not found. Run C build first.", spec.repo_image_key)
+            sys.exit(1)
+        use_local = True
+    except docker.errors.DockerException:
+        if not repo_dir.is_dir():
+            logger.error("Cannot connect to Docker and no local repo dir for %s.", repo_name)
+            sys.exit(1)
+        use_local = True
 
-    exit_code, output = _run_in_container(
-        client,
-        spec.repo_image_key,
-        lint_commands,
-        workdir="/testbed",
-        timeout=timeout,
-    )
+    if use_local:
+        logger.info("Running C linters LOCALLY on %s (%s)", repo_name, repo_dir)
+        exit_code, output = _run_locally(lint_commands, cwd=repo_dir, timeout=timeout)
+    else:
+        logger.info("Running C linters on %s (image: %s)", repo_name, spec.repo_image_key)
+        exit_code, output = _run_in_container(
+            client, spec.repo_image_key, lint_commands, workdir="/testbed", timeout=timeout,
+        )
 
     print(output)
 
