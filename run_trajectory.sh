@@ -399,8 +399,11 @@ if [ "$LNG" = "java" ]; then
   # java's prepare clones owner/repo -> <clone-dir>/<repo_short> (basename only,
   # NOT owner__repo), so the clone dir is $CLONE/$SPLIT.
   _REPO_DIR="$CLONE/$SPLIT"
-  # per-repo output dir so --install only globs THIS repo's bz2.
-  _TID_OUT="outputs/${UUID}/java_test_ids"
+  # per-repo TEMP output dir (OUTSIDE outputs/) so --install only globs THIS
+  # repo's bz2 without leaving a stray outputs/<uuid>/java_test_ids/ folder — the
+  # canonical homes are commit0/data/java_test_ids/ (frozen) + datasets/ (staged),
+  # same as every other language. No other lang writes a per-run test_ids folder.
+  _TID_OUT="$(mktemp -d 2>/dev/null || echo "/tmp/kaiju_java_tid_${UUID}")"
   if [ -f "$_TID_FILE" ]; then
     echo "== [3b/5] java test-id inventory present ($_TID_FILE) =="
   elif [ -d "$_REPO_DIR" ]; then
@@ -408,6 +411,7 @@ if [ "$LNG" = "java" ]; then
     python -m tools.generate_test_ids_java --repo-dir "$_REPO_DIR" --name "$SPLIT" --output-dir "$_TID_OUT" --install \
       && echo "   wrote $_TID_FILE (frozen scoring denominator)" \
       || echo "   WARN: java test-id generation failed — eval will fall back to observed count (still correct)"
+    rm -rf "$_TID_OUT" 2>/dev/null || true
   else
     echo "== [3b/5] SKIP java test-id gen: clone $_REPO_DIR not present (eval uses observed count) =="
   fi

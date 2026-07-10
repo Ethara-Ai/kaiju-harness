@@ -117,10 +117,17 @@ USAGE
     exit 1
 }
 
+# In-container the only backend is local_inplace (git worktree, no nested docker).
+# The containerized runner passes --backend to EVERY language's pipeline for
+# parity, so accept it here (java always evaluates in-place) rather than dying
+# with "Unknown argument '--backend'".
+BACKEND="local_inplace"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model)       [[ $# -lt 2 ]] && { echo "Error: --model requires a value"; exit 1; }; MODEL_ARG="$2";          shift 2 ;;
         --dataset)     [[ $# -lt 2 ]] && { echo "Error: --dataset requires a value"; exit 1; }; DATASET_ARG="$2";       shift 2 ;;
+        --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";           shift 2 ;;
         --branch)      [[ $# -lt 2 ]] && { echo "Error: --branch requires a value"; exit 1; }; BRANCH_OVERRIDE="$2";   shift 2 ;;
         --repo-split)  [[ $# -lt 2 ]] && { echo "Error: --repo-split requires a value"; exit 1; }; REPO_SPLIT_OVERRIDE="$2"; shift 2 ;;
         --max-iteration) [[ $# -lt 2 ]] && { echo "Error: --max-iteration requires a value"; exit 1; }; MAX_ITERATION="$2"; shift 2 ;;
