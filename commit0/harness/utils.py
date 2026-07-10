@@ -486,6 +486,23 @@ def load_dataset_from_config(dataset_name: str, split: str = "test") -> Any:
 
     if local_path is not None:
         resolved = Path(local_path).resolve()
+        if not resolved.exists() and not os.path.isabs(local_path):
+            # A RELATIVE dataset_name (e.g. "dataset.json") resolves against the
+            # CWD. That is fine for the pipeline/eval (run from the harness root),
+            # but the agent's in-worktree test-refine command (cli_c.py test ...)
+            # is executed by aider with cwd=<worktree> (e.g. /testbed), where the
+            # dataset does not exist -> "Local dataset file not found" and the
+            # test-refine stage feeds the agent a harness error instead of real
+            # test output. Fall back to the harness root (parent of the commit0
+            # package, where the pipeline places dataset.json) before giving up.
+            try:
+                import commit0 as _c0  # local import to avoid a cycle at import time
+
+                _alt = (Path(_c0.__file__).resolve().parent.parent / local_path).resolve()
+                if _alt.exists():
+                    resolved = _alt
+            except Exception:  # noqa: BLE001 - best-effort fallback
+                pass
         if not resolved.exists():
             raise FileNotFoundError(
                 f"Local dataset file not found: {resolved}\n"

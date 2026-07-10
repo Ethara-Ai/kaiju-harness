@@ -60,8 +60,15 @@ STUB_HEADER_CONTENT = """\
 #endif
 """
 
+# Non-library dirs never exercised by the unit-test build. `fuzz`/`fuzzing`
+# harnesses in particular are separate translation units that our stubbing
+# would inject `#include "commit0_stub.h"` into — and since they live in a
+# subdir, that relative include fails to resolve at eval-build time
+# (`fatal error: commit0_stub.h: No such file or directory`) -> COMPILE_FAILED
+# for the WHOLE repo. They are not library code, so skip them entirely.
 DEFAULT_SKIP_DIR_RE = re.compile(
-    r"(^|/)(tests?|examples?|demos?|benchmarks?|third_party|vendor|deps)(/|$)"
+    r"(^|/)(tests?|examples?|demos?|benchmarks?|fuzz|fuzzing|fuzzers?"
+    r"|third_party|vendor|deps)(/|$)"
 )
 
 DEFAULT_FALLBACK_ARGS: Tuple[str, ...] = (
