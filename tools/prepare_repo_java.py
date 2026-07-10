@@ -815,7 +815,7 @@ def main() -> None:
     # run_trajectory.sh without a hand-written config.
     if dataset_entries and args.output:
         try:
-            _cfg = Path(".commit0_java.yaml")
+            _cfg = Path(".commit0.java.yaml")  # cli_java reads the dot-form name
             _cfg.write_text(
                 f"# commit0 Java config for {dataset_entries[0].get('original_repo', args.repo or '?')}\n"
                 f"dataset_name: ./{Path(args.output).name}\n"

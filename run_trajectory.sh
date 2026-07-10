@@ -192,6 +192,9 @@ if [ "$LNG" = "python" ]; then
 else
   PREP_MOD="tools.prepare_repo_${LNG}"; BUILD_MOD="commit0.cli_${LNG}"; CONFIG=".commit0_${LNG}.yaml"; GEN_CONFIG=0
 fi
+# java's cli_java reads its config from the DOT-form name by default and its build
+# takes neither --commit0-config-file nor --single-arch (handled at BUILD_CMD).
+[ "$LNG" = "java" ] && CONFIG=".commit0.java.yaml"
 
 # If THIS script is interrupted (Ctrl-C / terminal close / kill), reap this run's
 # container so it can't orphan. Belt-and-suspenders: the runner also self-reaps
@@ -240,7 +243,12 @@ PREP_CMD="python -m ${PREP_MOD} --repo $REPO $_ORG_FLAG $_OUT_FLAG --clone-dir $
 # python/go/c/js/ts build CLIs accept it; rust/cpp/java's do not (they'd error
 # "No such option: --single-arch"), so omit it for those.
 _ARCH_FLAG="--single-arch"; case "$LNG" in rust|cpp|java) _ARCH_FLAG="";; esac
-BUILD_CMD="python -m ${BUILD_MOD} build $_ARCH_FLAG --commit0-config-file $CONFIG"
+if [ "$LNG" = "java" ]; then
+  # cli_java build has no config/arch flags — it reads .commit0.java.yaml by default.
+  BUILD_CMD="python -m ${BUILD_MOD} build"
+else
+  BUILD_CMD="python -m ${BUILD_MOD} build $_ARCH_FLAG --commit0-config-file $CONFIG"
+fi
 RUN_CMD="python -m agent.container.run_pipeline_containerized --language $LNG --dataset $DATASET --repo-split $SPLIT --model $MODEL --pipeline-args \"$PIPELINE_ARGS\" $RUN_ARGS"
 
 echo "== repo=$REPO lang=$LNG model=$MODEL split=$SPLIT bridge=$BRIDGE${BPORT:+:$BPORT} =="
