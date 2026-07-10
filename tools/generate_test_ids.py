@@ -89,6 +89,15 @@ def _normalize_test_ids(test_ids: list[str], test_dir: str) -> list[str]:
     if not test_dir or test_dir == ".":
         return test_ids
 
+    # A single-file test suite at the repo root (e.g. python-slugify's
+    # ``test.py``) is passed as test_dir="test.py". The nodeid's file_part
+    # already IS that file, so prefixing would DOUBLE it
+    # ("test.py/test.py::TestSlugify::...") — which then never matches pytest's
+    # real nodeids at eval time, scoring every passing test as failed (a false
+    # 0/N). A ``.py`` test_dir is a FILE, not a directory prefix: leave ids as-is.
+    if test_dir.endswith(".py"):
+        return test_ids
+
     prefix = test_dir.rstrip("/") + "/"
     normalized: list[str] = []
     for tid in test_ids:

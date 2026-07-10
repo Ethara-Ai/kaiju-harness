@@ -110,6 +110,21 @@ def _is_type_checking_guard(node: ast.If) -> bool:
     return False
 
 
+def _is_main_guard(node: ast.If) -> bool:
+    """Return True for a ``if __name__ == "__main__":`` guard.
+
+    Such blocks run ONLY when the module is executed as a script, never on
+    import, so the functions they call (``main()``) — and everything those
+    transitively reach — are NOT import-time and must stay stubbable.
+    """
+    test = node.test
+    if isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) and test.left.id == "__name__":
+        for comp in test.comparators:
+            if isinstance(comp, ast.Constant) and comp.value == "__main__":
+                return True
+    return False
+
+
 def _scan_dir_for_import_time_names(
     scan_dir: Path, names: set[str], all_trees: list[ast.Module]
 ) -> None:
@@ -195,6 +210,11 @@ def _scan_dir_for_import_time_names(
                 # Skip `if TYPE_CHECKING:` blocks — those are not import-time
                 if isinstance(node, ast.If) and _is_type_checking_guard(node):
                     continue
+                # Skip `if __name__ == "__main__":` blocks — script-only, never
+                # import-time; otherwise `main()` and its whole call graph
+                # (parse_args -> slugify -> ...) get shielded from stubbing.
+                if isinstance(node, ast.If) and _is_main_guard(node):
+                    continue
                 # Calls in the test condition
                 if isinstance(node, ast.If) and node.test:
                     names.update(_extract_call_names(node.test))
@@ -218,8 +238,20 @@ def _scan_dir_for_import_time_names(
                     elif isinstance(sub, ast.Expr):
                         names.update(_extract_call_names(sub))
 
-            # 5. Module-level from-imports make names import-time references
+            # 5. Module-level from-imports make names import-time references.
+            #    But RELATIVE (intra-package) from-imports are re-exports of
+            #    names DEFINED in this package — exactly the functions we want
+            #    to stub. A stubbed function is still importable (only its BODY
+            #    raises), so re-exporting it does not require it to stay
+            #    implemented; preserving it would make the stub a no-op (e.g.
+            #    python-slugify's `from .slugify import slugify`). Any GENUINE
+            #    import-time use of such a name is already caught by the
+            #    module-level call/assignment/decorator patterns above. Only
+            #    external (absolute) imports — which we never stub anyway — are
+            #    recorded here.
             elif isinstance(node, ast.ImportFrom):
+                if getattr(node, "level", 0):
+                    continue
                 for alias in node.names:
                     name = alias.asname if alias.asname else alias.name
                     if name != "*":
