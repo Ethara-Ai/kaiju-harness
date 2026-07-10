@@ -1555,7 +1555,7 @@ PYEOF
     if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
         LAST_COST_SOURCE="${source_part:-none}"
         if [[ "$LAST_COST_SOURCE" == "none" ]]; then
-            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run."
+            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run." >&2
         fi
         # Echo BOTH cost AND source: the caller runs this in a command
         # substitution `$(...)`, i.e. a SUBSHELL, so any assignment to the global
@@ -1567,7 +1567,7 @@ PYEOF
         LAST_COST_SOURCE="parse_error"
         # NB: use plain brackets, NOT ${result@Q} — the @Q transform is bash 4.4+
         # and throws "bad substitution" on the macOS default bash 3.2.
-        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000."
+        log "  WARNING: cost extraction returned unparseable result [${result}] for ${log_dir}; defaulting to \$0.0000." >&2
         echo "0.0000 parse_error"
     fi
 }
