@@ -374,6 +374,7 @@ class JavaAgents(Agents):
                 yes=True,
                 input_history_file=input_history_file,
                 chat_history_file=chat_history_file,
+                allowed_add_paths=fnames,  # restrict edits to the target module only
                 protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")

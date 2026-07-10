@@ -815,11 +815,13 @@ class AiderAgents(Agents):
                 yes=True,
                 input_history_file=input_history_file,
                 chat_history_file=chat_history_file,
-                # allowed_add_paths intentionally None: agent must be free to add
-                # any non-test source file (esp. in draft stage where fnames=[f]
-                # is a single file per iteration). Only test files are restricted
-                # via protected_paths — matching user intent: 'make test files read-only'.
-                allowed_add_paths=None,
+                # Restrict edits to the TARGET module only. SDE-I implements ONE
+                # module (fnames = the single stubbed file) per run; the agent
+                # must not read-in and implement OTHER modules. Any file-add/edit
+                # prompt for a path outside fnames is refused, so a run stays
+                # scoped to its module. Test files stay hard-blocked via
+                # protected_paths (which takes precedence over the allowlist).
+                allowed_add_paths=fnames,
                 protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")
