@@ -601,11 +601,19 @@ collect_eval_artifacts() {
                 -o -name '*_exit_code.txt' -o -name 'eval.sh' \
                 -o -name 'patch.diff' -o -name '*stderr.log' \
                 -o -name 'report.*' -o -name 'test_results.json' \
+                -o -name 'run_*_tests.log' -o -name '*.log' \
                 \) -exec cp -f {} "$out/" \; 2>/dev/null || true
             found=1
         done
     done
     shopt -u nullglob
+    # Also copy the pipeline-level eval run log (eval command stdout/stderr) so a
+    # failed eval is debuggable from the run tree next to the collected artifacts.
+    if [[ -n "${LOG_BASE:-}" && -f "${LOG_BASE}/${stage_label}_eval.log" ]]; then
+        mkdir -p "$dest"
+        cp -f "${LOG_BASE}/${stage_label}_eval.log" "$dest/" 2>/dev/null || true
+        found=1
+    fi
     [[ "$found" == "1" ]] && log "  Eval artifacts -> ${dest}" || true
     return 0
 }
@@ -868,7 +876,13 @@ parse_eval_output() {
 # ------------------------------------------------------------
 stage_1_draft() {
     log "===== Stage 1: Draft (no lint, no tests) ====="
-    write_agent_config "draft" false false true
+    # Draft implements the stubbed function bodies: run_tests=false AND
+    # run_dir_lint=false so the C runner takes the draft `else` branch
+    # (coder.run(message) with current_stage="draft"), NOT the lint branch.
+    # (Was `true`, which forced run_entire_dir_lint -> the agent LINTED in the
+    # draft stage and every turn was mislabeled stage=lint. Matches Go's draft
+    # call `write_agent_config "false" "false" "false" "false"`.)
+    write_agent_config "draft" false false false
     run_agent_stage "stage1_draft" "$AGENT_CONFIG"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"

@@ -1098,11 +1098,19 @@ collect_eval_artifacts() {
                 -o -name '*_exit_code.txt' -o -name 'eval.sh' \
                 -o -name 'patch.diff' -o -name '*stderr.log' \
                 -o -name 'report.*' -o -name 'test_results.json' \
+                -o -name 'run_*_tests.log' -o -name '*.log' \
                 \) -exec cp -f {} "$out/" \; 2>/dev/null || true
             found=1
         done
     done
     shopt -u nullglob
+    # Also copy the pipeline-level eval run log (eval command stdout/stderr) so a
+    # failed eval is debuggable from the run tree next to the collected artifacts.
+    if [[ -n "${LOG_BASE:-}" && -f "${LOG_BASE}/${stage_label}_eval.log" ]]; then
+        mkdir -p "$dest"
+        cp -f "${LOG_BASE}/${stage_label}_eval.log" "$dest/" 2>/dev/null || true
+        found=1
+    fi
     [[ "$found" == "1" ]] && log "  Eval artifacts -> ${dest}" || true
     return 0
 }

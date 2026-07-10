@@ -585,28 +585,58 @@ def main(argv=None) -> int:
         host_datasets_dir = Path("outputs") / dataset_id / "datasets"
         if not host_datasets_dir.is_dir():
             host_datasets_dir = Path(args.dataset).parent
-        # Ensure the canonical test-id inventory is present in the mount/stage dir.
-        # If nothing is there yet (e.g. --skip-prepare, or a prepare that generated the
-        # .bz2 only into commit0/data/test_ids/ but never staged it), copy it over so
-        # the in-container agent's get_tests() resolves it instead of raising
-        # FileNotFoundError — which crashes the agent worker and yields a degenerate
-        # 0/0, $0, empty-pipeline_results run. The container image does NOT bake
-        # commit0/data/test_ids/ (gitignored), so staging here is required.
-        if not list(host_datasets_dir.glob("*_test_ids.bz2")):
+        # Ensure BOTH canonical inference inputs — the test-id inventory AND the
+        # spec doc (<repo>_spec.pdf.bz2) — are present in the mount/stage dir.
+        # If nothing is there yet (e.g. --skip-prepare, or a prepare path that
+        # never staged them — only go/java/rust prepares call copy_inference_inputs;
+        # c/cpp/ts/js/python prepares do NOT), stage them here so the datasets/
+        # folder is CONSISTENT across every language and the in-container eval's
+        # KAIJU_TEST_IDS_DIR + spec lookup resolves. Without the test-id inventory
+        # the agent's get_tests() raises FileNotFoundError -> degenerate 0/0, $0,
+        # empty-pipeline_results run. The container image does NOT bake
+        # commit0/data/*_test_ids/ (gitignored), so staging here is required.
+        #
+        # This is the LANGUAGE-AGNOSTIC staging path: it mirrors exactly what
+        # go's prepare_repo_go.py does via copy_inference_inputs, but centralized
+        # so no per-language prepare needs its own copy. Each language keeps its
+        # inventory under a different commit0/data/<subdir>/ (c -> c_test_ids,
+        # cpp -> cpp_test_ids, rust -> rust_test_ids, java -> java_test_ids,
+        # go/python/ts/js -> test_ids) and its repo tree under a different base
+        # (js -> repos_js, ts -> repos_ts, java -> repos/java, else repos); the
+        # spec loop in copy_inference_inputs additionally falls back to the
+        # shared specs/ dir, which is where scraped specs actually land.
+        _TEST_IDS_SUBDIR = {
+            "go": "test_ids", "python": "test_ids", "ts": "test_ids", "js": "test_ids",
+            "c": "c_test_ids", "cpp": "cpp_test_ids",
+            "rust": "rust_test_ids", "java": "java_test_ids",
+        }
+        _SPEC_REPO_BASE = {
+            "js": "repos_js", "ts": "repos_ts", "java": "repos/java",
+        }
+        _need_tids = not list(host_datasets_dir.glob("*_test_ids.bz2"))
+        _need_spec = not list(host_datasets_dir.glob("*_spec.pdf.bz2"))
+        if _need_tids or _need_spec:
             try:
-                from kaiju.paths import normalize_test_ids_key
-                _norm = normalize_test_ids_key(repo_name)
-                _canon = Path("commit0/data/test_ids") / f"{_norm}.bz2"
-                if _canon.is_file():
-                    host_datasets_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(_canon, host_datasets_dir / f"{_norm}_test_ids.bz2")
-                    logger.info("Staged canonical test-id inventory %s -> %s/%s_test_ids.bz2",
-                                _canon, host_datasets_dir, _norm)
-                else:
-                    logger.warning("No canonical test-id inventory at %s — eval will fall back "
-                                   "to observed count (and a strict agent may crash)", _canon)
+                from kaiju.paths import copy_inference_inputs
+                host_datasets_dir.mkdir(parents=True, exist_ok=True)
+                _copied = copy_inference_inputs(
+                    dataset_id, repo_name,
+                    test_ids_subdir=_TEST_IDS_SUBDIR.get(args.language, "test_ids"),
+                    repo_base=_SPEC_REPO_BASE.get(args.language, "repos"),
+                )
+                if _copied.get("test_ids"):
+                    logger.info("Staged canonical test-id inventory -> %s", _copied["test_ids"])
+                elif _need_tids:
+                    logger.warning("No canonical test-id inventory for %s (subdir=%s) — eval "
+                                   "will fall back to observed count (and a strict agent may "
+                                   "crash)", repo_name, _TEST_IDS_SUBDIR.get(args.language, "test_ids"))
+                if _copied.get("spec"):
+                    logger.info("Staged spec doc -> %s", _copied["spec"])
+                elif _need_spec:
+                    logger.warning("No spec doc found for %s — datasets/ will lack "
+                                   "<repo>_spec.pdf.bz2", repo_name)
             except Exception as _e:  # noqa: BLE001
-                logger.warning("Could not stage canonical test-id inventory: %s", _e)
+                logger.warning("Could not stage canonical inference inputs: %s", _e)
         if _mounted:
             # outputs/<uuid>/ is host-mounted, so outputs/<uuid>/datasets/ (with the
             # captured inventory) is ALREADY visible inside the container. Copying it
