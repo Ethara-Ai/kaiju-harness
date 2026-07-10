@@ -49,6 +49,7 @@ STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
 USE_SPEC_INFO="false"
+STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -91,6 +92,7 @@ Options:
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3
   --use-spec-info            Enable README-based spec context (default: off for JS)
+  --no-strict-inventory      Warn (do not FATAL) when a repo's frozen test-id inventory is missing
   --num-samples    <n>       Number of independent samples to run (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
   --no-test-files-readonly       Disable read-only test file injection
@@ -116,6 +118,7 @@ while [[ $# -gt 0 ]]; do
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --use-spec-info) USE_SPEC_INFO="true"; shift ;;
+        --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -317,6 +320,26 @@ set_sample_vars 1
 
 mkdir -p "$LOG_BASE"
 exec > >(tee -a "$LOG_BASE/pipeline.log") 2>&1
+
+# ============================================================
+# Frozen test-id inventory gate. A missing inventory makes the eval SILENTLY
+# score against ALL discovered tests — a wrong, non-reproducible denominator.
+# Resolved with the SAME function the eval uses (kaiju.verify_inventory ->
+# find_test_ids_file). FATAL by default; --no-strict-inventory (or
+# KAIJU_REQUIRE_INVENTORY=0) downgrades to warn-only.
+# ============================================================
+
+verify_inventory_js() {
+    log "Verifying all JS repos have a frozen test-id inventory..."
+    local strict_flag="--strict"
+    [[ "$STRICT_INVENTORY" != "true" ]] && strict_flag="--no-strict"
+    local ds_arg=()
+    [[ -n "${DATASET_FILE:-}" ]] && ds_arg=(--dataset "$DATASET_FILE")
+    local split_arg=()
+    [[ -n "${REPO_SPLIT:-}" ]] && split_arg=(--repo-split "$REPO_SPLIT")
+    "$VENV_PYTHON" -m kaiju.verify_inventory --language js \
+        "${ds_arg[@]}" "${split_arg[@]}" "$strict_flag"
+}
 
 # ============================================================
 # Preflight Checks
@@ -1319,6 +1342,9 @@ run_single_sample() {
 
     if [[ "$sample_idx" -eq 1 ]]; then
         preflight
+        if ! verify_inventory_js; then
+            return 1
+        fi
     fi
 
     write_commit0_js_config

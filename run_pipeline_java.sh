@@ -46,6 +46,7 @@ STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
 USE_SPEC_INFO="true"
+STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=1800
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -93,6 +94,7 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --no-stage3-lint           Disable compile-check in Stage 3
   --no-spec-info             Disable spec doc context for agents
+  --no-strict-inventory      Warn (do not FATAL) when a repo's frozen test-id inventory is missing
   --num-samples    <n>       Number of independent samples (pass@k, default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
   --max-test-output-length <n>  Max test output length (default: 15000)
@@ -126,6 +128,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";  shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --no-spec-info) USE_SPEC_INFO="false"; shift ;;
+        --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -500,6 +503,23 @@ verify_spec_docs_java() {
     fi
 
     log "  All Java repos have spec docs."
+}
+
+# Frozen test-id inventory gate (mirrors verify_spec_docs_java). A missing
+# inventory means there is no canonical scoring denominator. NOTE: evaluate_java
+# currently scores against len(results) (discovered) unconditionally, so this
+# gate is the ONLY line of defense that a frozen java_test_ids/<repo>.bz2 exists.
+# FATAL by default; --no-strict-inventory (or KAIJU_REQUIRE_INVENTORY=0) warns.
+verify_inventory_java() {
+    log "Verifying all Java repos have a frozen test-id inventory..."
+    local strict_flag="--strict"
+    [[ "$STRICT_INVENTORY" != "true" ]] && strict_flag="--no-strict"
+    local ds_arg=()
+    [[ -n "${DATASET_FILE:-}" ]] && ds_arg=(--dataset "$DATASET_FILE")
+    local split_arg=()
+    [[ -n "${REPO_SPLIT:-}" ]] && split_arg=(--repo-split "$REPO_SPLIT")
+    "$VENV_PYTHON" -m kaiju.verify_inventory --language java \
+        "${ds_arg[@]}" "${split_arg[@]}" "$strict_flag"
 }
 
 # ============================================================
@@ -1391,6 +1411,9 @@ run_single_sample() {
         load_repos
         preflight
         if ! verify_spec_docs_java; then
+            return 1
+        fi
+        if ! verify_inventory_java; then
             return 1
         fi
     fi

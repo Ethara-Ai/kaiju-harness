@@ -384,6 +384,35 @@ if [ "$LNG" = "python" ]; then
   fi
 fi
 
+# ---- 3b. canonical test-id inventory (JAVA only) ----
+# Like python, java has NO deps-free inline lister in prepare (prepare_repo_java
+# stubs + stages via copy_inference_inputs but never GENERATES the inventory), so
+# nothing lands in commit0/data/java_test_ids/ and the centralized staging in
+# run_pipeline_containerized finds nothing -> observed-count fallback. Generate it
+# here with tools.generate_test_ids_java in host source-scan mode (deps-free, no
+# docker needed — mirrors go/rust's inline capture) and --install it to
+# commit0/data/java_test_ids/<name>.bz2, which both prepare's copy_inference_inputs
+# and the runner's centralized staging then pick up. Non-fatal.
+if [ "$LNG" = "java" ]; then
+  _TID_NAME="$(printf '%s' "$SPLIT" | tr 'A-Z.' 'a-z-')"
+  _TID_FILE="commit0/data/java_test_ids/${_TID_NAME}.bz2"
+  # java's prepare clones owner/repo -> <clone-dir>/<repo_short> (basename only,
+  # NOT owner__repo), so the clone dir is $CLONE/$SPLIT.
+  _REPO_DIR="$CLONE/$SPLIT"
+  # per-repo output dir so --install only globs THIS repo's bz2.
+  _TID_OUT="outputs/${UUID}/java_test_ids"
+  if [ -f "$_TID_FILE" ]; then
+    echo "== [3b/5] java test-id inventory present ($_TID_FILE) =="
+  elif [ -d "$_REPO_DIR" ]; then
+    echo "== [3b/5] generating canonical java test-id inventory (host source scan) =="
+    python -m tools.generate_test_ids_java --repo-dir "$_REPO_DIR" --name "$SPLIT" --output-dir "$_TID_OUT" --install \
+      && echo "   wrote $_TID_FILE (frozen scoring denominator)" \
+      || echo "   WARN: java test-id generation failed — eval will fall back to observed count (still correct)"
+  else
+    echo "== [3b/5] SKIP java test-id gen: clone $_REPO_DIR not present (eval uses observed count) =="
+  fi
+fi
+
 # ---- 4. run trajectory (host-mounted outputs -> survives a kill) ----
 echo "== [4/5] run trajectory =="
 eval "$RUN_CMD"

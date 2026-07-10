@@ -290,25 +290,52 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, strip_docs: bool = Tr
 def _stubbed_base_compiles(repo_dir: Path, timeout: int = 600) -> "bool | None":
     """A11: check whether the STUBBED base tree compiles.
 
-    A correctly-stubbed crate replaces function bodies with `todo!()`/
-    `unimplemented!()`, which still TYPECHECK — so the base should compile. If it
-    does not, the agent starts from a broken tree and any 0% score is an
+    A correctly-stubbed crate replaces function bodies with `panic!("STUB: ...")`
+    (which diverges to `!` and TYPECHECKS anywhere) — so the base should compile.
+    If it does not, the agent starts from a broken tree and any 0% score is an
     impossible-task / infra artifact, not a model failure.
 
+    Two prep-only pitfalls this probe must NOT misattribute to the stubber:
+
+    * ``deny`` LINTS. The stubber's contract strips doc comments (agent sees only
+      signatures + stub bodies). Crates with ``#![deny(missing_docs)]`` (byteorder)
+      — or ``#![cfg_attr(test, deny(rust_2018_idioms, ...))]`` (concurrent-map) —
+      then FAIL to compile purely because a lint fires on the now-undocumented /
+      idiom-flagged code. That is not a broken stub. We pass ``--cap-lints=warn``
+      via RUSTFLAGS so every lint (incl. deny/forbid) is downgraded to a warning,
+      matching the intent of the gate (does the stub TYPECHECK) without editing the
+      source the agent sees.
+
+    * FEATURE SCOPE. The scored test command is plain ``cargo test`` /
+      ``cargo test -p <crate>`` (DEFAULT features). Probing with ``--all-features``
+      is stricter than what's ever scored and can enable a latently-broken optional
+      feature (observed: concurrent-map's ``timing`` feature references
+      ``AtomicU64`` with no import — it fails to compile in the PRISTINE upstream
+      too, and only ``--all-features`` surfaces it). So we probe with DEFAULT
+      features to mirror the real evaluation.
+
     Returns True (compiles), False (does not), or None (couldn't determine —
-    cargo missing, timeout, etc.) so the caller can record provenance.
+    cargo missing, timeout, network, etc.) so the caller can record provenance.
     """
     import shutil as _shutil
+    import os as _os
     if _shutil.which("cargo") is None:
         logger.info("A11: cargo not on PATH; skipping stubbed-base compile check.")
         return None
+    # Downgrade deny/forbid lints to warnings so a legitimately doc-stripped stub
+    # isn't branded broken by a `deny(missing_docs)`-style lint (append so we don't
+    # clobber operator-set RUSTFLAGS).
+    _env = dict(_os.environ)
+    _env["RUSTFLAGS"] = (_env.get("RUSTFLAGS", "") + " --cap-lints=warn").strip()
     try:
         proc = subprocess.run(
-            ["cargo", "check", "--tests", "--all-features", "--message-format=short"],
+            # DEFAULT features (mirror the scored `cargo test`), NOT --all-features.
+            ["cargo", "check", "--tests", "--message-format=short"],
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_env,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         logger.warning("A11: stubbed-base compile check could not run (%s); recording unknown.", e)

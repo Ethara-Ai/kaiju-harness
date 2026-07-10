@@ -48,6 +48,7 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
+STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -80,6 +81,7 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3
+  --no-strict-inventory      Warn (do not FATAL) when a repo's frozen test-id inventory is missing
   --inactivity-timeout <s>   Kill agent if no log activity for N seconds (default: 900)
   --max-wall-time  <secs>    Absolute per-stage wall-time cap (default: 86400)
   --num-samples    <n>       Number of independent samples (default: 1)
@@ -101,6 +103,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";  shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";           shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -715,6 +718,23 @@ for r in sorted(GO_SPLIT.get('${REPO_SPLIT}', [])):
     fi
 
     log "  All Go repos have spec docs. ✓"
+}
+
+# Frozen test-id inventory gate (mirrors verify_spec_docs_go). A missing
+# inventory makes the eval SILENTLY score against ALL discovered tests — a
+# wrong, non-reproducible denominator. Resolved with the SAME function the eval
+# uses (kaiju.verify_inventory -> find_test_ids_file). FATAL by default;
+# --no-strict-inventory (or KAIJU_REQUIRE_INVENTORY=0) downgrades to warn-only.
+verify_inventory_go() {
+    log "Verifying all Go repos have a frozen test-id inventory..."
+    local strict_flag="--strict"
+    [[ "$STRICT_INVENTORY" != "true" ]] && strict_flag="--no-strict"
+    local ds_arg=()
+    [[ -n "${DATASET_FILE:-}" ]] && ds_arg=(--dataset "$DATASET_FILE")
+    local split_arg=()
+    [[ -n "${REPO_SPLIT:-}" ]] && split_arg=(--repo-split "$REPO_SPLIT")
+    "$VENV_PYTHON" -m kaiju.verify_inventory --language go \
+        "${ds_arg[@]}" "${split_arg[@]}" "$strict_flag"
 }
 
 # Return code contract for watchdog_run:
@@ -1597,6 +1617,9 @@ run_single_sample() {
     if [[ "$sample_idx" -eq 1 ]]; then
         ensure_spec_docs_go
         if ! verify_spec_docs_go; then
+            return 1
+        fi
+        if ! verify_inventory_go; then
             return 1
         fi
     fi

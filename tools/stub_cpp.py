@@ -52,8 +52,15 @@ try:
 
     _CPP_LANGUAGE = tree_sitter.Language(tscpp.language())
     _TS_AVAILABLE = True
-except (ImportError, Exception):
+    _TS_IMPORT_ERROR = ""
+except Exception as _exc:  # noqa: BLE001 — missing dep or ABI mismatch
     _TS_AVAILABLE = False
+    _TS_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
+    logger.warning(
+        "tree-sitter C++ fallback unavailable (%s). "
+        "Install with: pip install tree-sitter tree-sitter-cpp",
+        _TS_IMPORT_ERROR,
+    )
 
 
 def _is_cpp_file(path: Path) -> bool:

@@ -35,7 +35,7 @@ import subprocess
 import sys
 from pathlib import Path
 from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
-from typing import Optional
+from typing import Any, Optional
 import uuid as _uuid_mod
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -355,7 +355,24 @@ def _capture_c_test_ids(repo_dir: Path, slug: str) -> None:
         logger.warning("test-id capture: failed to save test IDs for %s (%s).", slug, e)
 
 
-def _stubbed_base_compiles_c(repo_dir: Path) -> "bool | None":
+def _c_parse_error_signature(root: Any) -> int:
+    """Number of ERROR + MISSING nodes in a tree-sitter parse (structural error
+    count). Used as a cheap, order-independent signature to tell whether the stub
+    rewrite INTRODUCED new structural errors relative to the pristine source.
+    """
+    n = 0
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "ERROR" or getattr(node, "is_missing", False):
+            n += 1
+        stack.extend(node.children)
+    return n
+
+
+def _stubbed_base_compiles_c(
+    repo_dir: Path, reference_commit: "str | None" = None
+) -> "bool | None":
     """A11 (c): best-feasible deps-free gate on the STUBBED base tree.
 
     A full ``gcc``/``cmake`` compile of the stubbed base needs the repo's headers
@@ -366,22 +383,31 @@ def _stubbed_base_compiles_c(repo_dir: Path) -> "bool | None":
     compile we do the STRONGEST deps-free check available: re-parse every stubbed
     ``.c`` file with the SAME tree-sitter C grammar the stubber's recovery engine
     uses (``tree_sitter_language_pack``, no preprocessor, no headers needed) and
-    verify the rewritten source is still structurally well-formed (no ERROR /
-    MISSING nodes). This catches the concrete way a bad body rewrite corrupts a
-    file — an unbalanced-brace / truncated splice — which is what a stub bug would
-    produce, without a build env.
+    verify the rewritten source is still structurally well-formed.
+
+    IMPORTANT — tree-sitter parses WITHOUT a preprocessor, so it flags legal C
+    that depends on the preprocessor as a parse ERROR/MISSING even in the PRISTINE
+    source: calling-convention macros in declarators (``void (CJSON_CDECL *fn)(
+    void)``), ``#ifdef __cplusplus`` / ``extern "C" {`` guards, MSVC-only ``#if``
+    type blocks, X-macros, etc. A naive "any parse error -> False" therefore
+    produces FALSE NEGATIVES (observed on cJSON, and it flip-flops run-to-run
+    depending on which files are present). To avoid that, when ``reference_commit``
+    is supplied we make the check DIFFERENTIAL: a file only fails when the stub
+    rewrite INCREASED its structural-error count versus the pristine blob (i.e. the
+    splice actually corrupted the syntax). Equal error counts = pre-existing
+    preprocessor construct = not a stub bug.
 
     Semantics mirror python's quick_import_check / go's _stubbed_base_compiles_go:
-      * every stubbed file parses cleanly            -> True
-      * a stubbed file has a structural parse error  -> False (agent starts broken)
-      * tree-sitter unavailable / couldn't run       -> None (unknown; no false gate)
+      * every stubbed file parses cleanly (or matches pristine)  -> True
+      * a stubbed file has MORE structural errors than pristine   -> False (agent starts broken)
+      * tree-sitter unavailable / no pristine baseline to diff    -> None (unknown; no false gate)
 
     LIMITATION: this is a structural (syntax-level) gate, NOT a semantic compile.
     It cannot detect type errors, undeclared symbols, or link failures — those
     require the build env and are intentionally left to the container eval. A
     ``True`` here means "the stub output is syntactically well-formed", not
-    "gcc succeeds". It is deliberately conservative: it only reports ``False`` on
-    a genuine structural corruption of the stubber's own output.
+    "gcc succeeds". It is deliberately conservative: it only reports ``False`` when
+    the stubber's OWN output introduced a structural error the source lacked.
     """
     try:
         from tree_sitter_language_pack import get_parser as _ts_get_parser
@@ -401,6 +427,7 @@ def _stubbed_base_compiles_c(repo_dir: Path) -> "bool | None":
         return None
 
     checked = 0
+    saw_unadjudicable = False
     for c_file in _iter_c_files(repo_dir, DEFAULT_SKIP_DIR_RE):
         try:
             source = c_file.read_bytes()
@@ -425,20 +452,103 @@ def _stubbed_base_compiles_c(repo_dir: Path) -> "bool | None":
             )
             return None
         root = tree.root_node
-        if root.has_error or getattr(root, "is_missing", False):
+        if not (root.has_error or getattr(root, "is_missing", False)):
+            checked += 1
+            continue
+
+        # This file has structural parse errors. CRITICAL false-negative guard:
+        # tree-sitter's C grammar runs with NO preprocessor, so it CANNOT parse
+        # legal-but-preprocessor-dependent constructs — calling-convention macros
+        # in declarators (`void (CJSON_CDECL *fn)(void)`), `#ifdef __cplusplus /
+        # extern "C" {` guards, MSVC-only `#if` type blocks, X-macros, etc. These
+        # ERROR/MISSING nodes exist in the PRISTINE source too and have nothing to
+        # do with the stub rewrite. Branding the base `False` on them is a pure
+        # false negative (observed on cJSON: all ERROR nodes were on the
+        # `CJSON_CDECL` typedef / an `extern "C"` guard, none on any stub splice —
+        # yet base_compiles flipped to False, making a good crate look impossible,
+        # and it flip-flopped run-to-run depending on which files were present).
+        #
+        # The reliable discriminator is DIFFERENTIAL: reparse the SAME file's
+        # pristine (pre-stub) blob and only fail if the stub INCREASED the
+        # structural-error count. A truncated/unbalanced brace splice always adds
+        # a new ERROR/MISSING node the pristine didn't have; a preprocessor macro
+        # produces the identical error count before and after.
+        stub_errs = _c_parse_error_signature(root)
+        pristine_errs = _c_pristine_error_count(
+            repo_dir, c_file, reference_commit, parser
+        )
+        if pristine_errs is None:
+            # Couldn't get the pristine baseline (no reference commit / not in git
+            # / read failure). Don't fabricate a False from an un-adjudicable error
+            # — record unknown and defer to the container compile.
+            saw_unadjudicable = True
+            logger.info(
+                "A11: %s has parse errors but its pristine baseline is unavailable; "
+                "can't attribute them to the stub — recording unknown for this file.",
+                c_file,
+            )
+            continue
+        if stub_errs > pristine_errs:
             logger.warning(
-                "A11: stubbed file %s has structural parse errors (unbalanced/"
-                "truncated splice?) — stub output is corrupt.", c_file,
+                "A11: stubbed file %s introduced %d NEW structural parse error(s) "
+                "(pristine had %d, stubbed has %d) — the stub rewrite corrupted the "
+                "syntax (unbalanced/truncated brace splice).",
+                c_file, stub_errs - pristine_errs, pristine_errs, stub_errs,
             )
             return False
+        logger.info(
+            "A11: %s has %d parse error(s) but the PRISTINE source has the same "
+            "count — pre-existing preprocessor-dependent construct, NOT a stub bug. "
+            "Not treating as broken.",
+            c_file, stub_errs,
+        )
+        # Same error count => stub added nothing; count it as validated.
         checked += 1
 
+    if checked == 0 and saw_unadjudicable:
+        logger.info(
+            "A11: files had parse errors but none were adjudicable against a "
+            "pristine baseline; recording unknown (deferring to container compile)."
+        )
+        return None
     if checked == 0:
         logger.info(
             "A11: no .c files to validate structurally; recording unknown."
         )
         return None
     return True
+
+
+def _c_pristine_error_count(
+    repo_dir: Path, c_file: Path, reference_commit: "str | None", parser: Any
+) -> "int | None":
+    """Structural-error count of ``c_file``'s PRISTINE (pre-stub) blob, read from
+    ``reference_commit`` via ``git show``. Returns None when unavailable so the
+    caller records "unknown" rather than a fabricated failure.
+    """
+    if not reference_commit:
+        return None
+    try:
+        rel = c_file.relative_to(repo_dir).as_posix()
+    except ValueError:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "show", f"{reference_commit}:{rel}"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        # File is new in the stub commit (no pristine version) — can't diff.
+        return None
+    try:
+        tree = parser.parse(proc.stdout)
+    except Exception:  # noqa: BLE001
+        return None
+    return _c_parse_error_signature(tree.root_node)
 
 
 def prepare_one(
@@ -539,7 +649,7 @@ def prepare_one(
     # False = a stubbed file is structurally broken (agent starts from a corrupt
     # tree; any 0% is infra, not model), None = couldn't check (grammar missing).
     # This is a SYNTAX-level gate, not a semantic compile — see the helper docstring.
-    base_compiles = _stubbed_base_compiles_c(repo_path)
+    base_compiles = _stubbed_base_compiles_c(repo_path, reference_commit)
     if base_compiles is False:
         logger.warning(
             "A11: STUBBED BASE IS STRUCTURALLY BROKEN for %s — a stubbed .c file "

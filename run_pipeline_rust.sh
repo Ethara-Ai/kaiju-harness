@@ -77,6 +77,7 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
+STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -117,6 +118,7 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
   --no-spec-info             Disable spec/paper injection (default: enabled)
+  --no-strict-inventory      Warn (do not FATAL) when a repo's frozen test-id inventory is missing
   --no-unit-tests-info       Disable inline-test injection into prompt (default: enabled; Stage 1 only)
   --no-repo-map              Disable aider's internal repo-map (default: enabled, map_tokens=1024)
   --strip-aux-docs           Hide README/CHANGELOG/HISTORY/etc. from agent's view (default: keep)
@@ -153,6 +155,7 @@ while [[ $# -gt 0 ]]; do
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --no-spec-info) USE_SPEC_INFO="false"; shift ;;
+        --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --no-unit-tests-info) USE_UNIT_TESTS_INFO="false"; shift ;;
         --no-repo-map) REPO_MAP_TOKENS=0; shift ;;
         --strip-aux-docs) STRIP_AUX_DOCS="true"; shift ;;
@@ -805,6 +808,23 @@ for r in sorted(RUST_SPLIT.get('${REPO_SPLIT}', [])):
     fi
 
     log "  All Rust repos have spec docs. ✓"
+}
+
+# Frozen test-id inventory gate (mirrors verify_spec_docs_rust). A missing
+# inventory makes the eval SILENTLY score against ALL discovered tests — a
+# wrong, non-reproducible denominator. Resolved with the SAME function the eval
+# uses (kaiju.verify_inventory -> find_test_ids_file). FATAL by default;
+# --no-strict-inventory (or KAIJU_REQUIRE_INVENTORY=0) downgrades to warn-only.
+verify_inventory_rust() {
+    log "Verifying all Rust repos have a frozen test-id inventory..."
+    local strict_flag="--strict"
+    [[ "$STRICT_INVENTORY" != "true" ]] && strict_flag="--no-strict"
+    local ds_arg=()
+    [[ -n "${DATASET_FILE:-}" ]] && ds_arg=(--dataset "$DATASET_FILE")
+    local split_arg=()
+    [[ -n "${REPO_SPLIT:-}" ]] && split_arg=(--repo-split "$REPO_SPLIT")
+    "$VENV_PYTHON" -m kaiju.verify_inventory --language rust \
+        "${ds_arg[@]}" "${split_arg[@]}" "$strict_flag"
 }
 
 # ============================================================
@@ -2156,6 +2176,9 @@ run_single_sample() {
     if [[ "$sample_idx" -eq 1 ]]; then
         ensure_spec_docs_rust
         if ! verify_spec_docs_rust; then
+            return 1
+        fi
+        if ! verify_inventory_rust; then
             return 1
         fi
     fi

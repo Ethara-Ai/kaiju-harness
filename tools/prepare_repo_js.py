@@ -179,6 +179,24 @@ _FROZEN_INSTALL_CMDS: dict[str, tuple[str, ...]] = {
     "bun": ("bun", "install", "--frozen-lockfile", "--ignore-scripts"),
 }
 
+# Generating installs: run when NO committed lockfile exists. They resolve the
+# dependency tree and WRITE a lockfile, which prepare then commits into the
+# stubbed branch so downstream frozen installs (npm ci) are reproducible.
+_GENERATING_INSTALL_CMDS: dict[str, tuple[str, ...]] = {
+    "npm": ("npm", "install", "--no-audit", "--no-fund", "--ignore-scripts"),
+    "pnpm": ("pnpm", "install", "--ignore-scripts"),
+    "yarn": ("yarn", "install", "--ignore-scripts"),
+    "bun": ("bun", "install", "--ignore-scripts"),
+}
+
+# Lockfile filename produced by each package manager, for detection + git add.
+_LOCKFILE_BY_PM: dict[str, str] = {
+    "npm": "package-lock.json",
+    "pnpm": "pnpm-lock.yaml",
+    "yarn": "yarn.lock",
+    "bun": "bun.lockb",
+}
+
 
 def _frozen_install_cmd(pkg_manager: str) -> list[str]:
     try:
@@ -187,6 +205,19 @@ def _frozen_install_cmd(pkg_manager: str) -> list[str]:
         raise ValueError(
             f"Unsupported package manager for frozen install: {pkg_manager!r}"
         ) from exc
+
+
+def _generating_install_cmd(pkg_manager: str) -> list[str]:
+    try:
+        return list(_GENERATING_INSTALL_CMDS[pkg_manager])
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported package manager for generating install: {pkg_manager!r}"
+        ) from exc
+
+
+def _has_committed_lockfile(repo_dir: Path) -> bool:
+    return any((repo_dir / name).exists() for name in _LOCKFILE_BY_PM.values())
 
 
 def _ensure_pkg_manager(pkg_manager: str) -> None:
@@ -559,9 +590,22 @@ def create_js_stubbed_branch(
         )
 
     if (repo_dir / "package.json").exists():
-        logger.info("  Installing dependencies via %s...", pkg_manager)
         _ensure_pkg_manager(pkg_manager)
-        install_cmd = _frozen_install_cmd(pkg_manager)
+        has_lockfile = _has_committed_lockfile(repo_dir)
+        if has_lockfile:
+            # Reproducible path: repo committed a lockfile -> frozen install.
+            logger.info("  Installing dependencies via %s (frozen)...", pkg_manager)
+            install_cmd = _frozen_install_cmd(pkg_manager)
+        else:
+            # No committed lockfile: run a generating install to CREATE one, then
+            # commit it into the stubbed branch so downstream frozen installs
+            # (npm ci) are reproducible. This unblocks the many small JS libs
+            # that intentionally .gitignore their lockfile.
+            logger.info(
+                "  No committed lockfile; installing via %s (generating lockfile)...",
+                pkg_manager,
+            )
+            install_cmd = _generating_install_cmd(pkg_manager)
         install_result = subprocess.run(
             install_cmd,
             cwd=str(repo_dir),
@@ -579,6 +623,22 @@ def create_js_stubbed_branch(
                 "incomplete stub coverage and corrupt dataset rows.\n"
                 f"  cmd: {' '.join(install_cmd)}\n"
                 f"  stderr tail: {install_result.stderr[-500:].strip()}"
+            )
+        if not has_lockfile:
+            lockfile_name = _LOCKFILE_BY_PM[pkg_manager]
+            lockfile_path = repo_dir / lockfile_name
+            if not lockfile_path.exists():
+                raise RuntimeError(
+                    f"Generating install for {full_name} via {pkg_manager} did not "
+                    f"produce {lockfile_name}; cannot commit a reproducible lockfile "
+                    "into the stubbed branch. A committed lockfile is required so the "
+                    "downstream frozen install (e.g. `npm ci`) can rebuild "
+                    "node_modules deterministically inside the harness container."
+                )
+            git(repo_dir, "add", "-f", "--", lockfile_name)
+            git(repo_dir, "commit", "-m", f"Add generated {lockfile_name}")
+            logger.info(
+                "  Committed generated %s into %s", lockfile_name, branch_name
             )
 
     # Capture the canonical test inventory on pristine (un-stubbed) source,

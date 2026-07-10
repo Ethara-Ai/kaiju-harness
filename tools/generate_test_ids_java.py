@@ -15,7 +15,7 @@ Usage:
     # Using Docker (builds image first if needed):
     python -m tools.generate_test_ids_java dataset_entries.json --docker --output-dir ./test_ids
 
-    # Install into commit0 data directory:
+    # Install into commit0 data directory (commit0/data/java_test_ids/):
     python -m tools.generate_test_ids_java dataset_entries.json --install
 """
 
@@ -308,11 +308,12 @@ def save_test_ids(
 def install_test_ids(
     source_dir: Path,
     repo_names: list[str] | None = None,
+    data_subdir: str = "java_test_ids",
 ) -> int:
     try:
         import commit0
 
-        data_dir = Path(os.path.dirname(commit0.__file__)) / "data" / "test_ids"
+        data_dir = Path(os.path.dirname(commit0.__file__)) / "data" / data_subdir
     except ImportError:
         logger.error("commit0 package not found - cannot install test IDs")
         return 0

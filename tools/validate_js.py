@@ -57,10 +57,6 @@ def validate_js_candidate(repo: Path) -> tuple[bool, list[str]]:
             reasons.append(f"missing package.json field: {field!r}")
 
     lockfiles = [name for name in SUPPORTED_PMS_BY_LOCKFILE if (repo / name).exists()]
-    if not lockfiles:
-        reasons.append("no lockfile (npm/pnpm/yarn/bun)")
-    elif len(lockfiles) > 1:
-        reasons.append(f"multiple lockfiles: {lockfiles}")
 
     deps_raw = pkg.get("dependencies")
     dev_raw = pkg.get("devDependencies")
@@ -71,8 +67,18 @@ def validate_js_candidate(repo: Path) -> tuple[bool, list[str]]:
 
     scripts = pkg.get("scripts") or {}
     test_script = scripts.get("test") if isinstance(scripts, dict) else None
-    if not test_script or not str(test_script).strip():
+    has_test_script = bool(test_script and str(test_script).strip())
+    if not has_test_script:
         reasons.append("missing scripts.test")
+
+    # Lockfile gate: accept a committed lockfile (reproducible frozen install)
+    # OR a repo that is "generatable" -- a package.json with a real test script,
+    # from which prepare can synthesize a lockfile via a generating install and
+    # commit it into the stubbed branch. Only reject when neither holds.
+    if len(lockfiles) > 1:
+        reasons.append(f"multiple lockfiles: {lockfiles}")
+    elif not lockfiles and not has_test_script:
+        reasons.append("no lockfile and not generatable (no package.json test script)")
 
     engines = pkg.get("engines") or {}
     has_node_engine = isinstance(engines, dict) and "node" in engines
