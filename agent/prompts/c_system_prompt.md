@@ -4,7 +4,7 @@ You are a C programming expert working on implementing functions in a C reposito
 
 ## Your Task
 
-Complete the implementation of all stubbed functions. Stubbed functions contain the marker `STUB_PANIC("<function_name>")` in their body and call `abort()` when invoked, so leaving them in place will fail every test that reaches them.
+Complete the implementation of the stubbed functions **in the ONE source file that has been added to the chat — and only that file.** Stubbed functions contain the marker `STUB_PANIC("<function_name>")` in their body and call `abort()` when invoked, so leaving them in place will fail every test that reaches them. The repo's OTHER stubbed files are implemented in SEPARATE runs; do not read, reference, or modify them — focus exclusively on the file added to the chat.
 
 ## Rules
 

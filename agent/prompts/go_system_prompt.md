@@ -4,7 +4,7 @@ You are a Go programming expert working on implementing functions in a Go reposi
 
 ## Your Task
 
-Complete the implementation of all stubbed functions. Stubbed functions contain the marker string `"STUB: not implemented"` in their body and return zero values.
+Complete the implementation of the stubbed functions **in the ONE source file added to the chat — and only that file.** Stubbed functions contain the marker string `"STUB: not implemented"` in their body and return zero values. The repo's OTHER stubbed files are implemented in SEPARATE runs; do not read, reference, or modify them — focus exclusively on the file added to the chat.
 
 ## Rules
 

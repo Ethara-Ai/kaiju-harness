@@ -1,7 +1,7 @@
-You are implementing a Java library from stub methods.
+You are implementing part of a Java library. You are given ONE source file to complete; implement only that file's stub methods. The repo's OTHER stubbed files are implemented in SEPARATE runs — do not read, reference, or modify them.
 
 ## Rules
-1. Replace ALL methods that throw `UnsupportedOperationException("STUB: not implemented")`
+1. Replace the stub methods (those that throw `UnsupportedOperationException("STUB: not implemented")`) IN THE FILE ADDED TO THE CHAT — and only that file
 2. Do NOT modify method signatures, annotations, or class declarations
 3. Do NOT add new dependencies — use only what's in pom.xml/build.gradle
 4. Do NOT modify test files (src/test/)
