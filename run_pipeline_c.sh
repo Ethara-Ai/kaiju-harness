@@ -944,7 +944,7 @@ stage_1_draft() {
             num_passed: $num_passed,
             num_tests: $num_tests,
             pass_rate: $pass_rate,
-            runtime: 0,
+            runtime: $eval_time,
             mean_compile_errors: $compile_errors,
             eval_status: $eval_status
         }')
@@ -996,7 +996,7 @@ stage_2_lint_refine() {
             num_passed: $num_passed,
             num_tests: $num_tests,
             pass_rate: $pass_rate,
-            runtime: 0,
+            runtime: $eval_time,
             mean_compile_errors: $compile_errors,
             eval_status: $eval_status
         }')
@@ -1050,7 +1050,7 @@ stage_3_test_refine() {
             num_passed: $num_passed,
             num_tests: $num_tests,
             pass_rate: $pass_rate,
-            runtime: 0,
+            runtime: $eval_time,
             mean_compile_errors: $compile_errors,
             eval_status: $eval_status
         }')
