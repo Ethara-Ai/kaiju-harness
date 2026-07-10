@@ -236,7 +236,11 @@ _OUT_FLAG="--output $DATASET"; [ "$LNG" = "cpp" ] && _OUT_FLAG=""
 PREP_CMD="python -m ${PREP_MOD} --repo $REPO $_ORG_FLAG $_OUT_FLAG --clone-dir $CLONE $PREPARE_ARGS"
 # --single-arch: native-only build. The default multi-arch OCI build is slower and
 # flaky for local single-repo validation (some repos fail the multi-arch step).
-BUILD_CMD="python -m ${BUILD_MOD} build --single-arch --commit0-config-file $CONFIG"
+# --single-arch is a native-only build (faster, avoids flaky multi-arch). Only
+# python/go/c/js/ts build CLIs accept it; rust/cpp/java's do not (they'd error
+# "No such option: --single-arch"), so omit it for those.
+_ARCH_FLAG="--single-arch"; case "$LNG" in rust|cpp|java) _ARCH_FLAG="";; esac
+BUILD_CMD="python -m ${BUILD_MOD} build $_ARCH_FLAG --commit0-config-file $CONFIG"
 RUN_CMD="python -m agent.container.run_pipeline_containerized --language $LNG --dataset $DATASET --repo-split $SPLIT --model $MODEL --pipeline-args \"$PIPELINE_ARGS\" $RUN_ARGS"
 
 echo "== repo=$REPO lang=$LNG model=$MODEL split=$SPLIT bridge=$BRIDGE${BPORT:+:$BPORT} =="
