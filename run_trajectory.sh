@@ -440,6 +440,17 @@ for s in ("stage1","stage2","stage3"):
 cheat=[p for p in glob.glob(f"outputs/{uuid}/runs/*/agent/run_1/stage*_eval_artifacts/*/test_output.json")
        if "CHEAT_DETECTED" in open(p,errors="replace").read()]
 print("   CHEAT_DETECTED:", cheat or "none")
+# Language-agnostic incompleteness check: a module whose transient-error retries
+# were exhausted is left WITHOUT .done plus a .needs_retry breadcrumb (every
+# run_agent_<lang>.py does this). If ANY exist the score is NOT a clean result —
+# surface it loudly so a 0/N incomplete run is never mistaken for a real 0.
+needs_retry=glob.glob(f"outputs/{uuid}/runs/*/agent/run_1/**/.needs_retry", recursive=True)
+if needs_retry:
+    mods=sorted({p.rsplit('/',2)[-2] for p in needs_retry})
+    print(f"   ** INCOMPLETE: {len(needs_retry)} module(s) left .needs_retry (transient LLM error "
+          f"persisted) — NOT a clean result; use --resume. modules: {mods[:8]}")
+else:
+    print("   needs_retry: none (all modules completed)")
 print("   turns.jsonl files:", len(glob.glob(f"outputs/{uuid}/runs/*/agent/run_1/**/turns.jsonl", recursive=True)))
 print("   ATIF trajectory files:", len(glob.glob(f"Harbor_Data/Trajectory/**/*{split}*/trajectory.json", recursive=True)))
 PY
