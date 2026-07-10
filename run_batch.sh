@@ -41,8 +41,14 @@
 #   --list-only         print resolved task list and exit
 # =============================================================================
 set -uo pipefail
-cd "$(dirname "$0")"
-export PATH="/opt/homebrew/bin:/opt/homebrew/opt/openjdk/bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/local/bin:$PATH:$HOME/go/bin"
+cd "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)" || { echo "ERROR: cannot cd to script dir"; exit 1; }
+# Add common toolchain locations to PATH only if they exist (portable, no dupes).
+for _d in /opt/homebrew/bin /opt/homebrew/opt/openjdk/bin /home/linuxbrew/.linuxbrew/bin \
+          "$HOME/.cargo/bin" "$HOME/go/bin" /usr/local/go/bin /usr/lib/go/bin; do
+  [ -d "$_d" ] || continue
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+export PATH
 
 # ---------------------------------------------------------------- defaults ----
 MANIFEST=""

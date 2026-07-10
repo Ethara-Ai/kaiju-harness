@@ -142,8 +142,17 @@
 #   bash run_trajectory.sh --repo owner/x --lang go --model opus48cc
 # ============================================================================
 set -uo pipefail
-cd /Users/macbookpro/Desktop/kaiju-harness/kaiju-harness
-export PATH="/opt/homebrew/bin:$PATH:$HOME/go/bin"
+# Portable: run from the repo root (this script's own directory), never a
+# hardcoded user path. Works regardless of where the repo is checked out.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)" || { echo "ERROR: cannot cd to script dir"; exit 1; }
+# Add common toolchain locations to PATH only if they exist (macOS homebrew,
+# rustup, go, openjdk, homebrew-on-Linux) — portable, no duplicates.
+for _d in /opt/homebrew/bin /opt/homebrew/opt/openjdk/bin /home/linuxbrew/.linuxbrew/bin \
+          "$HOME/.cargo/bin" "$HOME/go/bin" /usr/local/go/bin /usr/lib/go/bin; do
+  [ -d "$_d" ] || continue
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+export PATH
 
 # ---- defaults ----
 REPO=""; LNG=""; MODEL="gpt55"; ITER=""; ORG="Aman-Yadav-Ethara-AI"
