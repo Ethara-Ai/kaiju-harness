@@ -142,7 +142,7 @@
 #   bash run_trajectory.sh --repo owner/x --lang go --model opus48cc
 # ============================================================================
 set -uo pipefail
-cd /Users/macbookpro/Desktop/kaiju-harness/kaiju-harness
+cd "$(cd "$(dirname "$0")" && pwd)"
 export PATH="/opt/homebrew/bin:$PATH:$HOME/go/bin"
 
 # ---- defaults ----

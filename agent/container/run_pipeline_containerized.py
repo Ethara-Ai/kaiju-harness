@@ -421,6 +421,15 @@ def main(argv=None) -> int:
     # Resolve the bridge URL: explicit flag wins; otherwise auto per model.
     bridge_url = (args.bridge_url if args.bridge_url is not None
                   else _default_bridge_url(resolved_model))
+    # Normalize for the container's network: 127.0.0.1/0.0.0.0/localhost on the
+    # host are the container's own loopback (nothing listening) — must rewrite
+    # to host.docker.internal so ANTHROPIC_API_BASE/OPENAI_API_BASE in the
+    # container env matches what the preflight probe already tests.
+    if bridge_url:
+        bridge_url = (bridge_url
+            .replace("127.0.0.1", "host.docker.internal")
+            .replace("0.0.0.0", "host.docker.internal")
+            .replace("localhost", "host.docker.internal"))
     _prov_env, _gac_src = _build_provider_env(resolved_model, bridge_url, logger)
     env.update(_prov_env)
     _prov = "openai-bridge" if "OPENAI_API_BASE" in _prov_env and bridge_url else (
@@ -639,6 +648,34 @@ def main(argv=None) -> int:
             f"ln -sfn /testbed {shlex.quote(link)}"
         )
         _stream_exec(client, container.id, f"bash -c {shlex.quote(setup)}")
+
+        # Stage the spec into /testbed/spec.pdf.bz2 (the pipeline's fixed
+        # lookup path). ECR pre-built images don't always ship the spec
+        # inside /testbed, and Datasets_30 uses `specs.pdf.bz2` (extra 's')
+        # or `<name>_spec.pdf.bz2` — copy_to_container uses the source's
+        # basename, so we tempfile-rename to the exact expected filename.
+        # Prefer baked-in spec: if the image already has /testbed/spec.pdf.bz2
+        # (or spec.pdf), skip host staging entirely to avoid silent overwrite.
+        _baked_probe = container.exec_run(
+            "sh -c 'test -f /testbed/spec.pdf.bz2 || test -f /testbed/spec.pdf'"
+        )
+        if _baked_probe.exit_code == 0:
+            logger.info("Container has baked spec at /testbed — skipping host stage")
+        else:
+            for _spec_dir in (host_datasets_dir, Path(args.dataset).parent):
+                _candidate = None
+                for _name in ("spec.pdf.bz2", "specs.pdf.bz2", f"{repo_name}_spec.pdf.bz2"):
+                    _p = _spec_dir / _name
+                    if _p.is_file():
+                        _candidate = _p
+                        break
+                if _candidate is not None:
+                    with tempfile.TemporaryDirectory() as _std:
+                        _staged = Path(_std) / "spec.pdf.bz2"
+                        _staged.write_bytes(_candidate.read_bytes())
+                        copy_to_container(container, _staged, Path("/testbed/spec.pdf.bz2"))
+                    logger.info("Staged spec %s -> /testbed/spec.pdf.bz2", _candidate.name)
+                    break
 
         pipeline_cmd = (
             f"cd /opt/kaiju && bash {pipeline_script} "
