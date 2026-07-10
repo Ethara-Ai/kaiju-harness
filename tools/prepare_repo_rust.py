@@ -795,9 +795,14 @@ def prepare_rust_repo(
             spec_filename = spec_path.name
             git(repo_dir, "add", spec_filename)
             git(repo_dir, "commit", "-m", f"Add {crate} API spec (docs.rs PDF)")
-            # Save a local copy to specs_rust/
+            # Save a local copy under specs/ with the CRATE-NAMED filename that
+            # copy_inference_inputs looks for (specs/<crate>.pdf.bz2) — mirroring
+            # python. The old generic 'spec.pdf.bz2' matched none of the staging
+            # lookup paths (so datasets/ lacked <repo>_spec.pdf.bz2) AND was
+            # overwritten by every repo in a batch. The repo-root copy stays the
+            # agent-canonical 'spec.pdf.bz2'.
             specs_dir.mkdir(parents=True, exist_ok=True)
-            local_spec = specs_dir / spec_filename
+            local_spec = specs_dir / f"{crate}.pdf.bz2"
             shutil.copy2(str(spec_path), str(local_spec))
             logger.info("Local spec copy: %s", local_spec)
             base_commit = get_head_sha(repo_dir)  # include spec PDF in agent's branching point

@@ -2325,30 +2325,16 @@ for e in rows: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null || t
         if [[ "$_n_total" -gt 0 && "$_n_compile" -eq 0 ]]; then
             local n_errs="$_total_errs"
             [[ "$n_errs" =~ ^[0-9]+$ ]] || n_errs=0
-            log "Stage 3: SKIPPED — NO repo compiles after Stage 2 ($n_errs total error(s) across $_n_total repos)"
-            log "  See: $gate_log"
-            RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --argjson nerr "$n_errs" '.stage3 = {
-                name: "Test refine",
-                status: "SKIPPED_STAGE_2_BROKE_TREE",
-                compile_errors_after_stage2: $nerr,
-                elapsed_s: 0,
-                eval_time_s: 0,
-                cost_usd_incremental: 0.0,
-                cost_usd_cumulative: (.stage2.cost_usd_cumulative // .stage1.cost_usd // 0.0),
-                cost_source: "skipped",
-                returncode: 0,
-                runtime: 0,
-                num_passed: 0,
-                num_tests: 0,
-                pass_rate: 0.0,
-                eval_status: "SKIPPED"
-            }')
-            save_results
-        else
-            if ! stage_3_test_refine; then
-                pipeline_error="Stage 3 failed"
-                log "PIPELINE ERROR: ${pipeline_error}"
-            fi
+            # DO NOT skip Stage 3. Test-refine is precisely the stage that feeds
+            # cargo build/test errors back to the agent so it can REPAIR the build;
+            # skipping locks in a 0/N incomplete run and drops a whole trajectory
+            # stage. Record that the tree was broken on entry (so the score is not
+            # mistaken for a clean measurement) and run Stage 3 anyway.
+            log "  GATE: tree broken after Stage 2 ($n_errs error(s)) — running Stage 3 so the agent can repair via test feedback (NOT skipping). See: $gate_log"
+        fi
+        if ! stage_3_test_refine; then
+            pipeline_error="Stage 3 failed"
+            log "PIPELINE ERROR: ${pipeline_error}"
         fi
     elif [[ -z "$pipeline_error" ]]; then
         if ! stage_3_test_refine; then
