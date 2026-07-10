@@ -638,9 +638,10 @@ def _iter_c_files(root: Path, skip_dir_re: re.Pattern) -> Iterable[Path]:
                 yield Path(dirpath) / name
 
 
-def write_stub_header(root: Path) -> Path:
-    """Write ``commit0_stub.h`` at repo root. Idempotent."""
-    target = root / STUB_HEADER_FILENAME
+def write_stub_header(root: Path, target_dir: Optional[Path] = None) -> Path:
+    """Write ``commit0_stub.h`` into *target_dir* (default: repo *root*). Idempotent."""
+    d = target_dir if target_dir is not None else root
+    target = d / STUB_HEADER_FILENAME
     if target.exists() and target.read_text() == STUB_HEADER_CONTENT:
         return target
     target.write_text(STUB_HEADER_CONTENT, encoding="utf-8")
@@ -686,6 +687,30 @@ def stub_directory(
         if modified:
             report.files_modified += 1
 
+    # General fix (any repo layout, any nesting): the injected
+    # `#include "commit0_stub.h"` is QUOTED, so the compiler searches the
+    # including file's OWN directory first. A stubbed file in a subdir therefore
+    # can't see a root-only header -> `fatal error: commit0_stub.h: No such file
+    # or directory` at eval-build, failing the WHOLE repo. Drop a header copy into
+    # every directory that actually received a stub (detected by the include line),
+    # so the include always resolves regardless of depth. Runs after BOTH the
+    # libclang pass and the tree-sitter fallback below re-checks the same set.
+    def _seed_headers_in_stubbed_dirs() -> None:
+        if not write_header:
+            return
+        root_res = root.resolve()
+        seen: set = set()
+        for c_file in _iter_c_files(root, skip_dir_re):
+            d = c_file.parent.resolve()
+            if d in seen or d == root_res:
+                continue
+            try:
+                if STUB_INCLUDE_LINE in c_file.read_text(errors="replace"):
+                    write_stub_header(root, c_file.parent)
+                    seen.add(d)
+            except OSError:
+                continue
+
     report.libclang_functions_stubbed = report.functions_stubbed
 
     if (
@@ -709,6 +734,10 @@ def stub_directory(
             if recovered:
                 report.treesitter_functions_stubbed += recovered
                 report.functions_stubbed += recovered
+
+    # After BOTH stubbing passes, ensure every stubbed subdir can resolve the
+    # quoted `#include "commit0_stub.h"` (see helper docstring above).
+    _seed_headers_in_stubbed_dirs()
 
     return report
 
