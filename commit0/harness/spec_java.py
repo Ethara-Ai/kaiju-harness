@@ -33,8 +33,13 @@ class Commit0JavaSpec(Spec):
 
     @property
     def repo_image_key(self) -> str:
+        # Docker image repository names MUST be lowercase — a repo like
+        # stleary/JSON-java would otherwise yield 'commit0-java-JSON-java:latest'
+        # and fail the build with "repository name must be lowercase". Lowercase
+        # the whole tag (single source of truth, so the runner's agent-image FROM
+        # and every reference stay consistent).
         repo_short = self.repo.split("/")[-1]
-        return f"{JAVA_BASE_IMAGE_PREFIX}-{repo_short}:latest"
+        return f"{JAVA_BASE_IMAGE_PREFIX}-{repo_short}:latest".lower()
 
     @property
     def base_dockerfile(self) -> str:

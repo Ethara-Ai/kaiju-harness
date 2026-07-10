@@ -84,7 +84,31 @@ def test(
     """Run Java tests."""
     from commit0.harness.run_java_tests import run_java_tests
     instance = _load_instance(repo)
-    run_java_tests(instance=instance, timeout=timeout, verbose=verbose)
+    results = run_java_tests(instance=instance, timeout=timeout, verbose=verbose)
+    # Surface results to STDOUT so the test-refine agent (aider captures the
+    # command's stdout) has real signal — the return dict was previously discarded,
+    # so the agent saw NOTHING and could not refine (same class as the C bug).
+    if not results:
+        # run_java_tests already printed the raw build/test output tail.
+        typer.echo("Java test summary: no test reports parsed (see output above).")
+    elif "__COMPILATION__" in results:
+        typer.echo("Java test summary: COMPILATION FAILED (see javac errors above).")
+    elif "__TIMEOUT__" in results:
+        typer.echo(f"Java test summary: TIMED OUT after {timeout}s.")
+    else:
+        _ok = {"PASSED", "PASS", "SUCCESS"}
+        _skip = {"SKIPPED", "SKIP"}
+        passed = sum(1 for v in results.values() if str(v).upper() in _ok)
+        total = len(results)
+        typer.echo(f"Java test results: {passed} passed / {total} total")
+        failures = [
+            (k, v) for k, v in results.items()
+            if str(v).upper() not in _ok and str(v).upper() not in _skip
+        ]
+        if failures:
+            typer.echo("Failed/errored tests:")
+            for k, v in failures[:60]:
+                typer.echo(f"  {k}: {v}")
 
 
 @app.command()

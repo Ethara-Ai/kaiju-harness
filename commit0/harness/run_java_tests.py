@@ -109,6 +109,14 @@ def run_java_tests(
             exit_content = exit_code_file.read_text().strip()
             if "COMPILATION_FAILED" in exit_content:
                 logger.error(f"Compilation failed for {repo_name}")
+                # Surface the javac errors to STDOUT so the test-refine agent (aider
+                # captures the command's stdout) can actually fix them. logger.info
+                # above only goes to the log FILE. Without this the agent saw nothing.
+                _tail = "\n".join((output or "").splitlines()[-80:])
+                print(
+                    "Java COMPILATION FAILED — the changes do not compile. "
+                    "javac/build output (tail):\n" + (_tail or "(no output captured)")
+                )
                 return {"__COMPILATION__": "FAILED"}
 
         xml_dir = log_path / report_dir
@@ -127,6 +135,14 @@ def run_java_tests(
             }
 
         logger.warning(f"No test reports found for {repo_name}")
+        # No surefire reports — a test crashed or the build produced no test output.
+        # Print the raw build/test output so the agent has real signal to refine on.
+        _tail = "\n".join((output or "").splitlines()[-80:])
+        print(
+            "Java tests produced NO surefire reports — a test likely crashed or the "
+            "build produced no test output. Build/test output (tail):\n"
+            + (_tail or "(no output captured)")
+        )
         return {}
 
     except Exception as e:
