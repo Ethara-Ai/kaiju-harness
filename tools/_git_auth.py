@@ -630,6 +630,29 @@ def push_to_fork(
             timeout=timeout,
             check=False,
         )
+        # --force-with-lease is rejected with "stale info" when the local clone
+        # doesn't know the fork branch's current SHA — which happens on a
+        # RE-prepare, because the clone is fresh from UPSTREAM and never fetched
+        # the fork's prior commit0 branch. These fork branches are our own
+        # throwaway commit0 branches, so fall back to a plain --force (idempotent
+        # re-prepare) rather than failing the whole build.
+        if (
+            result.returncode != 0
+            and force_with_lease
+            and ("stale info" in result.stderr
+                 or "rejected" in result.stderr
+                 or "force-with-lease" in result.stderr)
+        ):
+            result = subprocess.run(
+                ["git", "push", "-u", remote_name, branch, "--force"],
+                cwd=str(repo_dir),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
         if result.returncode != 0:
             stderr_snippet = result.stderr.strip()[:1500]
             raise PushError(
