@@ -234,6 +234,20 @@ def main(
                     f"{summary['failed']} failed, {summary['skipped']} skipped, "
                     f"{summary['errored']} errored out of {summary['total']} tests"
                 )
+            else:
+                # No junit report — a test crashed/aborted (e.g. a still-stubbed
+                # function's abort()), ctest failed to run, or no test binary was
+                # produced. logger.info(output) above only goes to the LOG FILE, so
+                # without this the agent (aider captures stdout) sees NOTHING to
+                # refine against and just asks for "the complete test output". Print
+                # the raw build/test output to STDOUT so test-refine has real signal.
+                _raw = (output or "").strip()
+                _tail = "\n".join(_raw.splitlines()[-80:]) if _raw else ""
+                print(
+                    "C tests produced NO test_report.xml — a test likely crashed/"
+                    "aborted or ctest could not run. Raw build/test output (tail):\n"
+                    f"{_tail if _tail else '(no output captured)'}"
+                )
 
             compile_err_path = Path(log_dir / "compile_errors.txt")
             if compile_err_path.exists() and compile_err_path.stat().st_size > 0:
