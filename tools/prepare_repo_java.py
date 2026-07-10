@@ -655,7 +655,8 @@ def _resolve_latest_java_tag(repo: str):
     except Exception as e:  # noqa: BLE001
         logger.warning("could not list tags for %s: %s", repo, e)
         return None
-    best = None  # (version_tuple, tag)
+    best_semver = None  # (version_tuple, tag)
+    best_date = None    # (int, tag)  — dotless date/sequence tags
     for line in out.splitlines():
         parts = line.split("refs/tags/")
         if len(parts) != 2:
@@ -664,12 +665,23 @@ def _resolve_latest_java_tag(repo: str):
         if _re.search(r"(?i)(rc|alpha|beta|-m\d|snapshot|preview|\bdev\b)", tag):
             continue
         m = _re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", tag)
-        if not m:
+        if m:
+            ver = tuple(int(x or 0) for x in m.groups())
+            if best_semver is None or ver > best_semver[0]:
+                best_semver = (ver, tag)
             continue
-        ver = tuple(int(x or 0) for x in m.groups())
-        if best is None or ver > best[0]:
-            best = (ver, tag)
-    return best[1] if best else None
+        # Dotless date/sequence versioning (e.g. stleary/JSON-java's YYYYMMDD tags
+        # like 20231013, or a plain build number). Strip a leading v / rel prefix.
+        # Require >=6 digits so we don't latch onto a tiny incidental number.
+        d = _re.fullmatch(r"(?:rel[/-])?v?(\d{6,})", tag, _re.IGNORECASE)
+        if d:
+            n = int(d.group(1))
+            if best_date is None or n > best_date[0]:
+                best_date = (n, tag)
+    # Prefer real semver; fall back to the latest date/sequence tag.
+    if best_semver:
+        return best_semver[1]
+    return best_date[1] if best_date else None
 
 
 def main() -> None:
