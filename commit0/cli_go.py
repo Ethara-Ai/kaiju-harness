@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Union
+from typing import List, Optional, Union
 
 import typer
 import yaml
@@ -324,6 +324,12 @@ def evaluate(
 @commit0_go_app.command()
 def lint(
     repo_or_repo_dir: str = typer.Argument(..., help="Go repository to lint"),
+    files: Optional[List[str]] = typer.Argument(
+        None,
+        help="Absorbs the edited file aider auto-appends to the lint command; "
+        "without it the call fails with a CLI usage error and the agent gets that "
+        "instead of real lint output.",
+    ),
     commit0_config_file: str = typer.Option(
         ".commit0.go.yaml", help="Path to commit0-go config file"
     ),

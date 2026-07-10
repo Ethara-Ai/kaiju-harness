@@ -1,5 +1,5 @@
 import typer
-from typing import Optional
+from typing import List, Optional
 
 app = typer.Typer(
     name="commit0-java",
@@ -219,6 +219,12 @@ def lint(
     repo: Optional[str] = typer.Option(None, help="Specific repo (resolves path from config)"),
     repo_path: Optional[str] = typer.Option(None, help="Explicit path to Java repo"),
     config: str = typer.Option("google_checks.xml", help="Checkstyle config"),
+    files: Optional[List[str]] = typer.Argument(
+        None,
+        help="Absorbs the edited file aider auto-appends to the lint command; "
+        "without it the call fails with a CLI usage error and the agent gets that "
+        "instead of real lint output.",
+    ),
 ) -> None:
     """Lint Java source files with Checkstyle."""
     from pathlib import Path as _Path
