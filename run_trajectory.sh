@@ -227,7 +227,9 @@ esac
 
 # resolved command lines (single source of truth for --print and for execution)
 # c's prepare CLI has no --org (it forks to its default); every other lang accepts it.
-_ORG_FLAG="--org $ORG"; [ "$LNG" = "c" ] && _ORG_FLAG=""
+# c uses --fork-org (not --org) and needs --push so the base_commit lands on the
+# fork the repo-image setup.sh clones from (else setup.sh git-fails, exit 128).
+_ORG_FLAG="--org $ORG"; [ "$LNG" = "c" ] && _ORG_FLAG="--fork-org $ORG --push"
 # cpp prepare has no --output (it writes <repo>_cpp_dataset.json itself); passing
 # one corrupts --outputs-root via argparse prefix-matching. Drop it for cpp.
 _OUT_FLAG="--output $DATASET"; [ "$LNG" = "cpp" ] && _OUT_FLAG=""

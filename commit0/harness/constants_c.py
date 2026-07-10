@@ -50,7 +50,7 @@ _DEFAULT_APT_PACKAGES: frozenset[str] = frozenset(
         "libcmocka-dev",
         "libcmocka0",
         "libcriterion-dev",
-        "libcheck-dev",
+        "check",
         "libsubunit-dev",
         "libyaml-dev",
         "zlib1g-dev",

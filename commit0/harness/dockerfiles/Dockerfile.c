@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cppcheck \
     libcmocka-dev \
     libcriterion-dev \
-    libcheck-dev \
+    check \
     libsubunit-dev \
     ccache \
     bear \
