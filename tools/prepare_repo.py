@@ -390,6 +390,19 @@ def create_stubbed_branch(
 
     logger.info("  Stubbed %d files (%d errors)", stubbed_count, errors)
 
+    # Non-degenerate gate (general, deps-free): if NO source file had function
+    # bodies stubbed, the agent has nothing to implement — the base already
+    # passes, so the trajectory is worthless. This catches over-preservation
+    # (an import-time/re-export/main-guard quirk shielding every function) or a
+    # bad src_dir, EVEN when unrelated edits (docstring/spec) made the raw diff
+    # non-empty. Fail loudly at prepare instead of emitting a silent 100%-at-draft.
+    if stubbed_count == 0:
+        raise RuntimeError(
+            f"Degenerate stub for {full_name}: 0 files had function bodies stubbed "
+            f"(errors={errors}). The task would be trivially already-solved. Check "
+            f"src_dir detection and import-time/keep-as-stub preservation in tools/stub.py."
+        )
+
     git(repo_dir, "add", "-A")
 
     status = git(repo_dir, "status", "--porcelain")

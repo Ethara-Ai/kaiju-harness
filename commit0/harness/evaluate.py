@@ -265,6 +265,28 @@ def main(
             else:
                 status.append("failed")
                 runtimes.append(0)
+        # Defensive false-0/N guard (general, layout-agnostic): the frozen
+        # inventory ids matched NONE of the report's collected nodeids, yet the
+        # report DID collect tests. That is the fingerprint of an inventory<->
+        # report nodeid FORMAT/rootdir mismatch (a stray path prefix, or a
+        # conftest.py/pytest.ini inside test_dir shifting pytest's rootdir) or a
+        # stubbed-base ImportError — every passing test would be silently scored
+        # `failed`. Emit a machine-readable marker so run_pipeline.sh flags it
+        # LOUDLY (eval_status) instead of recording a bogus 0/N. len(tests)>0
+        # distinguishes it from a genuinely empty/degenerate run.
+        if no_runs == 0 and len(tests) > 0:
+            _report_passed = sum(
+                1 for v in tests.values()
+                if v is not None and v.get("outcome") == "passed"
+            )
+            print(f"INVENTORY_MISMATCH,{name},{len(test_ids)},{len(tests)},{_report_passed}")
+            logger.error(
+                "%s: frozen inventory (%d ids) intersects ZERO of the %d collected "
+                "report nodeids (%d passed in report) — inventory is stale/mis-formatted "
+                "vs eval; scoring would be a false 0/N. Regenerate it (delete "
+                "commit0/data/<subdir>/%s.bz2; run_trajectory step 3b).",
+                name, len(test_ids), len(tests), _report_passed, name,
+            )
         status = Counter(status)
         if no_runs == 0:
             total = 0

@@ -918,6 +918,15 @@ parse_eval_output() {
             log "  WARNING: eval infra crash (${EVAL_STATUS}) — score is NOT a real 0% (see eval log)"
             continue
         fi
+        # Frozen inventory matched ZERO collected nodeids though tests ran — a
+        # nodeid/rootdir format mismatch (or stubbed-base ImportError). The 0%
+        # is NOT real; flag it so a stale/mis-formatted inventory never records
+        # a silent false 0/N. Format: INVENTORY_MISMATCH,<repo>,<inv>,<report>,<passed>
+        if [[ "$line" == INVENTORY_MISMATCH,* ]]; then
+            EVAL_STATUS="inventory_mismatch"
+            log "  WARNING: inventory<->report nodeid mismatch ($line) — score is NOT a real 0%; regenerate the frozen inventory (delete commit0/data/<subdir>/<repo>.bz2)"
+            continue
+        fi
         [[ "$line" == repo,* ]] && continue
         if [[ "$line" == *","*"/"* ]]; then
             local runtime passed_total passed total
