@@ -1001,6 +1001,20 @@ class AiderAgents(Agents):
             sys.stdout = _saved_stdout
             sys.stderr = _saved_stderr
 
+        # Backstop: if aider SWALLOWED a transient LLM error (printed but did not
+        # re-raise), convert it to TransientLLMError so run_with_recovery re-runs
+        # the module. Scan ALL streams — aider.log AND the chat/llm history; a
+        # MidStreamFallbackError ("peer closed connection ... incomplete chunked
+        # read") lands in .aider.chat.history.md but NOT aider.log. Placed OUTSIDE
+        # the try/finally so it propagates to the recovery wrapper.
+        _session_text = ""
+        for _p in (log_file, chat_history_file, log_dir / "llm_history.txt"):
+            try:
+                _session_text += "\n" + Path(_p).read_text(errors="replace")
+            except OSError:
+                continue
+        raise_if_transient_llm_error(_session_text, context=f"module {fnames}")
+
         agent_return = AiderReturn(log_file)
         agent_return.test_summarizer_cost = sum(c.cost for c in _test_summarizer_costs)
 

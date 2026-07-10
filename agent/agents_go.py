@@ -564,10 +564,16 @@ class AiderGoAgents(GoAgents):
         # signal list — a genuine model/edit failure is NOT retried this way.
         from agent.agents import raise_if_transient_llm_error
 
-        try:
-            session_text = log_file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            session_text = ""
+        # Scan ALL streams aider may record a swallowed transient in — aider.log
+        # AND the chat/llm history. A MidStreamFallbackError lands in
+        # .aider.chat.history.md but NOT aider.log, so reading only log_file
+        # missed it -> no retry -> silently incomplete module.
+        session_text = ""
+        for _p in (log_file, chat_history_file, log_dir / "llm_history.txt"):
+            try:
+                session_text += "\n" + Path(_p).read_text(errors="replace")
+            except OSError:
+                continue
         raise_if_transient_llm_error(
             session_text, context=f"module {current_module}"
         )

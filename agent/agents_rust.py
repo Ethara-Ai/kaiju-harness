@@ -293,13 +293,20 @@ class RustAiderAgents(AiderAgents):
         # (c) backstop: if aider SWALLOWED a transient LLM error into the session
         # output (printed but did not re-raise), convert it into a TransientLLMError
         # so run_with_recovery re-runs the module. Read the captured session text
-        # from log_file AFTER stdout/stderr are restored. Raised OUTSIDE the try/
-        # except above so it propagates to the run_with_recovery wrapper. Only fires
-        # on transient signals (helper guards this) — genuine failures aren't retried.
-        try:
-            _session_text = Path(log_file).read_text(errors="replace")
-        except OSError:
-            _session_text = ""
+        # AFTER stdout/stderr are restored. Raised OUTSIDE the try/except above so
+        # it propagates to the run_with_recovery wrapper. Only fires on transient
+        # signals (helper guards this) — genuine failures aren't retried.
+        # Scan ALL streams aider may record the error in: the redirected stdout/
+        # stderr (aider.log) AND the chat history / llm history. A
+        # MidStreamFallbackError ("peer closed connection ... incomplete chunked
+        # read") lands in .aider.chat.history.md but NOT aider.log, so reading only
+        # log_file missed it -> no retry -> a silently incomplete module.
+        _session_text = ""
+        for _p in (log_file, chat_history_file, log_dir / "llm_history.txt"):
+            try:
+                _session_text += "\n" + Path(_p).read_text(errors="replace")
+            except OSError:
+                continue
         raise_if_transient_llm_error(_session_text, context=f"module {current_module}")
 
         agent_return = AiderReturn(log_file)
