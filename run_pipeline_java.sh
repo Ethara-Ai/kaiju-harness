@@ -282,6 +282,24 @@ resolve_dataset_java() {
 
 resolve_dataset_java "$DATASET_ARG"
 
+# Write the in-container commit0-java config. Both agent.config_java and
+# `commit0-java evaluate` read the DEFAULT .commit0.java.yaml from CWD (evaluate
+# takes no --commit0-config-file flag). prepare wrote it on the HOST with the host
+# dataset filename, but it is NOT present in the container's /opt/kaiju — so the
+# eval died with "Invalid value: .commit0.java.yaml not found". Regenerate it here
+# with the CONTAINER-resolved dataset so both the agent and the eval find it.
+if [[ -n "${DATASET_FILE:-}" ]]; then
+    cat > "${BASE_DIR}/.commit0.java.yaml" <<EOF
+# commit0 Java config (generated in-container by run_pipeline_java.sh)
+dataset_name: ${DATASET_FILE}
+dataset_split: ${DATASET_SPLIT}
+repo_split: ${REPO_SPLIT}
+base_dir: repos
+EOF
+    log "  Wrote in-container config: ${BASE_DIR}/.commit0.java.yaml (dataset=${DATASET_FILE})" 2>/dev/null || \
+      echo "  Wrote in-container config: ${BASE_DIR}/.commit0.java.yaml"
+fi
+
 DATASET_UUID=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[0].get('id','') if d else '')" "$DATASET_FILE" 2>/dev/null || true)
 DATASET_N=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$DATASET_FILE" 2>/dev/null || echo 1)
 if [[ "$DATASET_N" -gt 1 ]]; then

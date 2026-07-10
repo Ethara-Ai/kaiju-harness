@@ -155,6 +155,14 @@ def _generate_patch_for_repo(
     repo_name = instance.get("repo", instance.get("instance_id", "unknown"))
     short_name = repo_name.split("/")[-1] if "/" in repo_name else repo_name
     repo_path = instance.get("repo_path", "")
+    # Containerized local_inplace runs don't carry a host repo_path in the dataset
+    # (prepare runs on the host; the repo is baked into the image). Default to the
+    # canonical in-container repo dir so the eval finds the tree instead of failing
+    # with "Repo path '' not found".
+    if not repo_path:
+        from commit0.harness.constants import ABSOLUTE_REPO_DIR
+        if Path(ABSOLUTE_REPO_DIR).exists():
+            repo_path = ABSOLUTE_REPO_DIR
     base_commit = instance.get("base_commit", "")
 
     if not repo_path or not Path(repo_path).exists():
