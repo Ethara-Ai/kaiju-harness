@@ -516,8 +516,10 @@ write_agent_config() {
 
     local user_prompt
     user_prompt=$(cat <<'EOP'
-You need to complete the implementations for all stubbed functions
-(those whose body calls `STUB_PANIC("...")`) and pass the unit tests.
+Complete the implementation of the stubbed functions in the ONE source file
+added to the chat - the functions whose body calls `STUB_PANIC("...")`.
+Focus ONLY on that file. The other stubbed files in this repo are implemented
+in SEPARATE runs, so do not read, reference, or try to modify them.
 Do not change function signatures or modify any test file
 (files under tests/, test/, or matching test_*.c / *_test.c / check_*.c).
 Code MUST compile before any test will run: if a function is incomplete,
@@ -525,11 +527,13 @@ leave a minimal placeholder that builds rather than a broken stub.
 EOP
 )
 
+    # NOTE: --use-repo-info is intentionally OFF. It injected the WHOLE repo dir
+    # tree into every per-module session (matching python, which keeps it off),
+    # framing the agent repo-wide when it may only edit its single target file.
     "$VENV_PYTHON" -m agent.config_c config aider \
         --model-name "$MODEL_NAME" \
         --use-user-prompt \
         --max-iteration "$MAX_ITERATION" \
-        --use-repo-info \
         --use-unit-tests-info \
         $( [[ "$USE_SPEC_INFO" == "true" ]] && echo "--use-spec-info" || true ) \
         $( [[ "$lint_info" == "true" ]] && echo "--use-lint-info" || true ) \
