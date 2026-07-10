@@ -84,8 +84,12 @@ def clone_repo(slug: str, dest: Path) -> Path:
     name = slug.split("/")[-1]
     target = dest / name
     if target.exists():
-        logger.info("Reusing existing clone at %s", target)
-        return target
+        # IDEMPOTENCY: a prior (possibly failed) prepare leaves a working copy on
+        # the `commit0_all` branch with stubbed files, so reusing it makes the next
+        # `git checkout -b commit0_all` fail (exit 128) — fatal for batch retries.
+        # Re-clone fresh for a guaranteed-clean state (a small repo is a few sec).
+        logger.info("Existing clone at %s — removing for a clean re-clone", target)
+        shutil.rmtree(target, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     logger.info("Cloning %s -> %s", slug, target)
     subprocess.run(

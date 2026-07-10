@@ -319,6 +319,36 @@ def _import_clang():
             "libclang Python bindings not found. Install via "
             "'apt install python3-clang-18' or 'pip install clang==18.1.8'."
         ) from exc
+    # On macOS the python bindings don't ship libclang.dylib and the default
+    # loader search misses the Command Line Tools / Xcode copy — point cindex at
+    # it explicitly (honoring CLANG_LIBRARY_FILE if the operator set one). Linux
+    # (Docker python3-clang-18) finds its .so on the default path, so only do
+    # this when a real file is located and cindex isn't already configured.
+    import os as _os, sys as _sys, subprocess as _sp
+    if _sys.platform == "darwin":
+        _cands = []
+        _envf = _os.environ.get("CLANG_LIBRARY_FILE")
+        if _envf:
+            _cands.append(_envf)
+        try:
+            _dev = _sp.check_output(["xcode-select", "-p"], text=True).strip()
+            _cands.append(_os.path.join(_dev, "usr", "lib", "libclang.dylib"))
+            _cands.append(_os.path.join(_dev, "Toolchains", "XcodeDefault.xctoolchain",
+                                        "usr", "lib", "libclang.dylib"))
+        except Exception:  # noqa: BLE001
+            pass
+        _cands += [
+            "/Library/Developer/CommandLineTools/usr/lib/libclang.dylib",
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/"
+            "XcodeDefault.xctoolchain/usr/lib/libclang.dylib",
+        ]
+        for _lib in _cands:
+            if _lib and _os.path.isfile(_lib):
+                try:
+                    cindex.Config.set_library_file(_lib)
+                except Exception:  # noqa: BLE001 - already-initialized is fine
+                    pass
+                break
     return cindex
 
 

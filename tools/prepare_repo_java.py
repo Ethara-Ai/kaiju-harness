@@ -641,18 +641,58 @@ def prepare_java_repos(
     return dataset_entries
 
 
+def _resolve_latest_java_tag(repo: str):
+    """Return the latest STABLE release tag for owner/repo via `git ls-remote
+    --tags` (skips rc/alpha/beta/M#/snapshot/preview). Handles Apache 'rel/...'
+    prefixed tags. Returns None if nothing resolvable."""
+    import re as _re
+    try:
+        out = subprocess.run(
+            ["git", "ls-remote", "--tags", "--refs",
+             f"https://github.com/{repo}.git"],
+            capture_output=True, text=True, timeout=60, check=True,
+        ).stdout
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not list tags for %s: %s", repo, e)
+        return None
+    best = None  # (version_tuple, tag)
+    for line in out.splitlines():
+        parts = line.split("refs/tags/")
+        if len(parts) != 2:
+            continue
+        tag = parts[1].strip()
+        if _re.search(r"(?i)(rc|alpha|beta|-m\d|snapshot|preview|\bdev\b)", tag):
+            continue
+        m = _re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", tag)
+        if not m:
+            continue
+        ver = tuple(int(x or 0) for x in m.groups())
+        if best is None or ver > best[0]:
+            best = (ver, tag)
+    return best[1] if best else None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Prepare Java repos for commit0 dataset"
     )
     parser.add_argument(
         "dataset_file",
-        help="Input java_dataset.json with repo entries",
+        nargs="?",
+        help="Input java_dataset.json with repo entries (optional in --repo mode)",
     )
     parser.add_argument(
         "--repo",
         type=str,
-        help="Prepare a single repo (e.g., apache/commons-io)",
+        help="Prepare a single repo (e.g., apache/commons-io). Without a "
+             "dataset_file this synthesizes a single-repo entry (needs --tag or a "
+             "resolvable latest release tag for base_commit).",
+    )
+    parser.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="Release tag for base_commit in --repo mode (default: latest stable).",
     )
     parser.add_argument(
         "--output",
@@ -705,14 +745,33 @@ def main() -> None:
         os.environ["KAIJU_LOG_LAYOUT"] = args.layout
     _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
-    # Load entries
-    raw = json.loads(Path(args.dataset_file).read_text())
-    if isinstance(raw, dict) and "entries" in raw:
-        entries = raw["entries"]
-    elif isinstance(raw, list):
-        entries = raw
+    # Load entries: a curated dataset_file, OR synthesize a single entry from
+    # --repo (discover-from-repo mode, like js/go). java clones at a release TAG
+    # for base_commit, so --repo mode needs --tag or a resolvable latest stable.
+    if not args.dataset_file:
+        if not args.repo:
+            parser.error("either a dataset_file positional or --repo is required")
+        _tag = args.tag or _resolve_latest_java_tag(args.repo)
+        if not _tag:
+            parser.error(
+                f"could not resolve a release tag for {args.repo}; pass --tag <tag>")
+        entries = [{
+            "repo": args.repo,
+            "base_commit": _tag,
+            "reference_commit": _tag,
+            "src_dir": "src/main/java",
+            "setup": {"build_system": "maven", "java_version": "17"},
+            "test": {},
+        }]
+        logger.info("Synthesized single-repo entry for %s @ %s", args.repo, _tag)
     else:
-        parser.error("Unrecognized dataset format")
+        raw = json.loads(Path(args.dataset_file).read_text())
+        if isinstance(raw, dict) and "entries" in raw:
+            entries = raw["entries"]
+        elif isinstance(raw, list):
+            entries = raw
+        else:
+            parser.error("Unrecognized dataset format")
         return
 
     clone_dir = Path(args.clone_dir)
@@ -750,6 +809,23 @@ def main() -> None:
         output_path = Path(args.output)
         output_path.write_text(json.dumps(dataset_entries, indent=2))
         logger.info("Saved %d entries to %s", len(dataset_entries), output_path)
+
+    # Emit the host-side build config (parity with prepare_repo_go/rust/cpp) so
+    # `cli_java build --commit0-config-file .commit0_java.yaml` works from
+    # run_trajectory.sh without a hand-written config.
+    if dataset_entries and args.output:
+        try:
+            _cfg = Path(".commit0_java.yaml")
+            _cfg.write_text(
+                f"# commit0 Java config for {dataset_entries[0].get('original_repo', args.repo or '?')}\n"
+                f"dataset_name: ./{Path(args.output).name}\n"
+                "dataset_split: test\n"
+                "repo_split: all\n"
+                "base_dir: repos\n"
+            )
+            logger.info("Wrote build config %s", _cfg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not write .commit0_java.yaml: %s", e)
 
     # Summary
     print(f"\n{'=' * 80}")
