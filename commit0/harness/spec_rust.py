@@ -12,7 +12,11 @@ from commit0.harness.constants import (
     SimpleInstance,
 )
 from commit0.harness.spec import Spec
-from commit0.harness.eval_hardening import revert_and_clean_lines
+from commit0.harness.eval_hardening import (
+    revert_and_clean_lines,
+    guard_snapshot_lines,
+    guard_heal_lines,
+)
 from commit0.harness.dockerfiles.__init__rust import (
     get_dockerfile_base_rust,
     get_dockerfile_repo_rust,
@@ -113,6 +117,18 @@ def _split(src):
     return out
 def _sh(*a):
     return subprocess.run(a, capture_output=True, text=True).stdout
+def _balanced(s):
+    # Cheap, dependency-free proxy for "still parses": with comments/strings
+    # blanked, every bracket kind must balance. The brace-based _split can
+    # mis-segment files whose in-src tests are EMITTED by macro_rules! (e.g.
+    # byteorder's `mod $name { ... }` test templates): the impl/test cut then
+    # lands inside a macro body and the reassembled file is unbalanced. Building
+    # on that would fail a VALID submission (compiles + all tests pass) with a
+    # bogus COMPILE_FAILED. Balance is exactly the property that breaks here.
+    c = _strip_code(s)
+    return (c.count('{') == c.count('}')
+            and c.count('(') == c.count(')')
+            and c.count('[') == c.count(']'))
 for f in _sh('git', 'diff', '--name-only', BASE, '--', 'src').split():
     try:
         if not f.endswith('.rs'):
@@ -123,9 +139,18 @@ for f in _sh('git', 'diff', '--name-only', BASE, '--', 'src').split():
         base_src = _sh('git', 'show', BASE + ':' + f)
         if not _TA.search(base_src):
             continue
-        impl = '\n'.join(t for t, x in _split(p.read_text()) if not x)
+        model_src = p.read_text()
+        impl = '\n'.join(t for t, x in _split(model_src) if not x)
         tests = '\n'.join(t for t, x in _split(base_src) if x)
-        p.write_text(impl.rstrip() + '\n\n' + tests.strip() + '\n')
+        rewritten = impl.rstrip() + '\n\n' + tests.strip() + '\n'
+        # SAFETY NET: only commit the rewrite if it stays balanced AND the model
+        # file itself was balanced. If the splitter corrupted the rewrite (macro-
+        # generated tests, unusual nesting, ...), KEEP the model's file untouched
+        # — losing the in-src cheat-guard on this one file is far better than a
+        # false COMPILE_FAILED on code that actually compiles. The separate
+        # marker-count guard still runs on the intact file and reports honestly.
+        if _balanced(model_src) and _balanced(rewritten):
+            p.write_text(rewritten)
     except Exception:
         pass
 '''
@@ -256,22 +281,17 @@ class RustSpec(Spec):
         # never touch tests. Prefer the python pass (reconstructs impl + BASE's
         # tests for ANY layout — see _INSRC_RESTORE_PY); fall back to the
         # cfg(test)-module bash splice only when python3 is absent.
+        # python3-absent fallback. The old line-number splice here had NO
+        # well-formedness check and could corrupt a valid file (the byteorder
+        # macro_rules! class of bug) — and crucially, when python3 is missing the
+        # Layer-2 heal guard can't run either, so there is no backstop. A corrupted
+        # tree (false COMPILE_FAILED on working code) is strictly worse than a
+        # skipped restore (still backstopped by the marker-count cheat guard). So
+        # when python3 is unavailable we SKIP the in-src restore rather than risk
+        # corruption. (python3 is present in every eval image; this is dead-safe.)
         insrc_bash = (
-            f"for f in $(git diff --name-only {base_commit} -- 'src/*.rs' 'src/**/*.rs' 2>/dev/null); do\n"
-            '  [ -f "$f" ] || continue\n'
-            f'  base_ln=$(git show {base_commit}:"$f" 2>/dev/null | '
-            "grep -nE '^[[:space:]]*#\\[cfg\\(test\\)\\]' | head -1 | cut -d: -f1)\n"
-            '  [ -z "$base_ln" ] && continue\n'
-            "  model_ln=$(grep -nE '^[[:space:]]*#\\[cfg\\(test\\)\\]' \"$f\" | head -1 | cut -d: -f1)\n"
-            '  if [ -n "$model_ln" ] && [ "$model_ln" -gt 1 ]; then\n'
-            '    head -n $((model_ln-1)) "$f" > "$f.kaiju_impl" 2>/dev/null || continue\n'
-            '  else\n'
-            '    : > "$f.kaiju_impl"\n'
-            '    [ -z "$model_ln" ] && cp "$f" "$f.kaiju_impl"\n'
-            '  fi\n'
-            f'  git show {base_commit}:"$f" 2>/dev/null | tail -n +"$base_ln" >> "$f.kaiju_impl"\n'
-            '  mv "$f.kaiju_impl" "$f"\n'
-            "done"
+            "echo 'kaiju: python3 unavailable — skipping in-src test restore "
+            "(marker-count guard still applies)' >&2"
         )
         insrc_restore = (
             "if command -v python3 >/dev/null 2>&1; then\n"
@@ -289,11 +309,29 @@ class RustSpec(Spec):
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
             f"if [ -s {diff_path} ]; then",
-            f"  git apply --allow-empty --3way -v {diff_path} 2>git_apply_stderr.log",
+            # Apply order matters. The patch is a clean `git diff base..branch`,
+            # so PLAIN `git apply` reconstructs the tree byte-exactly and is fully
+            # deterministic. `--3way` is a 3-WAY MERGE fallback that can return
+            # success (rc=0) while SILENTLY mis-resolving into a syntactically
+            # broken file (observed: a duplicated `}` -> `unexpected closing
+            # delimiter` -> false COMPILE_FAILED even though the agent's branch
+            # compiles and passes every test). Its merge behaviour is also
+            # git-version dependent. So try the exact paths first and keep the
+            # merge as a genuine last resort:
+            #   plain -> --recount (tolerate off-by-N hunk headers, still exact
+            #   positional) -> --3way (merge, may fuzz). Every other language's
+            #   eval script already uses plain `git apply`; this brings Rust in
+            #   line and eliminates the silent-corruption failure mode.
+            f"  git apply --allow-empty -v {diff_path} 2>git_apply_stderr.log",
             "  apply_rc=$?",
             "  if [ $apply_rc -ne 0 ]; then",
-            "    echo \"INFO: --3way apply failed (rc=$apply_rc); retrying with plain git apply\" >&2",
-            f"    git apply --allow-empty -v {diff_path} 2>>git_apply_stderr.log",
+            "    echo \"INFO: plain apply failed (rc=$apply_rc); retrying with --recount\" >&2",
+            f"    git apply --allow-empty --recount -v {diff_path} 2>>git_apply_stderr.log",
+            "    apply_rc=$?",
+            "  fi",
+            "  if [ $apply_rc -ne 0 ]; then",
+            "    echo \"INFO: --recount apply failed (rc=$apply_rc); last resort --3way merge\" >&2",
+            f"    git apply --allow-empty --3way -v {diff_path} 2>>git_apply_stderr.log",
             "    apply_rc=$?",
             "  fi",
             "  if [ $apply_rc -ne 0 ]; then",
@@ -303,8 +341,16 @@ class RustSpec(Spec):
             "    exit 0",
             "  fi",
             "fi",
+            # Layer-2 guard: snapshot the model's applied (known-good) tree BEFORE
+            # the anti-cheat rewrites below, so any rewrite that corrupts a valid
+            # file can be healed just before the build (see eval_hardening).
+            *guard_snapshot_lines(),
             revert_test_paths,
             "git status",
+            # Heal any file a rewrite turned balanced->unbalanced (harness-induced
+            # corruption) back to the model's applied version, so a compiling
+            # submission is never scored COMPILE_FAILED by the harness itself.
+            *guard_heal_lines(),
             # Force serial test execution (A4): async/UDP crates bind real sockets on
             # fixed ports; parallel libtest threads collide -> spurious, nondeterministic
             # failures unrelated to the model. RUST_TEST_THREADS=1 makes runs reproducible.

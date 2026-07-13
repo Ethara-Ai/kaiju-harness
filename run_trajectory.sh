@@ -157,6 +157,11 @@ done
 export PATH
 
 # ---- defaults ----
+# Default fork/push org is zahgon (the shared org). Override per-run with
+# --org <name> or $KAIJU_FORK_ORG. NOTE: your token must have WRITE access to
+# this org — otherwise prepare fails fast with an actionable message (a bad org
+# -> push 403 -> the dataset would record commits that were never pushed -> the
+# container build git-fails with "not our ref"); prepare now refuses that.
 REPO=""; LNG=""; MODEL="gpt55"; ITER=""; ORG="zahgon"
 CLONE="repos_staging"; SKIP_PREP=0; PRINT=0; REUSE_BRIDGE=0
 PREPARE_ARGS=""; RUN_ARGS=""; PIPELINE_ARGS=""
@@ -238,6 +243,8 @@ case "$MODEL" in
     export KAIJU_CC_BRIDGE_SECRET="${KAIJU_CC_BRIDGE_SECRET:-kaiju-cc-fixed}" ;;
   *) BRIDGE="none" ;;   # vertex/bedrock/gemini -> direct host creds, no bridge
 esac
+
+echo "== fork/push org: $ORG (default zahgon; override with --org) =="
 
 # resolved command lines (single source of truth for --print and for execution)
 # c's prepare CLI has no --org (it forks to its default); every other lang accepts it.

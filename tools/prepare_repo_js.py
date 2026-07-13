@@ -542,6 +542,72 @@ def _capture_js_test_ids(
         )
 
 
+def _validate_and_repair_js_stubs(
+    repo_dir: Path, reference_commit: str
+) -> "bool | None":
+    """Post-stub SYNTAX gate for JavaScript (the "correct stubbed code" guarantee).
+
+    The Babel stubber can, on unusual-but-valid source (arrow bodies, getters/
+    setters, class fields, unusual template literals), emit a syntactically BROKEN
+    file. Committing that means the agent starts from un-parseable code and any 0%
+    is infra, not the model. So we run ``node --check`` — Node's own parser, the
+    authoritative + dependency-free oracle — on every STAGED stub file. Any file
+    that fails is reverted to its pristine (pre-stub) blob, so the committed base
+    ALWAYS parses; a reverted file simply isn't a task file (far better than a
+    corrupt base). Mirrors C's differential-parse gate in spirit.
+
+    Returns base_compiles: True (node ran, committed base parses), None (node
+    unavailable -> unknown, no false gate). Raises only if EVERY stub file was
+    broken (degenerate: the stubber produced nothing but invalid syntax).
+    """
+    if shutil.which("node") is None:
+        logger.info("  node unavailable; skipping JS stub syntax gate (base_compiles=unknown).")
+        return None
+    staged = git(
+        repo_dir, "diff", "--cached", "--name-only", "--",
+        "*.js", "*.mjs", "*.cjs", "*.jsx",
+    )
+    files = [f for f in staged.splitlines() if f.strip()]
+    checked = 0
+    reverted = 0
+    for rel in files:
+        p = repo_dir / rel
+        if not p.is_file():
+            continue
+        rc = subprocess.run(
+            ["node", "--check", str(p)], capture_output=True, text=True
+        )
+        if rc.returncode == 0:
+            checked += 1
+            continue
+        first = (rc.stderr.strip().splitlines() or [""])[0]
+        logger.warning(
+            "  JS stub produced INVALID syntax in %s (node --check: %s) — reverting "
+            "this file to pristine so the base stays valid (it won't be a task file).",
+            rel, first,
+        )
+        try:
+            git(repo_dir, "checkout", reference_commit, "--", rel)
+            git(repo_dir, "add", "--", rel)
+            reverted += 1
+        except Exception as e:  # noqa: BLE001
+            logger.error("  Could not revert corrupted stub %s: %s", rel, e)
+            return False
+    if checked == 0 and reverted > 0:
+        raise RuntimeError(
+            "Every stubbed JS file failed `node --check` — the stubber produced "
+            "only invalid syntax. Refusing to emit a corrupt base."
+        )
+    if reverted:
+        logger.info(
+            "  JS stub gate: %d valid stub file(s), %d reverted for invalid syntax.",
+            checked, reverted,
+        )
+    else:
+        logger.info("  JS stub gate: all %d stub file(s) parse (node --check).", checked)
+    return True
+
+
 def create_js_stubbed_branch(
     repo_dir: Path,
     full_name: str,
@@ -551,8 +617,9 @@ def create_js_stubbed_branch(
     base_branch_name: str = JS_BASE_BRANCH,
     test_framework: str | None = None,
     test_dir: str | None = None,
-) -> tuple[str, str, int]:
-    """Create the JS commit0 + commit0_dataset branches; returns (base, ref, n_stubbed)."""
+) -> "tuple[str, str, int, bool | None]":
+    """Create the JS commit0 + commit0_dataset branches; returns
+    (base, ref, n_stubbed, base_compiles)."""
     # Record reference + branch from the CURRENT HEAD (the pinned tag when --tag
     # checked one out). Checking out the default branch first silently discarded
     # the tag, so base_commit was built on the default tip while reference_commit
@@ -719,10 +786,15 @@ def create_js_stubbed_branch(
             "stubs did not land in JavaScript source files."
         )
 
+    # Correct-stubbing gate: verify every stub file parses; revert any the stubber
+    # corrupted so the committed base is always valid (see helper). Runs after the
+    # marker check and BEFORE the commit so the base only ever contains valid code.
+    base_compiles = _validate_and_repair_js_stubs(repo_dir, reference_commit)
+
     git(repo_dir, "commit", "-m", "Commit 0")
     base_commit = get_head_sha(repo_dir)
     logger.info("  Base commit (stubbed): %s", base_commit[:12])
-    return base_commit, reference_commit, functions_stubbed
+    return base_commit, reference_commit, functions_stubbed, base_compiles
 
 
 def _resolve_commits_from_remote(
@@ -806,7 +878,7 @@ def prepare_js_repo(
         return None
     logger.info("  Test framework: %s, Package manager: %s", test_framework, pkg_manager)
 
-    base_commit, reference_commit, functions_stubbed = create_js_stubbed_branch(
+    base_commit, reference_commit, functions_stubbed, base_compiles = create_js_stubbed_branch(
         repo_dir,
         full_name,
         src_dir,
@@ -853,6 +925,10 @@ def prepare_js_repo(
         "test_framework": test_framework,
         "package_manager": pkg_manager,
         "functions_stubbed": functions_stubbed,
+        # Tri-state: True = stubbed base parses (node --check), None = node
+        # unavailable (unknown). An evaluator can downgrade a 0% when this is not
+        # True (infra, not model). Mirrors python/c/go/rust/java.
+        "base_compiles": base_compiles,
         "setup": setup_dict,
         "test": test_dict,
     }

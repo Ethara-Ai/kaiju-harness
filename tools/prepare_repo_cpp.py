@@ -703,6 +703,143 @@ def save_test_ids(repo_name: str, test_ids: list[str]) -> Path | None:
     return bz2_path
 
 
+_CPP_EXT = (".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".ipp", ".tpp")
+_CPP_SKIP_RE = re.compile(
+    r"(^|/)(build|builddir|cmake-build[^/]*|third[_-]?party|external|extern|"
+    r"vendor|deps|_deps|subprojects|googletest|gtest|catch2|Catch2|doctest|"
+    r"benchmark|examples?|tests?)(/|$)",
+    re.I,
+)
+
+
+def _cpp_parse_error_count(root: "Any") -> int:
+    """ERROR + MISSING node count in a tree-sitter parse (structural-error
+    signature). Same idea as C's ``_c_parse_error_signature``."""
+    n = 0
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "ERROR" or getattr(node, "is_missing", False):
+            n += 1
+        stack.extend(node.children)
+    return n
+
+
+def _stubbed_base_compiles_cpp(
+    repo_dir: Path, src_dirs: list[str], reference_commit: "str | None"
+) -> "bool | None":
+    """C++ analog of C's differential tree-sitter gate (the "correct stubbed code"
+    guarantee for C++).
+
+    ``cppstubber``/tree-sitter-fallback can, on templates / macros / unusual
+    declarators, emit a syntactically BROKEN file. A full compile can't cleanly
+    attribute a failure to the stub (missing headers, third-party libs), so — like
+    C — we re-parse every stubbed C++ file with the tree-sitter C++ grammar and
+    compare to the PRISTINE blob. A file only fails when the stub INCREASED its
+    structural-error count (a real splice corruption; preprocessor/template
+    constructs produce equal counts before and after). Any such file is REVERTED
+    to pristine so the committed base always parses (a reverted file just isn't a
+    task file — far better than handing the model an un-parseable tree).
+
+    Returns base_compiles: True (grammar ran, base valid after repair), None
+    (grammar/baseline unavailable -> unknown, no false gate).
+    """
+    try:
+        from tree_sitter_language_pack import get_parser as _ts_get_parser
+        parser = _ts_get_parser("cpp")
+    except Exception as e:  # noqa: BLE001
+        logger.info("cpp: tree-sitter C++ grammar unavailable (%s); base_compiles=unknown.", e)
+        return None
+
+    def _pristine_errs(rel: str) -> "int | None":
+        if not reference_commit:
+            return None
+        try:
+            blob = subprocess.run(
+                ["git", "-C", str(repo_dir), "show", f"{reference_commit}:{rel}"],
+                capture_output=True,
+            ).stdout
+        except Exception:  # noqa: BLE001
+            return None
+        if not blob:
+            return None
+        try:
+            return _cpp_parse_error_count(parser.parse(blob).root_node)
+        except Exception:  # noqa: BLE001
+            return None
+
+    checked = 0
+    reverted = 0
+    unadjudicable = False
+    seen: set[str] = set()
+    for sd in src_dirs:
+        base = repo_dir / sd
+        if not base.exists():
+            continue
+        for p in sorted(base.rglob("*")):
+            if p.suffix.lower() not in _CPP_EXT or not p.is_file():
+                continue
+            try:
+                rel = str(p.relative_to(repo_dir))
+            except ValueError:
+                continue
+            if rel in seen or _CPP_SKIP_RE.search(rel):
+                continue
+            seen.add(rel)
+            try:
+                src = p.read_bytes()
+            except OSError:
+                continue
+            if not src.strip():
+                logger.warning("cpp: stubbed file %s is empty — reverting to pristine.", rel)
+                try:
+                    git(repo_dir, "checkout", reference_commit, "--", rel)
+                    reverted += 1
+                except Exception:  # noqa: BLE001
+                    return False
+                continue
+            try:
+                root = parser.parse(src).root_node
+            except Exception:  # noqa: BLE001
+                continue
+            if not (root.has_error or getattr(root, "is_missing", False)):
+                checked += 1
+                continue
+            stub_errs = _cpp_parse_error_count(root)
+            pris = _pristine_errs(rel)
+            if pris is None:
+                unadjudicable = True
+                continue
+            if stub_errs > pris:
+                logger.warning(
+                    "cpp: stub introduced %d NEW structural parse error(s) in %s "
+                    "(pristine %d, stubbed %d) — reverting this file to pristine.",
+                    stub_errs - pris, rel, pris, stub_errs,
+                )
+                if not reference_commit:
+                    return False
+                try:
+                    git(repo_dir, "checkout", reference_commit, "--", rel)
+                    reverted += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.error("cpp: could not revert corrupted stub %s: %s", rel, e)
+                    return False
+            else:
+                # equal error count => pre-existing preprocessor/template construct,
+                # not a stub bug (mirrors C's differential logic).
+                checked += 1
+    if reverted:
+        logger.info(
+            "cpp base gate: reverted %d corrupted stub file(s); %d valid stub file(s).",
+            reverted, checked,
+        )
+    if checked == 0 and reverted == 0 and unadjudicable:
+        return None
+    if checked == 0 and reverted == 0:
+        return None
+    return True
+
+
 def create_dataset_entry(
     upstream: str,
     fork_name: str,
@@ -722,6 +859,7 @@ def create_dataset_entry(
     pre_install: list[str] | None = None,
     build_subdir: str = ".",
     has_submodules: bool = False,
+    base_compiles: "bool | None" = None,
 ) -> dict:
     primary_src = src_dirs[0] if src_dirs else "."
     test_dir = primary_src.rsplit("/src", 1)[0] if "/src" in primary_src else "."
@@ -774,6 +912,11 @@ def create_dataset_entry(
         },
         "src_dir": ",".join(src_dirs),
         "language": "cpp",
+        # Tri-state: True = stubbed base is structurally well-formed (tree-sitter
+        # differential parse), False = a stub splice introduced a NEW structural
+        # error, None = couldn't check. Lets an evaluator downgrade a 0% that is a
+        # broken-base/infra artifact rather than a model failure (mirrors C).
+        "base_compiles": base_compiles,
     }
 
 
@@ -970,6 +1113,12 @@ def prepare_cpp_repo(
     if cleaned:
         logger.info("Stripped trailing null bytes from %d files", cleaned)
 
+    # Correct-stubbing gate: re-parse every stubbed C++ file and revert any the
+    # stubber corrupted (differential tree-sitter vs pristine) so the committed
+    # base always parses. Runs BEFORE the compile check + `git add` so the repaired
+    # tree is what gets built and committed. Records base_compiles for reporting.
+    base_compiles = _stubbed_base_compiles_cpp(repo_dir, src_dirs, reference_commit)
+
     if not skip_compile_check:
         if not verify_compiles(repo_dir, build_system, cmake_options=cmake_options):
             logger.error("Stubbed code does not compile. Aborting.")
@@ -1064,6 +1213,7 @@ def prepare_cpp_repo(
         cmake_options=merged_cmake_options or None,
         pre_install=pre_install,
         has_submodules=has_submodules,
+        base_compiles=base_compiles,
     )
 
     if not dry_run:

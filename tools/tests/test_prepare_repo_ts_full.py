@@ -780,7 +780,7 @@ class TestCreateTsStubBranch:
 
                         mock_git.side_effect = git_side_effect
 
-                        base, ref, _ = create_ts_stubbed_branch(
+                        base, ref, _, _ = create_ts_stubbed_branch(
                             tmp_path, "owner/repo", "src"
                         )
 

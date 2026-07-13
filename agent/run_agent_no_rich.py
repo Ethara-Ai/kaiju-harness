@@ -33,7 +33,9 @@ from agent.run_agent import (
     DirContext,
     _collect_worker_results,
     run_eval_after_each_commit,
+    _skip_failed_module,
 )
+from agent.agents import TransientLLMError
 import logging
 from agent.claude_code.recovery import run_with_recovery
 
@@ -82,6 +84,10 @@ def _is_module_done(log_dir: Path) -> bool:
 
 def _mark_module_done(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
+    # Clear any stale .needs_retry so a now-successful module is not
+    # ambiguously marked both done AND needs-retry (auto-resume / --resume
+    # and the "any .needs_retry left?" incomplete-check rely on this).
+    (log_dir / ".needs_retry").unlink(missing_ok=True)
     (log_dir / ".done").touch()
 
 
@@ -311,7 +317,8 @@ def _run_agent_for_repo_impl(
                                     log_dir=test_log_dir,
                                     model_short=agent_config.model_short,
                                 ):
-                    _ = run_with_recovery(agent.run, 
+                    try:
+                        _ = run_with_recovery(agent.run, 
                         "",
                         test_cmd,
                         lint_cmd,
@@ -326,6 +333,9 @@ def _run_agent_for_repo_impl(
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     _kaiju_log_dir=test_log_dir,)
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(test_log_dir, test_file_name, _tle)
+                        continue
                 module_elapsed = time.time() - module_start
                 _mark_module_done(test_log_dir)
 
@@ -389,7 +399,8 @@ def _run_agent_for_repo_impl(
                                     log_dir=lint_log_dir,
                                     model_short=agent_config.model_short,
                                 ):
-                    _ = run_with_recovery(agent.run, 
+                    try:
+                        _ = run_with_recovery(agent.run, 
                         "",
                         "",
                         lint_cmd,
@@ -402,6 +413,9 @@ def _run_agent_for_repo_impl(
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     _kaiju_log_dir=lint_log_dir,)
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(lint_log_dir, lint_file_name, _tle)
+                        continue
                 module_elapsed = time.time() - module_start
                 _mark_module_done(lint_log_dir)
 
@@ -473,7 +487,8 @@ def _run_agent_for_repo_impl(
                                     log_dir=file_log_dir,
                                     model_short=agent_config.model_short,
                                 ):
-                    _ = run_with_recovery(agent.run, 
+                    try:
+                        _ = run_with_recovery(agent.run, 
                         iter_message,
                         "",
                         lint_cmd,
@@ -485,6 +500,9 @@ def _run_agent_for_repo_impl(
                         test_files_readonly=test_files_readonly,
                         inject_test_files_readonly=agent_config.inject_test_files_readonly,
                     _kaiju_log_dir=file_log_dir,)
+                    except TransientLLMError as _tle:
+                        _skip_failed_module(file_log_dir, file_name, _tle)
+                        continue
                 module_elapsed = time.time() - module_start
                 _mark_module_done(file_log_dir)
 

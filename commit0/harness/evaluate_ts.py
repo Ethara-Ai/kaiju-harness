@@ -227,10 +227,26 @@ def main(
         if not os.path.exists(report_file):
             log_parent = os.path.dirname(report_file)
             test_output_file = os.path.join(log_parent, "test_output.txt")
+            # Map to the shared status vocabulary so the pipeline never scores an
+            # infra/patch failure as a genuine 0%. eval.sh writes the sentinel
+            # "PATCH_APPLY_FAILED" (and nothing else) when `git apply` fails.
             if os.path.exists(test_output_file):
-                reason = "runner_crash_or_collection_error"
+                try:
+                    with open(test_output_file, "r") as _f:
+                        _to = _f.read()
+                except OSError:
+                    _to = ""
+                if _to.strip() == "PATCH_APPLY_FAILED":
+                    reason = "patch_apply_failed"
+                    status = "PATCH_APPLY_FAILED"
+                else:
+                    # produced build/test output but no parseable report -> the
+                    # runner crashed or tests never compiled/collected.
+                    reason = "runner_crash_or_collection_error"
+                    status = "COMPILE_FAILED"
             else:
                 reason = "container_or_infra_failure"
+                status = "OUTPUT_MISSING"
             logger.warning(
                 f"{display_name}: missing report.tap/report.json ({reason}) — check {log_parent}"
             )
@@ -241,6 +257,7 @@ def main(
                     "passed": 0,
                     "num_passed": 0,
                     "num_tests": len(test_ids),
+                    "status": status,
                 }
             )
             continue
@@ -266,6 +283,7 @@ def main(
                     "passed": 0.0,
                     "num_passed": 0,
                     "num_tests": len(test_ids),
+                    "status": "OUTPUT_MISSING",
                 }
             )
             continue
@@ -293,13 +311,22 @@ def main(
                 "num_passed": num_passed,
                 "num_tests": num_total,
                 "suite_crashed": suite_crashed,
+                # A suite that crashes at import/setup produces 0/N that is an infra
+                # failure, not real test failures -> distinct status so it isn't
+                # scored as a genuine 0% (mirrors the other languages).
+                "status": "SUITE_CRASHED" if suite_crashed else "TESTS_RAN",
             }
         )
 
-    print("repo,runtime,num_passed/num_tests")
+    # 4th column = per-repo outcome so the shell pipeline can tell a genuine 0%
+    # model score from a build/patch/infra failure (mirrors go/rust/c/cpp).
+    print("repo,runtime,num_passed/num_tests,status")
     out = sorted(out, key=lambda x: float(str(x["sum"])), reverse=True)
     for x in out:
-        print(f"{x['name']},{x['sum']},{x['num_passed']}/{x['num_tests']}")
+        print(
+            f"{x['name']},{x['sum']},{x['num_passed']}/{x['num_tests']},"
+            f"{x.get('status', 'TESTS_RAN')}"
+        )
     total_runtime = sum(float(str(x["sum"])) for x in out)
     averaged_passed = (
         sum(float(str(x["passed"])) for x in out) / len(out) if out else 0.0

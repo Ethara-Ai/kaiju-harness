@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Union, cast
 
 from commit0.harness.spec import Spec
-from commit0.harness.eval_hardening import revert_and_clean_lines
+from commit0.harness.eval_hardening import (
+    revert_and_clean_lines,
+    guard_snapshot_lines,
+    guard_heal_lines,
+)
 from commit0.harness.constants import (
     RepoInstance,
     SimpleInstance,
@@ -213,9 +217,22 @@ class Commit0TsSpec(Spec):
         steps: list[str] = [
             f"cd {shlex.quote(self.repo_directory)}",
             f"git reset --hard {shlex.quote(base_commit)}",
-            f"git apply --allow-empty -v {shlex.quote(diff_path)}",
+            # A patch that fails to apply must NOT fall through to the test run on
+            # an unpatched (stub) tree — that produces a 0/N indistinguishable from
+            # a real 0% score. Try exact then --recount, and on failure write the
+            # sentinel evaluate_ts.py maps to PATCH_APPLY_FAILED, then stop.
+            (
+                f"if git apply --allow-empty -v {shlex.quote(diff_path)} || "
+                f"git apply --allow-empty --recount -v {shlex.quote(diff_path)}; "
+                "then :; else echo PATCH_APPLY_FAILED > test_output.txt; "
+                "echo 1 > test_exit_code.txt; exit 0; fi"
+            ),
+            # Layer-2 guard: snapshot applied tree; heal any file the anti-cheat
+            # rewrites corrupt (balanced->unbalanced) before tests run.
+            *guard_snapshot_lines(),
             *revert_lines,
             "git status",
+            *guard_heal_lines(),
         ]
         if is_node_test:
             steps.append("npm install --no-save --silent tsx 2>/dev/null || true")

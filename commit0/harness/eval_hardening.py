@@ -29,6 +29,145 @@ import shlex
 from typing import Sequence
 
 
+# ---------------------------------------------------------------------------
+# Layer-2 self-healing guard against harness-induced corruption.
+#
+# The eval reconstructs the scored run by MUTATING the tree: `git apply` the
+# model patch, then a chain of anti-cheat rewrites (per-path reverts, in-src
+# test restore, goimports, sed on build files, ...). Any of those steps can, on
+# unusual-but-valid code, turn a tree that COMPILES into one that does not —
+# scoring a working submission as COMPILE_FAILED (the byteorder macro_rules!
+# case). Enumerating every such step is a losing game across a large, diverse
+# dataset, so we add ONE general post-condition instead:
+#
+#   snapshot every changed source file RIGHT AFTER `git apply` (pure model code,
+#   known-good), then just before the build re-check each file. If a file was
+#   bracket-balanced then and is UNBALANCED now, a harness rewrite corrupted it
+#   -> restore the post-apply copy so a valid submission is never failed by the
+#   harness. The decision is DELTA-based (balanced-then, unbalanced-now), so an
+#   imperfect balance heuristic can't cause a false restore.
+#
+# Bracket balance is a cheap, dependency-free, language-agnostic proxy for "still
+# parses" that catches exactly the corruption these text rewrites produce (an
+# orphaned/duplicated brace). It is NOT a parser and is not meant to be.
+# ---------------------------------------------------------------------------
+
+_GUARD_PY = r'''
+import sys, subprocess, pathlib, shutil
+MODE = sys.argv[1]
+BASE = sys.argv[2] if len(sys.argv) > 2 else ""
+SNAP = pathlib.Path(".kaiju_snap")
+EXT = {".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hpp", ".hh", ".hxx",
+       ".go", ".rs", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".java"}
+
+def balanced(src):
+    # Blank comments/strings/char/template/raw-string literals to spaces, then
+    # require {} () [] to balance. Handles //, /* */, "...", '...', `...`, and
+    # Rust raw/byte strings r#"..."# / b"...". NOT a full parser by design.
+    out = []; i = 0; n = len(src)
+    while i < n:
+        c = src[i]
+        if c == '/' and i + 1 < n and src[i+1] == '/':
+            while i < n and src[i] != '\n': i += 1
+            continue
+        if c == '/' and i + 1 < n and src[i+1] == '*':
+            i += 2
+            while i < n and not (src[i] == '*' and i + 1 < n and src[i+1] == '/'): i += 1
+            i += 2; continue
+        if c in 'rbR':                      # rust raw/byte string prefix
+            j = i
+            while j < n and src[j] in 'rbR': j += 1
+            if j < n and src[j] == '#':
+                k = j
+                while k < n and src[k] == '#': k += 1
+                if k < n and src[k] == '"':
+                    close = '"' + src[j:k]
+                    end = src.find(close, k + 1)
+                    i = n if end < 0 else end + len(close); continue
+        if c == '"' or c == "'" or c == '`':
+            q = c; i += 1
+            while i < n and src[i] != q:
+                i += 2 if (src[i] == '\\' and i + 1 < n) else 1
+            i += 1; continue
+        out.append(c); i += 1
+    s = ''.join(out)
+    return (s.count('{') == s.count('}')
+            and s.count('(') == s.count(')')
+            and s.count('[') == s.count(']'))
+
+def changed():
+    try:
+        o = subprocess.run(["git", "diff", "--name-only", "-z", BASE, "--", "."],
+                           capture_output=True, text=True).stdout
+    except Exception:
+        return []
+    return [f for f in o.split("\0") if f]
+
+if MODE == "snapshot":
+    try: shutil.rmtree(SNAP, ignore_errors=True); SNAP.mkdir(exist_ok=True)
+    except Exception: sys.exit(0)
+    man = []
+    for f in changed():
+        p = pathlib.Path(f)
+        if p.suffix not in EXT or not p.is_file(): continue
+        try: src = p.read_text(encoding="utf-8", errors="surrogateescape")
+        except Exception: continue
+        key = str(len(man))
+        try: (SNAP / (key + ".body")).write_text(src, encoding="utf-8", errors="surrogateescape")
+        except Exception: continue
+        man.append(f + "\t" + ("1" if balanced(src) else "0") + "\t" + key)
+    try: (SNAP / "manifest.tsv").write_text("\n".join(man), encoding="utf-8")
+    except Exception: pass
+
+elif MODE == "heal":
+    mf = SNAP / "manifest.tsv"
+    if mf.is_file():
+        for line in mf.read_text(encoding="utf-8").splitlines():
+            try: f, wasbal, key = line.split("\t")
+            except ValueError: continue
+            if wasbal != "1": continue          # only heal files that STARTED valid
+            p = pathlib.Path(f)
+            if not p.is_file(): continue
+            try: cur = p.read_text(encoding="utf-8", errors="surrogateescape")
+            except Exception: continue
+            if not balanced(cur):
+                try:
+                    body = (SNAP / (key + ".body")).read_text(encoding="utf-8", errors="surrogateescape")
+                    p.write_text(body, encoding="utf-8", errors="surrogateescape")
+                    sys.stderr.write("HARNESS_HEALED " + f + "\n")
+                    print("HARNESS_HEALED " + f)
+                except Exception: pass
+    shutil.rmtree(SNAP, ignore_errors=True)
+'''
+
+
+def guard_snapshot_lines() -> list[str]:
+    """Bash lines to emit RIGHT AFTER ``git apply`` (before any anti-cheat
+    rewrite): snapshot every changed source file + its balance state. No-op when
+    python3 is unavailable (the guard is best-effort; python3 is present in every
+    eval image and already required by the Rust in-src restore)."""
+    heredoc = "cat > .kaiju_guard.py <<'KAIJU_GUARD_EOF'\n" + _GUARD_PY + "\nKAIJU_GUARD_EOF"
+    return [
+        "if command -v python3 >/dev/null 2>&1; then",
+        heredoc,
+        "  python3 .kaiju_guard.py snapshot HEAD 2>/dev/null || true",
+        "fi",
+    ]
+
+
+def guard_heal_lines() -> list[str]:
+    """Bash lines to emit JUST BEFORE the build/test step: restore any changed
+    source file that a harness rewrite turned from balanced -> unbalanced, so a
+    valid submission is never failed by the harness's own reconstruction. Prints
+    ``HARNESS_HEALED <file>`` for each file it repairs (surfaced in the log)."""
+    return [
+        "if command -v python3 >/dev/null 2>&1 && [ -f .kaiju_guard.py ]; then",
+        "  python3 .kaiju_guard.py heal HEAD 2>/dev/null || true",
+        "  rm -f .kaiju_guard.py 2>/dev/null || true",
+        "fi",
+    ]
+
+
 def revert_and_clean_lines(
     base_commit: str,
     revert_targets: Sequence[str],
@@ -83,4 +222,4 @@ def revert_and_clean_lines(
     return lines
 
 
-__all__ = ["revert_and_clean_lines"]
+__all__ = ["revert_and_clean_lines", "guard_snapshot_lines", "guard_heal_lines"]

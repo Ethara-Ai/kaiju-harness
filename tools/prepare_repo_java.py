@@ -622,8 +622,15 @@ def prepare_java_repos(
             try:
                 push_to_fork(repo_dir, fork_name, REMOTE_BRANCH)
             except Exception as e:
-                logger.error("  Push failed: %s", e)
-                # Continue anyway — local clone still usable
+                # NOT "continue anyway": the container build clones this FORK (not
+                # the local clone) and fetches base/reference commits from it, so an
+                # un-pushed dataset is UNBUILDABLE ('not our ref'). Fail fast.
+                raise RuntimeError(
+                    f"Push to {fork_name} FAILED — an un-pushed dataset is "
+                    f"unbuildable. Ensure your token has WRITE access to the fork "
+                    f"org (run_trajectory.sh: --org / $KAIJU_FORK_ORG).\n"
+                    f"Original push error: {e}"
+                ) from e
 
         # Create dataset entry
         dataset_entry = create_dataset_entry(

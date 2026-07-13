@@ -21,6 +21,8 @@ from commit0.harness.constants_c import (
 )
 from commit0.harness.c_test_parser import (
     parse_ctest_junit_with_summary,
+    parse_ctest_stdout,
+    summarize_ctest_results,
     failed_test_names,
 )
 from commit0.harness.get_c_test_ids import main as get_c_tests
@@ -236,17 +238,47 @@ def main(
 
         compile_errors = _read_compile_errors_count(name)
 
-        if not os.path.exists(xml_path):
-            # A missing test_report.xml is NOT a genuine 0% model score. Attribute
-            # it: a build error (compile_errors>0) is COMPILE_FAILED; otherwise a
-            # container/infra failure is OUTPUT_MISSING. Both are excluded from the
-            # average below (mirrors evaluate_go.py) so they never masquerade as 0/N.
+        # Get per-test results from the junit report if present, else FALL BACK to
+        # ctest's console output (test_output.txt). ctest always prints per-test
+        # Passed/Failed lines even when --output-junit did NOT write a file (wrong
+        # output path under a worktree eval, an older ctest, a crash before flush).
+        # Recovering from stdout prevents a FALSE OUTPUT_MISSING on a run that
+        # actually executed the tests (observed on C/cJSON: 18/19 passing was being
+        # scored 0/19 because the junit landed outside the local_inplace worktree).
+        results = None
+        summary = None
+        if os.path.exists(xml_path):
+            with open(xml_path, "r", errors="replace") as f:
+                xml_text = f.read()
+            results, summary = parse_ctest_junit_with_summary(xml_text)
+        elif compile_errors == 0:
+            to_path = os.path.join(name, "test_output.txt")
+            if os.path.exists(to_path):
+                try:
+                    with open(to_path, "r", errors="replace") as f:
+                        recovered = parse_ctest_stdout(f.read())
+                except OSError:
+                    recovered = {}
+                if recovered:
+                    results = recovered
+                    summary = summarize_ctest_results(recovered)
+                    logger.info(
+                        "%s: no test_report.xml; recovered %d test result(s) from "
+                        "ctest stdout (junit not written).",
+                        repo_label, len(recovered),
+                    )
+
+        if results is None:
+            # Neither a junit report nor a parseable ctest stdout. A build error
+            # (compile_errors>0) is COMPILE_FAILED; otherwise a container/infra
+            # failure is OUTPUT_MISSING. Both are EXCLUDED from the average below
+            # (mirrors evaluate_go.py) so they never masquerade as a real 0/N.
             status = (
                 OUTCOME_COMPILE_FAILED if compile_errors > 0 else OUTCOME_OUTPUT_MISSING
             )
             reason = "compile_failed" if compile_errors > 0 else "container_or_infra_failure"
             logger.warning(
-                "%s: missing test_report.xml (%s) -- check %s",
+                "%s: no test_report.xml and no recoverable ctest output (%s) -- check %s",
                 repo_label,
                 reason,
                 name,
@@ -264,10 +296,6 @@ def main(
             )
             continue
 
-        with open(xml_path, "r", errors="replace") as f:
-            xml_text = f.read()
-
-        results, summary = parse_ctest_junit_with_summary(xml_text)
         fails = failed_test_names(results)
 
         if test_ids_flat:

@@ -11,7 +11,11 @@ from commit0.harness.constants import (
     RepoInstance,
 )
 from commit0.harness.constants_go import GoRepoInstance
-from commit0.harness.eval_hardening import revert_and_clean_lines
+from commit0.harness.eval_hardening import (
+    revert_and_clean_lines,
+    guard_snapshot_lines,
+    guard_heal_lines,
+)
 from commit0.harness.spec import Spec
 
 # A commit-ish interpolated into the eval bash MUST be a bare git SHA (full or
@@ -226,9 +230,16 @@ class Commit0GoSpec(Spec):
             "    exit 0",
             "  fi",
             "fi",
+            # Layer-2 guard: snapshot the model's applied tree before the
+            # anti-cheat reverts AND `goimports -w` (which rewrites every impl
+            # file). Heal is placed AFTER goimports so a formatter that corrupts a
+            # valid file is caught too — a compiling submission is never a false
+            # COMPILE_FAILED from harness reconstruction.
+            *guard_snapshot_lines(),
             *revert_lines,
             "find . -name '*.go' -not -name '*_test.go' -not -path '*/vendor/*' -print0 | xargs -0 -r goimports -w",
             "git status",
+            *guard_heal_lines(),
             run_line,
             "echo $? > go_test_exit_code.txt",
         ]

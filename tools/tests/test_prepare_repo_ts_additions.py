@@ -357,7 +357,7 @@ class TestCreateTsStubBranchEdgeCases:
                             f"{MODULE}.subprocess.run",
                             return_value=MagicMock(returncode=0),
                         ):
-                            base, ref, _ = create_ts_stubbed_branch(
+                            base, ref, _, _ = create_ts_stubbed_branch(
                                 tmp_path, "owner/repo", "src"
                             )
 
@@ -386,7 +386,7 @@ class TestCreateTsStubBranchEdgeCases:
                             f"{MODULE}.subprocess.run",
                             return_value=MagicMock(returncode=0),
                         ):
-                            base, ref, _ = create_ts_stubbed_branch(
+                            base, ref, _, _ = create_ts_stubbed_branch(
                                 tmp_path, "owner/repo", "src"
                             )
 
@@ -422,7 +422,7 @@ class TestCreateTsStubBranchEdgeCases:
                             f"{MODULE}.subprocess.run",
                             return_value=MagicMock(returncode=0),
                         ):
-                            base, ref, _ = create_ts_stubbed_branch(
+                            base, ref, _, _ = create_ts_stubbed_branch(
                                 tmp_path, "owner/repo", "src"
                             )
 
@@ -549,7 +549,7 @@ class TestCreateTsStubBranchEdgeCases:
                             f"{MODULE}.subprocess.run",
                             return_value=MagicMock(returncode=0),
                         ):
-                            base, ref, _ = create_ts_stubbed_branch(
+                            base, ref, _, _ = create_ts_stubbed_branch(
                                 tmp_path, "owner/repo", "src"
                             )
 

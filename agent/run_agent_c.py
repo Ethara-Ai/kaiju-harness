@@ -121,6 +121,10 @@ def _is_module_done(log_dir: Path) -> bool:
 
 def _mark_module_done(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
+    # Clear any stale .needs_retry so a now-successful module is not
+    # ambiguously marked both done AND needs-retry (auto-resume / --resume
+    # and the "any .needs_retry left?" incomplete-check rely on this).
+    (log_dir / ".needs_retry").unlink(missing_ok=True)
     (log_dir / ".done").touch()
 
 

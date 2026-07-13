@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 from commit0.harness.spec import Spec
-from commit0.harness.eval_hardening import revert_and_clean_lines
+from commit0.harness.eval_hardening import (
+    revert_and_clean_lines,
+    guard_snapshot_lines,
+    guard_heal_lines,
+)
 from commit0.harness.constants import ABSOLUTE_REPO_DIR, RELATIVE_REPO_DIR
 from commit0.harness.constants_java import (
     JAVA_BASE_IMAGE_PREFIX,
@@ -241,8 +245,21 @@ class Commit0JavaSpec(Spec):
             f"git remote add origin https://github.com/{repo} 2>/dev/null || true",
             f"git fetch --depth 1 origin {base_commit} && git tag -f {base_commit} FETCH_HEAD 2>/dev/null || true",
             f"git reset --hard {base_commit}",
-            "if [ -s /patch.diff ]; then git apply -v /patch.diff; fi",
+            # A failed `git apply` must NOT fall through to compiling/testing the
+            # UNPATCHED base tree — that scores a bad patch as a model 0% (or, if
+            # base happens to build, silently tests the wrong code). Try exact then
+            # --recount; on failure mark it a build failure and stop.
+            "if [ -s /patch.diff ]; then",
+            "  git apply -v /patch.diff || git apply --recount -v /patch.diff || { "
+            "echo 'COMPILATION_FAILED' > test_exit_code.txt; "
+            "echo 'PATCH_APPLY_FAILED: git apply failed' > compile_output.txt; exit 0; }",
+            "fi",
+            # Layer-2 guard: snapshot applied tree; heal any file the anti-cheat
+            # rewrites corrupt before the compile, so a compiling submission is
+            # never a false COMPILATION_FAILED from harness reconstruction.
+            *guard_snapshot_lines(),
             *revert_lines,
+            *guard_heal_lines(),
             # Compile first — Java fails fast on compile errors
             f"{compile_cmd} 2>&1 | tee compile_output.txt",
             "COMPILE_EXIT=${PIPESTATUS[0]}",

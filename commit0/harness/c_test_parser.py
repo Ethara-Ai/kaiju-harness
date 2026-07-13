@@ -153,9 +153,44 @@ def parse_ctest_junit_with_summary(
     return results, summarize_ctest_results(results)
 
 
+# CTest console line, e.g. ` 1/19 Test  #1: cJSON_test .......   Passed    0.00 sec`
+# or `14/19 Test #14: misc_tests .......***Failed    0.00 sec`. The verdict is
+# either `Passed` or a `***`-prefixed failure/skip token (`***Failed`,
+# `***Timeout`, `***Not Run`, `***Skipped`, `***Exception: ...`).
+_CTEST_STDOUT_LINE = re.compile(
+    r"^\s*\d+/\d+\s+Test\s+#\d+:\s+(\S+)\s+\.*\s*(Passed|\*\*\*[^\n]+?)\s+\d",
+    re.MULTILINE,
+)
+
+
+def parse_ctest_stdout(text: str) -> Dict[str, TestStatus]:
+    """Parse CTest's CONSOLE output (``test_output.txt``) into
+    ``{test_name: TestStatus}``.
+
+    This is the fallback for when ``--output-junit`` did not produce a
+    ``test_report.xml`` (wrong output path under a worktree eval, an older ctest
+    without junit support, a crash before the file is flushed, ...). ctest always
+    prints a per-test ``Passed``/``***Failed`` line to stdout, so the console is a
+    reliable ground-truth source that prevents a FALSE ``OUTPUT_MISSING`` on a run
+    that genuinely executed the tests.
+    """
+    results: Dict[str, TestStatus] = {}
+    for m in _CTEST_STDOUT_LINE.finditer(text):
+        name = m.group(1)
+        verdict = m.group(2)
+        if verdict == "Passed":
+            results[name] = TestStatus.PASSED
+        elif "Skipped" in verdict or "Not Run" in verdict or "Disabled" in verdict:
+            results[name] = TestStatus.SKIPPED
+        else:
+            results[name] = TestStatus.FAILED
+    return results
+
+
 __all__ = [
     "parse_ctest_junit",
     "parse_ctest_junit_with_summary",
+    "parse_ctest_stdout",
     "summarize_ctest_results",
     "failed_test_names",
     "compute_c_pass_rate",

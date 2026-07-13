@@ -16,7 +16,11 @@ from commit0.harness.constants import (
     RepoInstance,
 )
 from commit0.harness.constants_c import CRepoInstance
-from commit0.harness.eval_hardening import revert_and_clean_lines
+from commit0.harness.eval_hardening import (
+    revert_and_clean_lines,
+    guard_snapshot_lines,
+    guard_heal_lines,
+)
 from commit0.harness.spec import Spec
 
 
@@ -148,8 +152,13 @@ class Commit0CSpec(Spec):
             "echo PATCH_APPLY_FAILED > compile_errors.txt; "
             "echo 1 > test_exit_code.txt; exit 0; }",
             "fi",
+            # Layer-2 guard: snapshot the model's applied tree before anti-cheat
+            # rewrites; heal any file they corrupt (balanced->unbalanced) before
+            # the build, so a compiling submission is never a false COMPILE_FAILED.
+            *guard_snapshot_lines(),
             *revert_lines,
             "git status",
+            *guard_heal_lines(),
             # Strip -Werror from the generated ninja files after configure. A
             # stubbed / partially-implemented function has UNUSED PARAMETERS, and
             # repos that build with -Werror (cJSON and many quality C libs) turn

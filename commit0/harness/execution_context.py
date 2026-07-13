@@ -278,12 +278,20 @@ class LocalInplace(ExecutionContext):
             Path(patch_scratch).write_text("")
             patch_dest_orig = "/patch.diff"
 
-        # Rewrite eval.sh: point cwd at the worktree and the patch at the scratch
-        # file. Everything else (reset/apply/revert/cheat-guard) is untouched.
+        # Rewrite eval.sh for the worktree. We must repoint EVERY absolute
+        # reference to the container repo dir (repo_dir, e.g. /testbed) at the
+        # throwaway worktree — NOT just the `cd`. A hardcoded output path inside a
+        # test command (e.g. `ctest --output-junit /testbed/test_report.xml`)
+        # otherwise writes the report OUTSIDE the worktree; the collector then
+        # finds no report and the eval falsely reports OUTPUT_MISSING even though
+        # the tests ran and passed (observed on C/cJSON: 18/19 passing scored as
+        # 0/19). repo_dir is a distinctive absolute path, so a global replace is
+        # safe and subsumes the old single `cd` rewrite. Everything else
+        # (reset/apply/revert/cheat-guard) is untouched.
         eval_src = Path(eval_entry["src"]).read_text(
             encoding="utf-8", errors="surrogateescape"
         )
-        eval_src = eval_src.replace(f"cd {self.repo_dir}\n", f"cd {self.worktree}\n", 1)
+        eval_src = eval_src.replace(self.repo_dir, self.worktree)
         eval_src = eval_src.replace(patch_dest_orig, patch_scratch)
         self.eval_script_path = os.path.join(self.work_root, "eval.sh")
         Path(self.eval_script_path).write_text(eval_src, encoding="utf-8")

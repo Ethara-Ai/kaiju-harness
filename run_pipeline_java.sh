@@ -816,6 +816,39 @@ run_agent_java() {
     else
         log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
     fi
+
+    # AUTO-RESUME (Java): re-run any module left .needs_retry (a transient error
+    # that persisted through the in-line recovery) IN-PLACE, up to K rounds with a
+    # pause, so a batch NEVER needs a manual --resume. Resume passes override=false
+    # (-> --no-override-previous) so completed modules are KEPT; KAIJU_RESUME=1
+    # rebuilds the branch from per-module patches and .done modules are skipped, so
+    # only the failed ones re-run and (on success) clear .needs_retry + gain .done.
+    local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
+    _nr=$(find "$log_dir" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
+        _auto=$((_auto + 1))
+        log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
+        sleep "${KAIJU_AUTO_RESUME_PAUSE:-60}"
+        local _rs _re
+        _rs=$(date +%s)
+        set +e
+        KAIJU_RESUME=1 run_java_agent_loop "$run_tests" "$use_unit_tests_info" "$use_spec_info" "$compile_check" "false" "$log_dir" &
+        agent_pid=$!
+        AGENT_PID=$agent_pid
+        watchdog_run "$agent_pid" "$log_dir" "$INACTIVITY_TIMEOUT" "$STAGE_TIMEOUT" "$MAX_WALL_TIME"
+        AGENT_RC=$?
+        AGENT_PID=""
+        set -e
+        _re=$(date +%s)
+        AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
+        _nr=$(find "$log_dir" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
+    done
+    if [[ "${_nr:-0}" -gt 0 ]]; then
+        log "  WARNING: ${_nr} module(s) STILL .needs_retry after ${_amax} auto-resume round(s) — genuinely persistent (not a passing transient); run INCOMPLETE."
+    elif [[ "$_auto" -gt 0 ]]; then
+        log "  AUTO-RESUME succeeded: all modules completed after ${_auto} round(s); run COMPLETE (no manual --resume needed)."
+    fi
 }
 
 # ============================================================

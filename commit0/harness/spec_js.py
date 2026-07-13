@@ -21,7 +21,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 from commit0.harness.spec import Spec
-from commit0.harness.eval_hardening import revert_and_clean_lines
+from commit0.harness.eval_hardening import (
+    revert_and_clean_lines,
+    guard_snapshot_lines,
+    guard_heal_lines,
+)
 from commit0.harness.dockerfiles_js import (
     get_dockerfile_base as _get_node_dockerfile_base,
     get_dockerfile_repo as _get_node_dockerfile_repo,
@@ -141,7 +145,12 @@ class Commit0JsSpec(Spec):
                 "fi"
             ),
             f"git apply --allow-empty -v {diff_path}",
+            # Layer-2 guard: snapshot applied tree; heal harness-corrupted files
+            # (balanced->unbalanced) so a valid submission isn't failed by the
+            # reconstruction. Heal before the syntax check + tests see the file.
+            *guard_snapshot_lines(),
             *revert_lines,
+            *guard_heal_lines(),
             self._install_cmd(),
             "echo $? > install_exit_code.txt",
             "rm -f /tmp/_node_check_max_rc; : > /tmp/_node_check_max_rc",

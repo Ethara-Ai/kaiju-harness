@@ -213,6 +213,27 @@ def _transient_backoff_schedule() -> tuple[int, ...]:
         return _DEFAULT_TRANSIENT_BACKOFF
 
 
+# Total in-line wait budget for a SUSTAINED transient outage (seconds). Rather
+# than give up after the short escalating schedule above and defer the module to a
+# manual --resume (bad for large batches: wasted setup, split data, human in the
+# loop), we RIDE OUT the outage in-line — escalate to the cap, then keep retrying
+# at the cap until this budget is spent. A 502/InternalServerError/mid-stream drop
+# almost always clears within a few minutes, so the module completes in the SAME
+# pass and marks .done. Only a genuinely dead endpoint (budget exhausted) gives up.
+# Configurable via KAIJU_CC_TRANSIENT_MAX_SEC (default 900s = 15 min).
+_DEFAULT_TRANSIENT_MAX_SECONDS = 900
+
+
+def _transient_max_seconds() -> int:
+    raw = os.environ.get("KAIJU_CC_TRANSIENT_MAX_SEC", "").strip()
+    if not raw:
+        return _DEFAULT_TRANSIENT_MAX_SECONDS
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return _DEFAULT_TRANSIENT_MAX_SECONDS
+
+
 def _is_transient_network_error(exc: BaseException) -> bool:
     """Detect transient network errors (timeouts, connection drops, mid-stream aborts).
 
@@ -301,6 +322,29 @@ def _sleep_with_heartbeat(
         _heartbeat(log_dir)
 
 
+def _raise_as_transient(exc: BaseException) -> "NoReturn":
+    """Re-raise an EXHAUSTED but retryable error (transient network / rate-limit)
+    as ``TransientLLMError`` so the agent runners' ``except TransientLLMError``
+    routes it to a ``.needs_retry`` breadcrumb -> AUTO-RESUME, instead of letting
+    the raw exception crash the module/repo with no retry.
+
+    Without this, only errors aider SWALLOWED (which the agents.py backstop already
+    wraps as TransientLLMError) got auto-resumed; a raw litellm/network error that
+    propagated un-swallowed, or a rate-limit that outran the pause budget, would
+    fall through the runners' `except TransientLLMError` and fail the repo. This
+    makes recovery-exhaustion uniformly retryable. Idempotent (an already-
+    TransientLLMError is re-raised as-is); falls back to the original on import
+    failure so it can never mask an error by crashing here.
+    """
+    try:
+        from agent.agents import TransientLLMError  # lazy: avoid circular import
+    except Exception:  # noqa: BLE001
+        raise exc
+    if isinstance(exc, TransientLLMError):
+        raise exc
+    raise TransientLLMError(str(exc)) from exc
+
+
 def run_with_recovery(
     fn: Callable[..., T],
     *args: Any,
@@ -316,13 +360,27 @@ def run_with_recovery(
     """
     base_url = _bridge_base_url()
     if base_url is None:
-        return fn(*args, **kwargs)
+        # Non-bridge (direct API / Vertex / Bedrock): there's no bridge quota
+        # endpoint to pause against for the in-line ride-out, but we STILL
+        # guarantee auto-resume — classify a retryable failure and re-cast it as
+        # TransientLLMError, which every agent runner's `except TransientLLMError`
+        # routes to a .needs_retry breadcrumb -> AUTO-RESUME (that loop supplies
+        # the retry cadence + pause). Non-retryable errors propagate unchanged, and
+        # KeyboardInterrupt/SystemExit propagate because we catch Exception only.
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if _is_transient_network_error(exc) or _is_rate_limit_error(exc):
+                _raise_as_transient(exc)  # -> .needs_retry -> auto-resume
+            raise
 
     effective_max_retries = _effective_max_retries(base_url, max_retries)
     max_pause = _max_pause_seconds()
     transient_backoff = _transient_backoff_schedule()
+    transient_budget = _transient_max_seconds()
     attempt = 0          # rate-limit retry counter
-    transient_attempt = 0  # transient-network retry counter (separate budget)
+    transient_attempt = 0  # transient-network retry counter
+    transient_waited = 0   # cumulative in-line transient wait (seconds)
     while True:
         try:
             return fn(*args, **kwargs)
@@ -331,20 +389,26 @@ def run_with_recovery(
             # propagate immediately instead of being swallowed/retried.
             # Branch 1: transient network error (timeout / connection drop / mid-stream)
             if _is_transient_network_error(exc):
-                if transient_attempt >= len(transient_backoff):
+                # Escalate through the schedule, then hold at its cap and KEEP
+                # retrying until the total in-line budget is spent — ride out a
+                # sustained outage here instead of dropping to a manual --resume.
+                wait_s = transient_backoff[min(transient_attempt, len(transient_backoff) - 1)]
+                if transient_waited + wait_s > transient_budget:
                     _LOG.error(
-                        "transient-error recovery exhausted after %d retries: %s",
-                        transient_attempt, exc,
+                        "transient-error recovery exhausted after %ds of in-line "
+                        "waiting across %d retries (budget=%ds): %s",
+                        transient_waited, transient_attempt, transient_budget, exc,
                     )
-                    raise
-                wait_s = transient_backoff[transient_attempt]
+                    _raise_as_transient(exc)  # -> .needs_retry -> auto-resume
                 _LOG.warning(
-                    "transient network error (%s); retrying in %ds (attempt %d/%d). "
-                    "Heartbeating dir=%s to keep the inactivity watchdog quiet.",
-                    type(exc).__name__, wait_s, transient_attempt + 1, len(transient_backoff),
-                    _kaiju_log_dir,
+                    "transient network error (%s); retrying in %ds (attempt %d, "
+                    "%ds/%ds of in-line budget spent). Heartbeating dir=%s to keep "
+                    "the inactivity watchdog quiet.",
+                    type(exc).__name__, wait_s, transient_attempt + 1,
+                    transient_waited, transient_budget, _kaiju_log_dir,
                 )
                 _sleep_with_heartbeat(wait_s, _kaiju_log_dir)
+                transient_waited += wait_s
                 transient_attempt += 1
                 continue
 
@@ -355,7 +419,7 @@ def run_with_recovery(
                 _LOG.error(
                     "rate-limit recovery exhausted after %d retries: %s", attempt, exc
                 )
-                raise
+                _raise_as_transient(exc)  # -> .needs_retry -> auto-resume
 
             retry_after_hint = _extract_retry_after_from_error(exc) or 300
             wait_seconds = _next_reset_seconds(base_url, retry_after_hint)
@@ -364,7 +428,7 @@ def run_with_recovery(
                     "rate-limit reset in %ds exceeds KAIJU_CC_MAX_PAUSE_SEC=%ds; giving up",
                     wait_seconds, max_pause,
                 )
-                raise
+                _raise_as_transient(exc)  # -> .needs_retry -> auto-resume
 
             _LOG.warning(
                 "rate-limit hit (%s); pausing %ds (attempt %d/%d). "

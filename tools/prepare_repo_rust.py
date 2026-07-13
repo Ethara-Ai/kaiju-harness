@@ -846,7 +846,13 @@ def prepare_rust_repo(
         try:
             push_to_fork(repo_dir, fork_name, "commit0_all", remote_name="origin")
         except Exception as e:
-            logger.error("Push failed for %s: %s", fork_name, e)
+            raise RuntimeError(
+                f"Push to {fork_name} FAILED — the container build clones this fork "
+                f"and fetches base/reference commits from it, so an un-pushed dataset "
+                f"is UNBUILDABLE ('not our ref'). Ensure your token has WRITE access "
+                f"to the fork org (run_trajectory.sh: --org / $KAIJU_FORK_ORG).\n"
+                f"Original push error: {e}"
+            ) from e
 
     # Step 9: Test ID collection removed — use tools/generate_test_ids_rust.py separately
 

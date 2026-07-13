@@ -680,11 +680,26 @@ def prepare_one(
     target_repo_slug = f"{fork_org}/{slug.split('/')[-1]}" if fork_org else slug
 
     if push and fork_org:
+        # The containerized C build clones this fork and runs
+        #   git fetch origin <env_setup_commit> <base_commit>
+        # so BOTH commits MUST be reachable on the fork. A failed push therefore
+        # cannot be a warning: it would emit a dataset whose base_commit only
+        # exists locally, and the image build later dies with the opaque
+        # "upload-pack: not our ref". Fail fast here with an actionable message.
         try:
             fork_repo(slug, fork_org)
             push_to_fork(repo_path, target_repo_slug, branch, remote_name="origin")
         except Exception as exc:
-            logger.warning("Fork/push failed for %s: %s", slug, exc)
+            raise RuntimeError(
+                f"Fork/push to {target_repo_slug} FAILED — the containerized C "
+                f"build clones this fork and fetches reference_commit="
+                f"{reference_commit[:12]} + base_commit={base_commit[:12]} from it, "
+                f"so an un-pushed dataset is UNBUILDABLE (setup.sh would fail with "
+                f"'not our ref'). Fix the push and re-run: ensure your token has "
+                f"WRITE access to '{fork_org}', or pass --fork-org "
+                f"<account-you-can-push-to> (run_trajectory.sh: --org / "
+                f"$KAIJU_FORK_ORG).\nUnderlying error: {exc}"
+            ) from exc
 
     entry = {
         "instance_id": f"{slug.split('/')[-1]}_c",

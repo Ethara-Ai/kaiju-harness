@@ -11,7 +11,11 @@ from commit0.harness.constants import (
     SimpleInstance,
 )
 from commit0.harness.spec import Spec
-from commit0.harness.eval_hardening import revert_and_clean_lines
+from commit0.harness.eval_hardening import (
+    revert_and_clean_lines,
+    guard_snapshot_lines,
+    guard_heal_lines,
+)
 from commit0.harness.dockerfiles.__init__cpp import (
     get_dockerfile_base_cpp,
     get_dockerfile_repo_cpp,
@@ -124,9 +128,22 @@ class CppSpec(Spec):
         return [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
-            f"git apply -v {diff_path} || git apply {diff_path} || true",
+            # Try exact apply, then --recount (tolerates off-by-N hunk headers). A
+            # genuine apply failure must NOT be swallowed by `|| true`: that would
+            # run the build/tests on an unpatched tree and report the resulting 0/N
+            # as if it were a real model score. Instead write a sentinel that
+            # evaluate_cpp.py maps to PATCH_APPLY_FAILED, and stop.
+            f"if [ -s {diff_path} ]; then",
+            f"  git apply -v {diff_path} || git apply --recount -v {diff_path} || {{ "
+            'echo PATCH_APPLY_FAILED > test_output.txt; '
+            "echo 1 > test_exit_code.txt; exit 0; }",
+            "fi",
+            # Layer-2 guard: snapshot applied tree; heal harness-corrupted files
+            # before the build so a compiling submission isn't a false COMPILE_FAILED.
+            *guard_snapshot_lines(),
             *revert_lines,
             "git status",
+            *guard_heal_lines(),
             f"{{{{ {build_cmd}; {test_cmd} {{test_ids}}; }}}} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",
         ]

@@ -547,9 +547,15 @@ def prepare_single_repo(
                         reference_commit[:12],
                     )
                 else:
-                    logger.warning(
-                        "  No remote branch found — using local commits only"
-                    )
+                    raise RuntimeError(
+                        f"Push to {forked_name} FAILED and no usable '{branch_name}' "
+                        f"branch exists on the fork. The container build clones this "
+                        f"fork and fetches base/reference commits from it, so a "
+                        f"dataset built from un-pushed local commits is UNBUILDABLE "
+                        f"('not our ref'). Ensure your token has WRITE access to the "
+                        f"fork org (run_trajectory.sh: --org / $KAIJU_FORK_ORG).\n"
+                        f"Original push error: {e}"
+                    ) from e
 
         setup_dict = build_setup_dict(repo_dir, go_info, full_name)
         test_dict = build_test_dict(repo_dir)

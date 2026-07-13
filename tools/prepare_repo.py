@@ -1211,9 +1211,15 @@ def prepare_repos(
                         reference_commit[:12],
                     )
                 else:
-                    logger.warning(
-                        "  No remote branch found — using local commits only"
-                    )
+                    raise RuntimeError(
+                        f"Push to {fork_name} FAILED and no usable '{branch_name}' "
+                        f"branch exists on the fork. The container build clones this "
+                        f"fork and fetches base/reference commits from it, so a "
+                        f"dataset built from un-pushed local commits is UNBUILDABLE "
+                        f"('not our ref'). Ensure your token has WRITE access to the "
+                        f"fork org (run_trajectory.sh: --org / $KAIJU_FORK_ORG).\n"
+                        f"Original push error: {e}"
+                    ) from e
 
         # Create dataset entry
         entry = create_dataset_entry(

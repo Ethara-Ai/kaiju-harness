@@ -827,6 +827,48 @@ AGENT_PID=""
 AGENT_ELAPSED=0
 AGENT_RC=0
 
+# AUTO-RESUME helper (shared shape across languages). Re-run any module left
+# .needs_retry (a transient LLM error that persisted through the in-line recovery)
+# IN-PLACE, up to K rounds with a pause, so a batch NEVER needs a manual --resume.
+# KAIJU_RESUME=1 rebuilds the branch from per-module patches and the agent skips
+# modules that already have a .done marker, so each round re-attempts only the
+# failed ones; a module that succeeds clears its .needs_retry and gains .done
+# (_mark_module_done), so the count converges to 0 unless GENUINELY persistent.
+# Args: <log_dir> <agent_log> -- <base agent command...>  (command WITHOUT
+# --override-previous-changes, which would reset the branch and discard progress).
+_auto_resume_agent() {
+    local _ld="$1" _alog="$2"; shift 2
+    [[ "${1:-}" == "--" ]] && shift
+    local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
+    _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
+        _auto=$((_auto + 1))
+        log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
+        sleep "${KAIJU_AUTO_RESUME_PAUSE:-60}"
+        local _rs _re _pid
+        _rs=$(date +%s)
+        set +e
+        set -m
+        KAIJU_RESUME=1 "$@" >>"$_alog" 2>&1 &
+        _pid=$!
+        set +m
+        AGENT_PID=$_pid
+        watchdog_run "$_pid" "$_ld" "$INACTIVITY_TIMEOUT" "$STAGE_TIMEOUT" "$MAX_WALL_TIME"
+        AGENT_RC=$?
+        AGENT_PID=""
+        set -e
+        _re=$(date +%s)
+        AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
+        _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
+    done
+    if [[ "${_nr:-0}" -gt 0 ]]; then
+        log "  WARNING: ${_nr} module(s) STILL .needs_retry after ${_amax} auto-resume round(s) — genuinely persistent (not a passing transient); run INCOMPLETE."
+    elif [[ "$_auto" -gt 0 ]]; then
+        log "  AUTO-RESUME succeeded: all modules completed after ${_auto} round(s); run COMPLETE (no manual --resume needed)."
+    fi
+}
+
 run_agent_ts() {
     local branch="$1"
     local override="$2"
@@ -841,20 +883,21 @@ run_agent_ts() {
         --max-parallel-repos "$MAX_PARALLEL_REPOS"
     )
 
+    local first_cmd=( "${cmd[@]}" )
     if [[ "$override" == "true" ]]; then
-        cmd+=(--override-previous-changes)
+        first_cmd+=(--override-previous-changes)
     fi
 
     local agent_log="${log_dir}/agent_run.log"
     log "  Running TS agent (watchdog: inactivity=${INACTIVITY_TIMEOUT}s, hard=${STAGE_TIMEOUT}s, wall-cap=${MAX_WALL_TIME}s)"
-    log "  Command: ${cmd[*]}"
+    log "  Command: ${first_cmd[*]}"
     log "  Output → ${agent_log}"
 
     local start_time
     start_time=$(date +%s)
 
     set +e
-    "${cmd[@]}" >>"$agent_log" 2>&1 &
+    "${first_cmd[@]}" >>"$agent_log" 2>&1 &
     local agent_pid=$!
     AGENT_PID=$agent_pid
 
@@ -875,6 +918,8 @@ run_agent_ts() {
     else
         log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
     fi
+
+    _auto_resume_agent "$log_dir" "$agent_log" -- "${cmd[@]}"
 }
 
 # ============================================================
@@ -955,14 +1000,23 @@ parse_eval_output() {
     local total_tests=0
     local total_runtime="0.0"
     local found_any="false"
+    local row_status=""
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         [[ "$line" == repo,* ]] && continue
         if [[ "$line" == *","*"/"* ]]; then
-            local runtime passed_total passed total
+            local runtime passed_total passed total _st
             runtime=$(echo "$line" | cut -d',' -f2 | tr -d ' ')
             passed_total=$(echo "$line" | cut -d',' -f3 | tr -d ' ')
+            # 4th column = per-repo outcome (TESTS_RAN on success; COMPILE_FAILED /
+            # PATCH_APPLY_FAILED / OUTPUT_MISSING / SUITE_CRASHED otherwise). Any
+            # non-TESTS_RAN status means the 0/N is a build/patch/infra failure, NOT
+            # a genuine 0% model score — surface it (mirrors go/rust/c/cpp).
+            _st=$(echo "$line" | cut -d',' -f4 | tr -d ' ')
+            if [[ -n "$_st" && "$_st" != "TESTS_RAN" ]]; then
+                row_status="$_st"
+            fi
 
             if [[ "$passed_total" == *"/"* ]]; then
                 passed=$(echo "$passed_total" | cut -d'/' -f1)
@@ -981,12 +1035,19 @@ parse_eval_output() {
     done <<< "$output"
 
     if [[ "$found_any" == "true" ]]; then
+        if [[ -n "$row_status" ]]; then
+            EVAL_STATUS="$row_status"
+        else
+            EVAL_STATUS="OK"
+        fi
         EVAL_NUM_PASSED="$total_passed"
         EVAL_NUM_TESTS="$total_tests"
         EVAL_RUNTIME="$total_runtime"
         if [[ "$total_tests" -gt 0 ]]; then
             EVAL_PASS_RATE=$(echo "scale=6; $total_passed / $total_tests" | bc)
         fi
+    else
+        EVAL_STATUS="NO_RESULTS"
     fi
 
     if [[ "$EVAL_PASS_RATE" == "0.0" ]] || [[ "$EVAL_PASS_RATE" == "0" ]]; then
@@ -1217,6 +1278,7 @@ stage_1_draft_ts() {
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "${EVAL_STATUS:-OK}" \
         '.stage1 = {
             name: $name,
             elapsed_s: $elapsed,
@@ -1227,7 +1289,8 @@ stage_1_draft_ts() {
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1274,6 +1337,7 @@ stage_2_lint_ts() {
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "${EVAL_STATUS:-OK}" \
         '.stage2 = {
             name: $name,
             elapsed_s: $elapsed,
@@ -1285,7 +1349,8 @@ stage_2_lint_ts() {
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1338,6 +1403,7 @@ stage_3_test_ts() {
         --argjson num_passed "$EVAL_NUM_PASSED" \
         --argjson num_tests "$EVAL_NUM_TESTS" \
         --argjson pass_rate "$EVAL_PASS_RATE" \
+        --arg eval_status "${EVAL_STATUS:-OK}" \
         '.stage3 = {
             name: $name,
             elapsed_s: $elapsed,
@@ -1349,7 +1415,8 @@ stage_3_test_ts() {
             runtime: $runtime,
             num_passed: $num_passed,
             num_tests: $num_tests,
-            pass_rate: $pass_rate
+            pass_rate: $pass_rate,
+            eval_status: $eval_status
         }')
 
     save_results
@@ -1383,6 +1450,8 @@ print_summary_table() {
         total=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.num_tests // 0")
         pass_rate=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.pass_rate // 0")
         elapsed=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.elapsed_s // 0")
+        local eval_status
+        eval_status=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.eval_status // \"OK\"")
 
         if [[ "$stage_key" == "stage1" ]]; then
             stage_cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd // 0")
@@ -1393,7 +1462,13 @@ print_summary_table() {
         fi
 
         local rate_str stage_cost_str cumul_cost_str passed_str elapsed_str
-        rate_str=$(format_pct "$pass_rate")
+        # A 0% from a build/patch/infra failure is NOT a genuine score — show the
+        # status in the Pass Rate column instead so it isn't misread (parity w/ rust).
+        if [[ "$eval_status" == "OK" || -z "$eval_status" || "$eval_status" == "null" ]]; then
+            rate_str=$(format_pct "$pass_rate")
+        else
+            rate_str="$eval_status"
+        fi
         stage_cost_str=$(printf "\$%.2f" "$stage_cost")
         cumul_cost_str=$(printf "\$%.2f" "$cumul_cost")
         passed_str="${passed}/${total}"
@@ -1632,27 +1707,36 @@ print_pass_at_k_summary() {
         local rj
         rj=$(cat "$result_file")
 
-        local sidx s1r s2r s3r s3c
+        local sidx s1r s2r s3r s3c s3status
         sidx=$(echo "$rj" | jq -r '.sample_index // "?"')
         s1r=$(echo "$rj" | jq -r '.stage1.pass_rate // 0')
         s2r=$(echo "$rj" | jq -r '.stage2.pass_rate // 0')
         s3r=$(echo "$rj" | jq -r '.stage3.pass_rate // 0')
         s3c=$(echo "$rj" | jq -r '.stage3.cost_usd_cumulative // .stage1.cost_usd // 0')
+        # A 0% from a build/patch/infra failure is NOT "solved nothing" — surface
+        # the status and exclude such samples from the best-run pick (parity w/ rust).
+        s3status=$(echo "$rj" | jq -r '.stage3.eval_status // "OK"')
 
         local s1_pct s2_pct s3_pct cost_str
         s1_pct=$(format_pct "$s1r")
         s2_pct=$(format_pct "$s2r")
-        s3_pct=$(format_pct "$s3r")
+        if [[ "$s3status" == "OK" || "$s3status" == "null" || -z "$s3status" ]]; then
+            s3_pct=$(format_pct "$s3r")
+        else
+            s3_pct="$s3status"
+        fi
         cost_str=$(printf "\$%.2f" "$s3c")
 
         printf -v row "%-12s %14s %14s %14s %12s" "run_${sidx}" "$s1_pct" "$s2_pct" "$s3_pct" "$cost_str"
         log "$row"
 
-        local is_better
-        is_better=$(echo "$s3r > $best_s3_rate" | bc -l)
-        if [[ "$is_better" -eq 1 ]]; then
-            best_s3_rate="$s3r"
-            best_s3_sample="$sidx"
+        if [[ "$s3status" == "OK" || "$s3status" == "null" || -z "$s3status" ]]; then
+            local is_better
+            is_better=$(echo "$s3r > $best_s3_rate" | bc -l)
+            if [[ "$is_better" -eq 1 ]]; then
+                best_s3_rate="$s3r"
+                best_s3_sample="$sidx"
+            fi
         fi
     done
 

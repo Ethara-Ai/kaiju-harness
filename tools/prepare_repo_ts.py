@@ -875,14 +875,14 @@ def create_ts_stubbed_branch(
     full_name: str,
     src_dir: str,
     branch_name: str = TS_DATASET_BRANCH,
-) -> tuple[str, str, int]:
+) -> "tuple[str, str, int, bool | None]":
     """Create the commit0 branch with stubbed TypeScript code.
 
     Mirrors create_stubbed_branch from prepare_repo.py (lines 265-422).
 
     Returns
     -------
-        (base_commit_sha, reference_commit_sha, functions_stubbed)
+        (base_commit_sha, reference_commit_sha, functions_stubbed, base_compiles)
 
     """
     # Record reference + branch from the CURRENT HEAD (the pinned tag when --tag
@@ -963,7 +963,7 @@ def create_ts_stubbed_branch(
     status = git(repo_dir, "status", "--porcelain")
     if not status:
         logger.warning("  No changes after stubbing -- source may already be stubs?")
-        return reference_commit, reference_commit, 0
+        return reference_commit, reference_commit, 0, None
 
     functions_stubbed = report.get("functions_stubbed", 0)
     if functions_stubbed == 0:
@@ -998,13 +998,13 @@ def create_ts_stubbed_branch(
     # damage before we commit the stubbed branch. Non-blocking -- many target
     # repos have pre-existing type errors we can't fix here. We only care
     # about bailing when the stubber emitted unparseable TypeScript.
-    _run_post_stub_tsc_check(repo_dir)
+    base_compiles = _run_post_stub_tsc_check(repo_dir)
 
     git(repo_dir, "commit", "-m", "Commit 0")
     base_commit = get_head_sha(repo_dir)
     logger.info("  Base commit (stubbed): %s", base_commit[:12])
 
-    return base_commit, reference_commit, functions_stubbed
+    return base_commit, reference_commit, functions_stubbed, base_compiles
 
 
 _TSC_FATAL_CODES = (
@@ -1021,17 +1021,21 @@ _TSC_FATAL_CODES = (
 )
 
 
-def _run_post_stub_tsc_check(repo_dir: Path) -> None:
+def _run_post_stub_tsc_check(repo_dir: Path) -> "bool | None":
     """Run ``npx tsc --noEmit`` against the stubbed tree; warn on type errors,
-    raise only on fatal parse errors (truly broken syntax from the stubber).
+    raise only on fatal PARSE errors (truly broken syntax from the stubber).
 
-    Mirrors ``quick_import_check`` in ``prepare_repo.py`` and
-    ``verify_compiles`` in ``prepare_repo_rust.py``.
+    Returns ``base_compiles`` (mirrors python/c/go/rust/java):
+      * True  -> tsc ran and the stubbed source is syntactically valid (clean, or
+                 only semantic/type errors which the model is meant to resolve).
+      * None  -> couldn't check (no tsconfig / npx missing / timeout) -> unknown.
+      * (raises) -> fatal parse errors: the stubber emitted unparseable code, so
+                 the base is corrupt; refuse to commit it.
     """
     tsconfig = repo_dir / "tsconfig.json"
     if not tsconfig.exists():
         logger.debug("  Skipping tsc check: no tsconfig.json")
-        return
+        return None
     try:
         result = subprocess.run(
             ["npx", "--no-install", "tsc", "--noEmit", "--skipLibCheck"],
@@ -1043,14 +1047,14 @@ def _run_post_stub_tsc_check(repo_dir: Path) -> None:
         )
     except FileNotFoundError:
         logger.warning("  Skipping tsc check: npx not available")
-        return
+        return None
     except subprocess.TimeoutExpired:
         logger.warning("  tsc --noEmit timed out after 600s (non-fatal)")
-        return
+        return None
 
     if result.returncode == 0:
         logger.info("  Post-stub tsc check: clean")
-        return
+        return True
 
     combined = f"{result.stdout}\n{result.stderr}"
     # Filter out errors from node_modules/ -- third-party type declarations
@@ -1073,12 +1077,15 @@ def _run_post_stub_tsc_check(repo_dir: Path) -> None:
         )
     if err_line_count == 0:
         logger.info("  Post-stub tsc check: clean (node_modules/ errors ignored)")
-        return
+        return True
     logger.warning(
         "  Post-stub tsc check: %d type errors in project code (non-fatal -- "
         "target repo may have pre-existing type issues)",
         err_line_count,
     )
+    # Only type/semantic errors remain -> the source PARSES (syntactically valid);
+    # the model is meant to fix the semantics. Base is well-formed.
+    return True
 
 
 def _capture_ts_test_ids(
@@ -1211,7 +1218,7 @@ def prepare_ts_repo(
         setup_dict["install"].split()[0],
     )
 
-    base_commit, reference_commit, functions_stubbed = create_ts_stubbed_branch(
+    base_commit, reference_commit, functions_stubbed, base_compiles = create_ts_stubbed_branch(
         repo_dir, full_name, src_dir
     )
 
@@ -1243,7 +1250,14 @@ def prepare_ts_repo(
                     reference_commit[:12],
                 )
             else:
-                logger.warning("  No remote branch found -- using local commits only")
+                raise RuntimeError(
+                    f"Push to {fork_name} FAILED and no usable '{branch_name}' branch "
+                    f"exists on the fork. The container build clones this fork and "
+                    f"fetches base/reference commits from it, so a dataset built from "
+                    f"un-pushed local commits is UNBUILDABLE ('not our ref'). Ensure "
+                    f"your token has WRITE access to the fork org (run_trajectory.sh: "
+                    f"--org / $KAIJU_FORK_ORG).\nOriginal push error: {e}"
+                ) from e
 
     # ------------------------------------------------------------------
     # Scrape spec PDF and commit into repo (mirrors prepare_repo_go.py).
@@ -1329,6 +1343,9 @@ def prepare_ts_repo(
         "language": "typescript",
         "test_framework": test_framework,
         "functions_stubbed": functions_stubbed,
+        # Tri-state (True=stubbed base parses via tsc / None=couldn't check). A
+        # fatal parse error raises earlier, so a committed base is never corrupt.
+        "base_compiles": base_compiles,
         "setup": setup_dict,
         "test": test_dict,
     }

@@ -192,6 +192,7 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
                 "passed": 0,
                 "num_passed": 0,
                 "num_tests": 0,
+                "status": "OUTPUT_MISSING",
             }
         )
         return
@@ -215,6 +216,23 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
                 "passed": 0,
                 "num_passed": 0,
                 "num_tests": 0,
+                "status": "OUTPUT_MISSING",
+            }
+        )
+        return
+
+    # eval.sh writes this sentinel (and nothing else) when `git apply` of the
+    # model patch fails — so the 0/N is an infra/patch failure, not a real score.
+    if content.strip() == "PATCH_APPLY_FAILED":
+        logger.warning("%s: patch failed to apply (PATCH_APPLY_FAILED)", name)
+        out.append(
+            {
+                "name": name,
+                "sum": 0,
+                "passed": 0,
+                "num_passed": 0,
+                "num_tests": 0,
+                "status": "PATCH_APPLY_FAILED",
             }
         )
         return
@@ -246,10 +264,19 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
         num_passed = min(num_passed, num_tests)
     total_runtime = sum(t.get("duration", 0) for t in tests)
     status = "TESTS_RAN"
+    # CMake tried to build test binaries and EVERY one failed to compile -> the
+    # tests never ran; a 0/N here is a build failure, not a 0% model score. Mirror
+    # go/rust/c's COMPILE_FAILED so the pipeline can exclude it from the score.
+    if total_test_binaries > 0 and len(tests_built) == 0:
+        status = "COMPILE_FAILED"
+        logger.warning(
+            "%s: COMPILE_FAILED — all %d test binary/binaries failed to build",
+            name, total_test_binaries,
+        )
     # C++ counts from RAW STDOUT (GTest `[ OK ]`, ...), so a model can print fake
     # pass lines. The build+test process exits 0 IFF every test passed, so a claim
     # of all-pass with a non-zero exit is impossible for a genuine run -> forged.
-    if exit_code not in (0, None) and num_tests > 0 and num_passed >= num_tests:
+    elif exit_code not in (0, None) and num_tests > 0 and num_passed >= num_tests:
         status = "CHEAT_DETECTED"
         logger.warning(
             "%s: CHEAT_DETECTED — claimed %d/%d passed but the run exited %s "
@@ -415,10 +442,16 @@ def main(
             log_name = log_path.split("/")[2] if len(log_path.split("/")) > 2 else "unknown"
         _aggregate_cpp_results(log_path, log_name, out)
 
-    print("repo,runtime,num_passed/num_tests")
+    # 4th column = per-repo outcome so the shell pipeline can tell a genuine 0%
+    # model score from a build/patch/infra failure (mirrors go/rust/c). Default
+    # TESTS_RAN for older rows without an explicit status.
+    print("repo,runtime,num_passed/num_tests,status")
     out = sorted(out, key=lambda x: x["sum"], reverse=True)
     for x in out:
-        print(f"{x['name']},{x['sum']},{x['num_passed']}/{x['num_tests']}")
+        print(
+            f"{x['name']},{x['sum']},{x['num_passed']}/{x['num_tests']},"
+            f"{x.get('status', 'TESTS_RAN')}"
+        )
     total_runtime = sum(x["sum"] for x in out)
     averaged_passed = sum(x["passed"] for x in out) / len(out) if out else 0.0
     print(f"total runtime: {total_runtime}")

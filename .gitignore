@@ -224,3 +224,7 @@ jobs/
 harbor-tasks/
 *.yaml
 /outputs
+/outputs_dump
+
+# consolidated scratch/dump (session cleanup)
+_scratch_dump/

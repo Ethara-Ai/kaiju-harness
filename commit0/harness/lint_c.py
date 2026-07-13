@@ -127,12 +127,33 @@ def main(
             "echo '=== clang-tidy ===' && "
             "find . -name '*.c' -not -path './build/*' -not -path './tests/*' "
             "-not -path './test/*' -not -path './third_party/*' -not -path './vendor/*' "
+            "-not -path './deps/*' -not -path './external/*' "
             "| head -100 | xargs -r clang-tidy --quiet "
+            # The repo's compile flags (from compile_commands.json, -p build) often
+            # include GCC-only warning flags like -Wformat-overflow that clang does
+            # not know. Without this, clang-tidy floods the report with
+            # `error: unknown warning option '-Wformat-overflow'
+            # [clang-diagnostic-unknown-warning-option]` noise that isn't a real
+            # code issue and drowns out actionable findings. Tolerate GCC-only
+            # flags instead of erroring on them.
+            "--extra-arg=-Wno-unknown-warning-option "
+            "--extra-arg=-Wno-unknown-argument "
+            "--extra-arg=-Wno-error "
             "-p build 2>&1 || true"
         ),
         (
             "echo '=== cppcheck ===' && "
             "cppcheck --enable=warning,performance,portability "
+            # Exclude vendored/test/build trees: the model owns the LIBRARY source,
+            # not the bundled test framework (e.g. tests/unity) or third-party deps.
+            # Scanning them produced errors like `Memory leak` / `unknown macro` in
+            # tests/unity/* that are not the model's code — pure noise that made the
+            # lint stage feedbackless. Suppress config-dependent macro/include noise
+            # too (cppcheck has no preprocessor context here).
+            "-itests -itest -ithird_party -ivendor -ibuild -ideps -iexternal -iextern "
+            "--suppress=unknownMacro --suppress=missingInclude "
+            "--suppress=missingIncludeSystem --suppress=unmatchedSuppression "
+            "--suppress=toomanyconfigs --suppress=checkersReport "
             "--error-exitcode=0 --quiet . 2>&1 || true"
         ),
     ]

@@ -587,14 +587,46 @@ run_agent_stage() {
     log "  Agent finished in ${AGENT_ELAPSED}s (rc=${AGENT_RC})"
 
     # A module that exhausted its transient-error retries is left WITHOUT a .done
-    # marker plus a .needs_retry breadcrumb (agent/run_agent.py::_skip_failed_module),
-    # and the repo continues so other modules aren't discarded. Count them: the run
-    # is INCOMPLETE and needs --resume, so its eval must NOT be recorded as a clean
-    # measured result even if the parse looks OK (a missing non-core module can
-    # still leave a partial pass).
+    # marker plus a .needs_retry breadcrumb (run_agent_c.py::_skip_failed_module),
+    # and the repo continues so other modules aren't discarded.
     AGENT_NEEDS_RETRY=$(find "$LOG_BASE/${stage_label}" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+
+    # AUTO-RESUME: never leave the run needing a MANUAL --resume. For large batches
+    # that's wasteful (re-setup, split data, a human in the loop). Instead re-run
+    # the failed module(s) in-place, right here, up to K rounds with a pause so a
+    # sustained provider outage has time to clear. KAIJU_RESUME=1 rebuilds the
+    # branch from per-module patches and the agent skips modules that already have
+    # a .done marker, so each round only re-attempts the .needs_retry ones. A module
+    # that succeeds now clears its .needs_retry and gets .done (_mark_module_done),
+    # so the count converges to 0 unless the failure is GENUINELY persistent.
+    local _auto_max="${KAIJU_AUTO_RESUME_ROUNDS:-3}"
+    local _auto=0
+    while [[ "${AGENT_NEEDS_RETRY:-0}" -gt 0 && "$_auto" -lt "$_auto_max" ]]; do
+        _auto=$((_auto + 1))
+        local _pause="${KAIJU_AUTO_RESUME_PAUSE:-60}"
+        log "  AUTO-RESUME ${_auto}/${_auto_max}: ${AGENT_NEEDS_RETRY} module(s) left .needs_retry — waiting ${_pause}s then re-running the failed module(s) in-place (no manual --resume)."
+        sleep "$_pause"
+        local _rstart _rend
+        _rstart=$(date +%s)
+        set +e
+        KAIJU_RESUME=1 "$VENV_PYTHON" -m agent.config_c run "$BRANCH_NAME" \
+            --backend "$BACKEND" \
+            --agent-config-file "$agent_config" \
+            --commit0-config-file "$COMMIT0_CONFIG" \
+            --log-dir "$LOG_BASE/${stage_label}" \
+            --max-parallel-repos "$MAX_PARALLEL_REPOS"
+        AGENT_RC=$?
+        set -e
+        _rend=$(date +%s)
+        AGENT_ELAPSED=$(( AGENT_ELAPSED + (_rend - _rstart) ))
+        AGENT_NEEDS_RETRY=$(find "$LOG_BASE/${stage_label}" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        log "  AUTO-RESUME ${_auto}/${_auto_max} finished (rc=${AGENT_RC}); ${AGENT_NEEDS_RETRY} module(s) still .needs_retry."
+    done
+
     if [[ "${AGENT_NEEDS_RETRY:-0}" -gt 0 ]]; then
-        log "  WARNING: ${AGENT_NEEDS_RETRY} module(s) left .needs_retry (transient LLM error persisted through retries) — run is INCOMPLETE; use --resume to finish them."
+        log "  WARNING: ${AGENT_NEEDS_RETRY} module(s) STILL .needs_retry after ${_auto_max} auto-resume round(s) — GENUINELY persistent (not a passing transient); run is INCOMPLETE."
+    elif [[ "$_auto" -gt 0 ]]; then
+        log "  AUTO-RESUME succeeded: all modules completed after ${_auto} round(s); run is COMPLETE (no manual --resume needed)."
     fi
 }
 
