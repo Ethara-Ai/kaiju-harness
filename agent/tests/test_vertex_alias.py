@@ -42,19 +42,19 @@ def _source_and_resolve(alias: str) -> dict[str, str]:
 
 class TestGeminiAliasResolution:
     def test_gemini_pro_alias_resolves_to_vertex_model(self) -> None:
-        env = _source_and_resolve("gemini-pro")
-        assert env["MODEL_NAME"] == "vertex_ai/gemini-3.1-pro"
+        env = _source_and_resolve("gemini-3.1-pro")
+        assert env["MODEL_NAME"] == "vertex_ai/gemini-3.1-pro-preview"
         assert env["MODEL_SHORT"] == "gemini-3.1-pro"
-        assert env["CACHE_PROMPTS"] == "false"
+        assert env["CACHE_PROMPTS"] == "true"
 
     def test_bare_gemini_alias_resolves_to_same_target(self) -> None:
         env = _source_and_resolve("gemini")
-        assert env["MODEL_NAME"] == "vertex_ai/gemini-3.1-pro"
+        assert env["MODEL_NAME"] == "vertex_ai/gemini-3.1-pro-preview"
         assert env["MODEL_SHORT"] == "gemini-3.1-pro"
 
     def test_vertex_gemini_alias_resolves_to_same_target(self) -> None:
-        env = _source_and_resolve("vertex-gemini")
-        assert env["MODEL_NAME"] == "vertex_ai/gemini-3.1-pro"
+        env = _source_and_resolve("gemini31")
+        assert env["MODEL_NAME"] == "vertex_ai/gemini-3.1-pro-preview"
         assert env["MODEL_SHORT"] == "gemini-3.1-pro"
 
 
@@ -94,10 +94,14 @@ class TestVertexCredentialDetection:
     """
 
     @pytest.mark.skipif(
+        # Gate on exactly the credentials AiderAgents.__init__ accepts for
+        # vertex_ai/ models (VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS).
+        # A broader gate (VERTEX_PROJECT/VERTEX_CREDENTIALS) would un-skip this
+        # test when only those are set — including via cross-test env leakage —
+        # and then __init__ would (correctly) raise, causing a spurious failure.
         not (
-            os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-            or os.environ.get("VERTEX_CREDENTIALS")
-            or os.environ.get("VERTEX_PROJECT")
+            os.environ.get("VERTEX_AI_API_KEY")
+            or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         ),
         reason="Vertex credentials not set; auth-detection test skipped",
     )
@@ -110,11 +114,24 @@ class TestVertexCredentialDetection:
     def test_aider_agents_rejects_vertex_model_without_creds(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # AiderAgents.__init__ checks for VERTEX_AI_API_KEY or
+        # GOOGLE_APPLICATION_CREDENTIALS for vertex_ai/ models; without either
+        # it raises ValueError("API Key Error: ...").
+        monkeypatch.delenv("VERTEX_AI_API_KEY", raising=False)
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.delenv("VERTEX_CREDENTIALS", raising=False)
         monkeypatch.delenv("VERTEX_PROJECT", raising=False)
 
+        from agent import agents as agents_mod
         from agent.agents import AiderAgents
+
+        # The real credential-check is the logic under test. Neutralize the
+        # aider-Model construction and resilience wiring (they touch the aider
+        # stub's Model.extra_params, which is not exercisable here) so __init__
+        # reaches the real credential check.
+        monkeypatch.setattr(agents_mod, "register_bedrock_arn_pricing", lambda *a, **k: None)
+        monkeypatch.setattr(agents_mod, "apply_llm_resilience", lambda *a, **k: None)
+        monkeypatch.setattr(AiderAgents, "_load_model_settings", staticmethod(lambda *a, **k: None))
 
         with pytest.raises(ValueError, match="API Key Error"):
             AiderAgents(max_iteration=1, model_name="vertex_ai/gemini-3.1-pro")

@@ -35,13 +35,15 @@ class TestStatusMapShape:
 
         This pins the fact that matching is case-sensitive; any upstream
         change to lower-case the key before lookup would flip this test.
+        The assertion's ``fullName`` must be a canonical test_id, otherwise the
+        parser (canonical-only) never inspects its status at all.
         """
         report = {
             "testResults": [
                 {"assertionResults": [{"status": "PASSED", "fullName": "x"}]}
             ]
         }
-        counter, _ = parse_jest_vitest_report(report, [])
+        counter, _ = parse_jest_vitest_report(report, ["x"])
         assert counter["failed"] == 1
         assert "passed" not in counter
 
@@ -72,13 +74,15 @@ class TestMalformedReport:
         report = {
             "testResults": [{"assertionResults": [{"fullName": "a", "duration": 1}]}]
         }
-        counter, _ = parse_jest_vitest_report(report, [])
+        counter, _ = parse_jest_vitest_report(report, ["a"])
         assert counter["failed"] == 1
 
-    def test_none_fullname_does_not_crash_and_is_not_memoised(self) -> None:
-        """fullName=None is legal JSON but must not be added to seen set.
+    def test_none_fullname_does_not_crash_and_is_not_matched(self) -> None:
+        """fullName=None is legal JSON but must never match a canonical test_id.
 
-        A test_id matching the string "None" must still be counted as missing.
+        The ``if not full_name`` guard filters None out before the membership
+        test, so the assertion is ignored. The (unmatched) canonical test_id is
+        then scored ``failed`` — a None-named assertion cannot satisfy it.
         """
         report = {
             "testResults": [
@@ -89,10 +93,9 @@ class TestMalformedReport:
                 }
             ]
         }
-        # The ``if full_name`` truthiness check filters out None.
         counter, _ = parse_jest_vitest_report(report, ["file.ts > test_name"])
-        assert counter["passed"] == 1
-        # The phantom test_id is also counted as failed
+        # None fullName is skipped -> nothing passes; the canonical id is missing.
+        assert counter.get("passed", 0) == 0
         assert counter["failed"] == 1
 
     def test_numeric_status_falls_through_to_failed(self) -> None:
@@ -102,7 +105,7 @@ class TestMalformedReport:
                 {"assertionResults": [{"status": 1, "fullName": "a", "duration": 0}]}
             ]
         }
-        counter, _ = parse_jest_vitest_report(report, [])
+        counter, _ = parse_jest_vitest_report(report, ["a"])
         # STATUS_MAP.get(1, "failed") returns "failed"
         assert counter["failed"] == 1
 
@@ -133,7 +136,8 @@ class TestMalformedReport:
                 }
             ]
         }
-        _, duration = parse_jest_vitest_report(report, [])
+        # Only durations of assertions that match a canonical test_id are summed.
+        _, duration = parse_jest_vitest_report(report, ["x"])
         assert duration == pytest.approx(expected_seconds)
 
     def test_duration_accepts_int_as_float(self) -> None:
@@ -146,7 +150,7 @@ class TestMalformedReport:
                 }
             ]
         }
-        _, duration = parse_jest_vitest_report(report, [])
+        _, duration = parse_jest_vitest_report(report, ["x"])
         assert duration == 0.042
 
     def test_missing_duration_defaults_zero(self) -> None:
@@ -214,7 +218,7 @@ class TestMalformedReport:
                 },
             ]
         }
-        counter, duration = parse_jest_vitest_report(report, [])
+        counter, duration = parse_jest_vitest_report(report, ["a", "b", "c"])
         assert counter["passed"] == 1
         assert counter["failed"] == 1
         assert counter["skipped"] == 1
@@ -228,19 +232,19 @@ class TestMalformedReport:
 
 class TestTestIdMatching:
     @pytest.mark.parametrize(
-        "test_id, fullname_in_report, expect_failed",
+        "test_id, fullname_in_report, expect_match",
         [
             # Exact match on bare_name
-            ("src/x.test.ts > my test", "my test", False),
+            ("src/x.test.ts > my test", "my test", True),
             # Exact match on full tid
-            ("src/x.test.ts > my test", "src/x.test.ts > my test", False),
-            # No match → counted failed
-            ("src/x.test.ts > missing", "other test", True),
+            ("src/x.test.ts > my test", "src/x.test.ts > my test", True),
+            # No match → the canonical id is scored failed, the assertion ignored
+            ("src/x.test.ts > missing", "other test", False),
             # Whitespace difference breaks match
-            ("src/x.test.ts > my test", "my  test", True),
+            ("src/x.test.ts > my test", "my  test", False),
             # Different separator (uses first ' > ')
-            ("a > b > c", "b > c", False),  # bare_name is "b > c"
-            ("a > b > c", "b", True),  # only first split taken
+            ("a > b > c", "b > c", True),  # bare_name is "b > c"
+            ("a > b > c", "b", False),  # only first split taken
             # Empty string tid is explicitly skipped
         ],
     )
@@ -248,8 +252,14 @@ class TestTestIdMatching:
         self,
         test_id: str,
         fullname_in_report: str,
-        expect_failed: bool,
+        expect_match: bool,
     ) -> None:
+        """Canonical-only scoring: a report assertion counts ONLY when its
+        ``fullName`` matches a canonical test_id (the full id or the bare name
+        after the first ``' > '``). A non-matching assertion is ignored (it is
+        NOT counted as an extra pass — anti-cheat), and the unsatisfied
+        canonical id is scored ``failed``.
+        """
         report = {
             "testResults": [
                 {
@@ -264,11 +274,12 @@ class TestTestIdMatching:
             ]
         }
         counter, _ = parse_jest_vitest_report(report, [test_id])
-        assert counter["passed"] == 1
-        if expect_failed:
-            assert counter.get("failed", 0) == 1
-        else:
+        if expect_match:
+            assert counter["passed"] == 1
             assert counter.get("failed", 0) == 0
+        else:
+            assert counter.get("passed", 0) == 0
+            assert counter["failed"] == 1
 
     def test_empty_test_id_is_skipped(self) -> None:
         report = {"testResults": []}

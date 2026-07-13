@@ -330,12 +330,15 @@ class TestParseJestJsonResults:
 
 class TestBuildCollectCommand:
     def test_vitest_command(self):
+        # The test_dir positional MUST precede --json: vitest's --json optionally
+        # takes an output-file value, so `--json __tests__` would be misparsed as
+        # "write JSON to file __tests__". Dir-first keeps --json value-less.
         assert _build_collect_command("vitest", "__tests__") == [
             "npx",
             "vitest",
             "list",
-            "--json",
             "__tests__",
+            "--json",
         ]
 
     def test_jest_command(self):
@@ -442,7 +445,7 @@ class TestCollectTsTestIdsLocal:
         assert result == ["__tests__/math.test.ts > adds"]
         mock_run.assert_called_once()
         call_args = mock_run.call_args
-        assert call_args[0][0] == ["npx", "vitest", "list", "--json", "__tests__"]
+        assert call_args[0][0] == ["npx", "vitest", "list", "__tests__", "--json"]
 
     @patch(f"{MODULE}.subprocess.run")
     def test_jest_local_success(self, mock_run: MagicMock):
@@ -462,13 +465,24 @@ class TestCollectTsTestIdsLocal:
 
     @patch(f"{MODULE}.subprocess.run")
     def test_vitest_fallback_on_empty(self, mock_run: MagicMock):
-        fallback_output = json.dumps(
-            [
-                {"name": "from_fallback", "file": "/repo/__tests__/x.test.ts"},
-            ]
+        # When `vitest list` returns 0 IDs, the fallback RUNS the suite with
+        # `vitest run --reporter=json`, which emits a jest-SHAPED report (parsed
+        # by _parse_jest_json_results), NOT the vitest-list array. The report is
+        # read from stdout when no --outputFile lands.
+        fallback_report = json.dumps(
+            {
+                "testResults": [
+                    {
+                        "testFilePath": "/repo/__tests__/x.test.ts",
+                        "assertionResults": [
+                            {"fullName": "from_fallback", "status": "passed"},
+                        ],
+                    }
+                ]
+            }
         )
         primary_result = MagicMock(stdout="", stderr="", returncode=1)
-        fallback_result = MagicMock(stdout=fallback_output, stderr="", returncode=0)
+        fallback_result = MagicMock(stdout=fallback_report, stderr="", returncode=0)
         mock_run.side_effect = [primary_result, fallback_result]
 
         result = collect_ts_test_ids_local(
@@ -519,7 +533,8 @@ class TestCollectTsTestIdsDocker:
         if isinstance(bash_cmd, list):
             bash_cmd = bash_cmd[2]
         assert "git checkout abc1234" in bash_cmd
-        assert "vitest list --json" in bash_cmd
+        # test_dir positional precedes --json (see _build_collect_command rationale).
+        assert "vitest list __tests__ --json" in bash_cmd
 
     @patch(
         "commit0.harness.docker_utils.get_docker_platform", return_value="linux/amd64"
@@ -950,7 +965,10 @@ class TestBuildCollectCommandExtended:
         assert cmd[1] == "vitest"
         assert "list" in cmd
         assert "--json" in cmd
-        assert cmd[-1] == "tests"
+        # test_dir positional precedes --json (vitest --json takes an optional
+        # output-file value), so the dir is second-to-last, --json is last.
+        assert cmd[-1] == "--json"
+        assert cmd[-2] == "tests"
 
     def test_jest_command_structure(self):
         cmd = _build_collect_command("jest", "tests")
@@ -961,9 +979,13 @@ class TestBuildCollectCommandExtended:
         assert cmd[-1] == "tests"
 
     def test_empty_test_dir(self):
+        # Vitest: dir positional (here empty) precedes --json, so --json is last
+        # and the empty dir is the second-to-last token.
         cmd = _build_collect_command("vitest", "")
-        assert cmd[-1] == ""
+        assert cmd[-1] == "--json"
+        assert cmd[-2] == ""
 
+        # Jest keeps the dir positional last.
         cmd = _build_collect_command("jest", "")
         assert cmd[-1] == ""
 
@@ -1116,9 +1138,23 @@ class TestDockerVitestFallbackQuoting:
         self, mock_docker: MagicMock, mock_plat: MagicMock
     ):
         mock_client = MagicMock()
+        # 1st run: `vitest list` -> 0 IDs (triggers fallback). 2nd run: the
+        # `vitest run --reporter=json` fallback -> a jest-SHAPED report (parsed by
+        # _parse_jest_json_results), which yields IDs so the glob step is skipped.
         mock_client.containers.run.side_effect = [
             b"[]",
-            b'[{"name": "t1", "file": "/testbed/a.test.ts"}]',
+            json.dumps(
+                {
+                    "testResults": [
+                        {
+                            "testFilePath": "/testbed/a.test.ts",
+                            "assertionResults": [
+                                {"fullName": "t1", "status": "passed"}
+                            ],
+                        }
+                    ]
+                }
+            ).encode(),
         ]
         mock_docker.return_value = mock_client
 
@@ -1440,8 +1476,9 @@ class TestDockerVitestFallbackErrors:
         import docker.errors as de
 
         mock_client = MagicMock()
-        # First call: empty vitest list output (triggers fallback)
-        # Second call: ContainerError in fallback
+        # 1st call: empty vitest list (triggers vitest-run fallback).
+        # 2nd call: ContainerError in the fallback (caught).
+        # 3rd call: ultimate glob fallback -> empty (no test files found).
         mock_client.containers.run.side_effect = [
             b"[]",  # empty vitest list
             de.ContainerError(
@@ -1451,6 +1488,7 @@ class TestDockerVitestFallbackErrors:
                 image="img",
                 stderr=b"error",
             ),
+            b"",  # glob fallback finds nothing
         ]
         mock_docker.return_value = mock_client
 
@@ -1460,7 +1498,7 @@ class TestDockerVitestFallbackErrors:
             image_name="img:v0",
         )
         assert result == []
-        assert mock_client.containers.run.call_count == 2
+        assert mock_client.containers.run.call_count == 3
 
     @patch(
         "commit0.harness.docker_utils.get_docker_platform", return_value="linux/amd64"
@@ -1473,9 +1511,12 @@ class TestDockerVitestFallbackErrors:
         import requests.exceptions
 
         mock_client = MagicMock()
+        # 1st: empty vitest list; 2nd: ReadTimeout in the fallback (caught);
+        # 3rd: ultimate glob fallback -> empty.
         mock_client.containers.run.side_effect = [
             b"[]",  # empty vitest list
             requests.exceptions.ReadTimeout(),
+            b"",  # glob fallback finds nothing
         ]
         mock_docker.return_value = mock_client
 
@@ -1485,7 +1526,7 @@ class TestDockerVitestFallbackErrors:
             image_name="img:v0",
         )
         assert result == []
-        assert mock_client.containers.run.call_count == 2
+        assert mock_client.containers.run.call_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1592,7 +1633,7 @@ class TestGenerateForTsDatasetLocalMode:
     @patch(f"{MODULE}.save_test_ids")
     @patch(f"{MODULE}.collect_ts_test_ids_local")
     @patch(f"{MODULE}._find_repo_dir")
-    def test_local_to_docker_fallback(
+    def test_local_empty_does_not_fall_back_to_docker(
         self,
         mock_find_repo: MagicMock,
         mock_collect_local: MagicMock,
@@ -1601,12 +1642,14 @@ class TestGenerateForTsDatasetLocalMode:
         mock_collect_docker: MagicMock,
         tmp_path: Path,
     ):
-        """Lines 796-811: local returns empty → Docker fallback with found image."""
+        """Local mode stays local: when ``collect_ts_test_ids_local`` returns no
+        IDs there is no implicit Docker fallback (that path was removed). The repo
+        result is 0 and ``collect_ts_test_ids_docker`` is never invoked.
+        """
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
         mock_find_repo.return_value = repo_dir
-        mock_collect_local.return_value = []  # local fails
-        mock_collect_docker.return_value = ["__tests__/a.test.ts > t1"]
+        mock_collect_local.return_value = []  # local finds nothing
         mock_save.return_value = tmp_path / "out" / "fake.bz2"
 
         dataset = [
@@ -1624,9 +1667,8 @@ class TestGenerateForTsDatasetLocalMode:
             use_docker=False,
             clone_dir=tmp_path,
         )
-        assert results["mylib"] == 1
-        mock_collect_docker.assert_called_once()
-        assert mock_collect_docker.call_args[1]["image_name"] == "myimg:v0"
+        assert results["mylib"] == 0
+        mock_collect_docker.assert_not_called()
 
     @patch(f"{MODULE}._find_docker_image", return_value=None)
     @patch(f"{MODULE}.save_test_ids")

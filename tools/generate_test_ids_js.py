@@ -243,6 +243,8 @@ def _detect_framework_from_entry(entry: dict) -> str:
         return "mocha"
     if "node --test" in cmd_lower or "node:test" in cmd_lower:
         return "node_test"
+    if "ava" in cmd_lower:
+        return "ava"
     logger.debug(
         "Could not detect framework for %s, defaulting to jest",
         entry.get("repo", "unknown"),
@@ -260,6 +262,11 @@ def _build_collect_command(framework: str, test_dir: str) -> list[str]:
         return ["npx", "mocha", "--reporter", "json", "--dry-run", test_dir]
     if framework == "node_test":
         return ["node", "--test", "--test-reporter=tap", test_dir]
+    if framework == "ava":
+        # AVA is config-driven (test files come from package.json "ava"/ava.config.*);
+        # a bare directory positional isn't a glob it reliably resolves, so let AVA
+        # discover its own files. `--tap` emits flat TAP we parse like node:test.
+        return ["npx", "ava", "--tap"]
     raise ValueError(
         f"Unknown framework: {framework!r}. "
         f"Expected one of {sorted(SUPPORTED_TEST_FRAMEWORKS)}."
@@ -278,7 +285,8 @@ def _dispatch_parse(
         return _parse_vitest_list_output(stdout, repo_root)
     if framework == "mocha":
         return _parse_mocha_output(stdout, repo_root)
-    if framework == "node_test":
+    if framework in ("node_test", "ava"):
+        # Both emit flat/nested TAP; the TAP walker handles either.
         return _parse_node_test_output(stdout, repo_root)
     logger.warning("Unknown framework %r, falling back to jest parser", framework)
     return _parse_jest_json_results(stdout, repo_root)

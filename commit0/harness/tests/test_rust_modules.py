@@ -323,7 +323,18 @@ class TestAggregateRustResults:
     def test_cargo_test_fallback(self, tmp_path):
         from commit0.harness.evaluate_rust import _aggregate_rust_results
 
-        content = "test result: ok. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        # libtest text output: the parser counts the per-test `... ok/FAILED`
+        # lines and cross-checks them against the `test result:` summary. A bare
+        # summary line alone is intentionally NOT scored (forged-summary guard),
+        # so a genuine run must include the per-test lines it summarises.
+        content = (
+            "running 4 tests\n"
+            "test mod::a ... ok\n"
+            "test mod::b ... ok\n"
+            "test mod::c ... ok\n"
+            "test mod::d ... FAILED\n"
+            "test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        )
         (tmp_path / "test_output.txt").write_text(content)
         out = []
         _aggregate_rust_results(str(tmp_path), "repo", out)

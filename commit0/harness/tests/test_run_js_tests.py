@@ -474,17 +474,33 @@ class TestFrameworkInjectionMarkersCoverage:
                 f"drop for this framework"
             )
 
-    def test_node_test_explicitly_rejected_not_silent_drop(self) -> None:
-        with pytest.raises(ValueError, match="node:test"):
-            _inject_test_ids(
-                "set -uo pipefail\nnode --test\n",
-                "tests/foo.test.js",
-                "node_test",
-            )
+    # node:test and ava select tests by pattern, not positional args (positionals
+    # are file paths/globs), so per-test-ID injection is unsupported. Rather than
+    # RAISE (which crashed the per-file agent-feedback subprocess for these repos),
+    # _inject_test_ids now runs the WHOLE suite and logs a warning — correct (the
+    # canonical inventory supplies the denominator) and not silent.
+    @pytest.mark.parametrize("framework", ["node_test", "ava"])
+    def test_pattern_frameworks_run_whole_suite_not_silent(
+        self, framework: str, caplog
+    ) -> None:
+        import logging
 
-    def test_supported_frameworks_either_have_marker_or_raise(self) -> None:
+        script = "set -uo pipefail\nnode --test\n"
+        with caplog.at_level(logging.WARNING):
+            out = _inject_test_ids(script, "tests/foo.test.js", framework)
+        # whole suite (script unchanged) + a warning => not a silent drop
+        assert out == script
+        assert any(
+            "full suite" in rec.message.lower() or "unsupported" in rec.message.lower()
+            for rec in caplog.records
+        ), f"expected a warning for {framework}; got {[r.message for r in caplog.records]}"
+
+    def test_supported_frameworks_either_have_marker_or_handled(self) -> None:
+        # Pattern-based frameworks (node:test, ava) intentionally have no positional
+        # injection marker — they run the whole suite (tested above). Every OTHER
+        # supported framework must have a marker so injection never silently drops.
         for framework in SUPPORTED_TEST_FRAMEWORKS:
-            if framework == "node_test":
+            if framework in ("node_test", "ava"):
                 continue
             assert framework in _FRAMEWORK_INJECTION_MARKERS, (
                 f"framework {framework!r} is in SUPPORTED_TEST_FRAMEWORKS but "

@@ -729,7 +729,12 @@ class AiderAgents(Agents):
             import litellm
             litellm.reasoning_auto_summary = True
 
-        # Check if API key is set for the model
+        # Check if API key is set for the model. ``known_provider`` tracks
+        # whether we matched a provider whose credential we know how to check;
+        # unknown providers are assumed to carry their own credentials and are
+        # not blocked here.
+        api_key = None
+        known_provider = True
         if "bedrock" in model_name:
             api_key = os.environ.get("AWS_ACCESS_KEY_ID", None) or os.environ.get(
                 "AWS_BEARER_TOKEN_BEDROCK", None
@@ -744,8 +749,25 @@ class AiderAgents(Agents):
                 raise ValueError(
                     "API Key Error: set VERTEX_AI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS for vertex_ai/ models."
                 )
+            # ADC (application-default credentials) is a valid credential for
+            # vertex_ai/ even without an API key — satisfy the fall-through guard.
+            api_key = api_key or adc_path
         elif "claude" in model_name or "anthropic" in model_name:
             api_key = os.environ.get("ANTHROPIC_API_KEY", None)
+        elif "gemini" in model_name:
+            api_key = os.environ.get("API_KEY", None)
+        else:
+            known_provider = False
+            _logger.warning(
+                "Unknown model provider for %s; assuming credentials are present.",
+                model_name,
+            )
+
+        if known_provider and not api_key:
+            raise ValueError(
+                "API Key Error: There is no API key associated with the model for this agent. "
+                "Edit model_name parameter in .agent.yaml, export API key for that model, and try again."
+            )
 
     @staticmethod
     def _load_model_settings() -> None:

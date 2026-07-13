@@ -123,38 +123,87 @@ def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None
                  "continues; left .needs_retry for --resume.", module_name, err)
 
 
+def _originally_stubbed_files(
+    local_repo: Repo,
+    stub_base: str,
+    java_files: List[str],
+    repo_path: str,
+) -> List[str]:
+    """Files that carried JAVA_STUB_MARKER at ``stub_base``.
+
+    Stubbed-set membership is a fixed dataset property of the base commit,
+    NOT a fact about the current working tree. Stage 2/3 resume without
+    resetting past stage 1's implementations, so a working-tree scan finds
+    no stubs and the pre-fix loop returned early with \"No stubbed files
+    found, skipping\" — wasting the refine budget on every repo. Reading each
+    candidate at ``stub_base`` reproduces the same set stage 1 saw, so every
+    stage iterates the same files (with current tree content, which is what
+    refine stages need in order to fix the compile/test errors stage 1 left).
+    """
+    originals: List[str] = []
+    for f in java_files:
+        rel = os.path.relpath(f, repo_path).replace(os.sep, "/")
+        try:
+            content = local_repo.git.show(f"{stub_base}:{rel}")
+        except Exception:  # noqa: BLE001
+            continue
+        if JAVA_STUB_MARKER in content:
+            originals.append(f)
+    return originals
+
+
 def run_eval_after_each_commit(
     repo: str,
     branch: str,
-    timeout: int = 100,
+    repo_path: str,
+    build_system: str = "maven",
+    timeout: int = 180,
 ) -> str:
-    """Run commit0-java evaluate after each commit and return stdout."""
-    eval_cmd = [
-        sys.executable, "-m", "commit0", "cli_java", "evaluate",
-        "--repo", repo,
-        "--branch", branch,
-        "--timeout", str(timeout),
-    ]
-    # Fallback: try the commit0-java entry-point directly
-    commit0_java = os.path.join(os.path.dirname(sys.executable), "commit0-java")
-    if os.path.isfile(commit0_java):
-        eval_cmd = [
-            commit0_java, "evaluate",
-            "--repo", repo,
-            "--branch", branch,
-            "--timeout", str(timeout),
-        ]
+    """Lightweight per-commit COMPILE check (records a status string per commit).
+
+    A full ``commit0-java evaluate`` per commit is impractical AND was broken for
+    Java: it required a ``.commit0.java.yaml`` in CWD (else typer exit 2), defaulted
+    to ``backend="local"`` (Docker — fails in the daemon-less container), and ran the
+    ENTIRE test suite after each of ~20 commits (minutes each, hang-prone). Instead
+    we just COMPILE (main + test sources) in the repo worktree — fast, hermetic (no
+    config/Docker), bounded, and a strong signal of whether the committed change
+    builds. Network waits are bounded so an uncached artifact can't hang.
+    """
+    if build_system == "gradle":
+        inner = (
+            "chmod +x ./gradlew 2>/dev/null || true; "
+            "if [ -f ./gradlew ]; then GCMD=./gradlew; else GCMD=gradle; fi; "
+            "$GCMD classes testClasses --no-daemon -q"
+        )
+    else:
+        inner = (
+            "chmod +x ./mvnw 2>/dev/null || true; "
+            "if [ -f ./mvnw ]; then MCMD=./mvnw; else MCMD=mvn; fi; "
+            "$MCMD -q -B compile test-compile "
+            "-Dmaven.wagon.http.retryHandler.count=2 "
+            "-Daether.connector.connectTimeout=15000 "
+            "-Daether.connector.requestTimeout=60000"
+        )
     try:
         result = subprocess.run(
-            eval_cmd, capture_output=True, text=True, check=True, timeout=timeout + 60
+            ["bash", "-c", inner],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        logger.error("Eval command failed: %s", e)
-        return e.stdout if e.stdout else str(e)
-    except subprocess.TimeoutExpired as e:
-        logger.error("Eval command timed out: %s", e)
-        return str(e)
+        if result.returncode == 0:
+            return "COMPILE_OK"
+        tail = ((result.stdout or "") + (result.stderr or "")).strip()[-1500:]
+        logger.warning("Per-commit compile check failed (rc=%s) for %s",
+                       result.returncode, repo)
+        return f"COMPILE_FAILED (rc={result.returncode})\n{tail}"
+    except subprocess.TimeoutExpired:
+        logger.error("Per-commit compile check timed out after %ss for %s", timeout, repo)
+        return f"COMPILE_TIMEOUT ({timeout}s)"
+    except Exception as e:  # noqa: BLE001
+        logger.error("Per-commit compile check error for %s: %s", repo, e)
+        return f"COMPILE_ERROR: {e}"
 
 
 def _get_java_message(
@@ -329,7 +378,15 @@ def run_java_agent(
             Path(log_dir).parent, repo_name, logger)
 
     java_files = collect_java_files(repo_path)
-    stubbed_files = [f for f in java_files if is_java_stubbed(f)]
+    stubbed_files = _originally_stubbed_files(local_repo, stub_base, java_files, repo_path)
+    if not stubbed_files:
+        wt_stubbed = [f for f in java_files if is_java_stubbed(f)]
+        if wt_stubbed:
+            logger.warning(
+                "%s: base-commit stub scan returned 0, using working-tree scan (%d files) as fallback",
+                repo_name, len(wt_stubbed),
+            )
+            stubbed_files = wt_stubbed
     if agent_config.strip_non_stubs:
         logger.info(
             "strip_non_stubs: Java already operates on stub-only files; %d/%d files are stubs",
@@ -337,8 +394,15 @@ def run_java_agent(
         )
 
     if not stubbed_files:
-        logger.info("No stubbed files found in %s, skipping", repo_name)
-        return None
+        raise RuntimeError(
+            f"No stubbed Java files found for {repo_name}: base-commit scan at "
+            f"stub_base={stub_base[:12]} (branch={stub_branch}) and working-tree "
+            f"scan both returned 0 out of {len(java_files)} candidate files. This "
+            f"would produce a degenerate 0-work trajectory (stages 2/3 finishing "
+            f"instantly at $0 cost); failing loud. Verify stubbing landed on the "
+            f"{stub_branch} branch OR that base_commit={instance.get('base_commit', 'HEAD')!r} "
+            f"resolves to a commit with stubbed files."
+        )
 
     logger.info(
         "Java agent starting: %s, %d/%d files stubbed",
@@ -419,6 +483,13 @@ def run_java_agent(
                     logger.info("Skipping already-completed test module: %s", test_log_name)
                     continue
 
+                # Flush each turn live to <module>/turns.jsonl AND touch .heartbeat
+                # so the inactivity watchdog sees progress and a worker killed
+                # mid-module keeps a partial trajectory — parity with go/rust/python
+                # (previously java wrote neither file per module).
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
+
                 try:
                     # In test-first mode, the message is empty (aider runs tests
                     # directly). Skip the expensive _get_java_message() which does
@@ -498,11 +569,93 @@ def run_java_agent(
                     if agent_config.record_test_for_each_commit:
                         current_commit = local_repo.head.commit.hexsha
                         eval_results[current_commit] = run_eval_after_each_commit(
-                            repo_full_name, branch
+                            repo_full_name, branch, repo_path, build_system
                         )
                 except Exception:
                     logger.exception("Failed processing test %s, skipping", rel_test)
                     results[rel_test] = {"status": "error", "cost": 0.0}
+        elif agent_config.run_entire_dir_lint:
+            # STAGE 2 (lint): parity with python/go/rust/c/js. Drive fixes from the
+            # compile/lint errors directly (empty message + lint_first) rather than
+            # re-sending the draft "implement stubs" prompt (which no-ops once stage
+            # 1 has filled the stubs). Iterates the same stubbed source files.
+            lint_instruction = "[stage2 lint] fix compile/lint errors"
+            for stubbed_file in stubbed_files:
+                rel_path = str(Path(stubbed_file).relative_to(repo_path))
+                file_log_name = rel_path.replace("/", "__").replace(".java", "")
+                file_log_dir = experiment_log_dir / file_log_name
+
+                if _is_module_done(file_log_dir):
+                    logger.info("Skipping already-completed module: %s", file_log_name)
+                    continue
+
+                logger.info("Linting: %s", rel_path)
+
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
+
+                try:
+                    module_start = time.time()
+                    with capture_module_calls(
+                        thinking_capture=thinking_capture,
+                        module=file_log_name,
+                        log_dir=file_log_dir,
+                    ):
+                        try:
+                            agent_return = run_with_recovery(java_agent.run,
+                                message="",
+                                test_cmd="",
+                                lint_cmd=compile_cmd,
+                                fnames=[stubbed_file],
+                                log_dir=file_log_dir,
+                                lint_first=True,
+                                thinking_capture=thinking_capture,
+                                current_stage="lint",
+                                current_module=file_log_name,
+                                max_test_output_length=agent_config.max_test_output_length,
+                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                        _kaiju_log_dir=file_log_dir,)
+                        except TransientLLMError as _tle:
+                            _skip_failed_module(file_log_dir, file_log_name, _tle)
+                            continue
+                    module_elapsed = time.time() - module_start
+                    _mark_module_done(file_log_dir)
+
+                    if thinking_capture is not None:
+                        module_patch = module_file_patch(
+                            local_repo, stub_base, "HEAD", rel_path, logger=logger
+                        )
+                        module_turns = thinking_capture.get_module_turns(file_log_name)
+                        if module_turns:
+                            write_module_output_json(
+                                output_dir=str(file_log_dir),
+                                module_turns=module_turns,
+                                module=file_log_name,
+                                instance_id=f"{instance_id}__{file_log_name}",
+                                git_patch=module_patch,
+                                instruction=lint_instruction,
+                                metadata=metadata,
+                                metrics=thinking_capture.get_module_metrics(file_log_name),
+                                stage="lint",
+                                module_runtime_seconds=module_elapsed,
+                            )
+                        _flush_trajectory()
+
+                    results[rel_path] = {
+                        "status": "completed",
+                        "cost": agent_return.last_cost,
+                    }
+
+                    if agent_config.record_test_for_each_commit:
+                        current_commit = local_repo.head.commit.hexsha
+                        eval_results[current_commit] = run_eval_after_each_commit(
+                            repo_full_name, branch, repo_path, build_system
+                        )
+                except Exception:
+                    logger.exception("Failed linting %s, skipping", rel_path)
+                    results[rel_path] = {"status": "error", "cost": 0.0}
         else:
             for stubbed_file in stubbed_files:
                 rel_path = str(Path(stubbed_file).relative_to(repo_path))
@@ -514,6 +667,12 @@ def run_java_agent(
                     continue
 
                 logger.info("Processing: %s", rel_path)
+
+                # Live turn flush -> <module>/turns.jsonl + .heartbeat touch (parity
+                # with go/rust/python; enables watchdog liveness + crash-resilient
+                # partial trajectory).
+                if thinking_capture is not None:
+                    thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
 
                 try:
                     message, spec_costs = _get_java_message(agent_config, repo_path, stubbed_file)
@@ -585,7 +744,7 @@ def run_java_agent(
                     if agent_config.record_test_for_each_commit:
                         current_commit = local_repo.head.commit.hexsha
                         eval_results[current_commit] = run_eval_after_each_commit(
-                            repo_full_name, branch
+                            repo_full_name, branch, repo_path, build_system
                         )
                 except Exception:
                     logger.exception("Failed processing %s, skipping", rel_path)
@@ -630,7 +789,15 @@ def _find_all_test_files(repo_path: str) -> List[str]:
     test_files = []
     for f in p.rglob("*.java"):
         rel = str(f.relative_to(p))
-        if "/src/test/" in rel and (
+        # Match a Maven/Gradle test source root (``src/test/...``) at ANY depth,
+        # INCLUDING the repo root. ``rel`` is repo-relative, so a root-level
+        # ``src/test/...`` has NO leading slash — the old ``"/src/test/" in rel``
+        # check silently missed it, matching only nested modules
+        # (``module/src/test/...``). That returned 0 test files for the common
+        # root layout (e.g. JSON-java), so stage 3's test loop never ran and the
+        # test-first refine stage did zero work at $0. Prepend a slash so both the
+        # root and nested layouts match.
+        if "/src/test/" in "/" + rel and (
             f.name.endswith("Test.java")
             or f.name.endswith("Tests.java")
             or f.name.startswith("Test")

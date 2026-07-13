@@ -416,6 +416,7 @@ def run_cpp_agent_for_repo(
         if thinking_capture is not None:
             for c in summarizer_costs:
                 thinking_capture.summarizer_costs.add(c)
+            thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
 
         pre_sha = local_repo.head.commit.hexsha
         module_start = time.time()

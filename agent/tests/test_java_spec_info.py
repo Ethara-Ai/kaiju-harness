@@ -126,8 +126,11 @@ class TestJavaReadmeFallback:
 
         spec_start = message.find(SPEC_INFO_HEADER)
         assert spec_start != -1
-        readme_portion = message[spec_start + len(SPEC_INFO_HEADER) + 1:]
-        assert len(readme_portion) <= 500
+        # The readme (20000 chars) must be truncated to max_spec_info_length=500.
+        # Check the truncation directly rather than measuring "everything after the
+        # header", which also includes the trailing MODULE_SCOPE_NOTE.
+        assert ("y" * 500) in message
+        assert ("y" * 501) not in message
 
     def test_neither_spec_nor_readme(self, tmp_path: Path) -> None:
         stubbed = _write_stubbed_file(tmp_path)

@@ -522,6 +522,9 @@ class TestPricingConstants:
     def test_env_map_has_all_six_aliases(self):
         from agent.agents import _BEDROCK_ENV_TO_BASE_MODEL
 
+        # These aliases must always be present. The source may register
+        # additional aliases (e.g. BEDROCK_OPUS47_ARN), so assert a subset
+        # rather than exact equality.
         expected = {
             "BEDROCK_OPUS_ARN",
             "BEDROCK_GLM5_ARN",
@@ -530,7 +533,7 @@ class TestPricingConstants:
             "BEDROCK_NOVA2_LITE_ARN",
             "BEDROCK_NOVA_PREMIER_ARN",
         }
-        assert set(_BEDROCK_ENV_TO_BASE_MODEL.keys()) == expected
+        assert expected <= set(_BEDROCK_ENV_TO_BASE_MODEL.keys())
 
     def test_base_models_are_strings(self):
         from agent.agents import _BEDROCK_ENV_TO_BASE_MODEL
@@ -701,7 +704,9 @@ class TestApplyThinkingCapturePatches:
         assert tc.turns[0].content == "fix the bug"
         assert tc.turns[0].stage == "draft"
         assert tc.turns[0].module == "mod"
-        assert tc.turns[0].turn_number == 1
+        # E16: turn_number is derived from append position (0-indexed), so the
+        # first recorded turn is 0 regardless of the caller-supplied counter.
+        assert tc.turns[0].turn_number == 0
 
     def test_patched_clone_propagates_patches(self):
         from agent.agents import _apply_thinking_capture_patches
@@ -806,7 +811,7 @@ class TestAiderAgentsRun:
         return coder
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_stdout_stderr_redirect(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path
@@ -830,7 +835,7 @@ class TestAiderAgentsRun:
         assert sys.stderr is saved_stderr
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_test_first_mode(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path
@@ -853,7 +858,7 @@ class TestAiderAgentsRun:
         coder.run.assert_called_once_with("test errors found")
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_lint_first_mode(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path
@@ -874,7 +879,7 @@ class TestAiderAgentsRun:
         coder.commands.cmd_lint.assert_called_once_with(fnames=["test.py"])
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_default_mode_runs_message(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path
@@ -894,7 +899,7 @@ class TestAiderAgentsRun:
         coder.run.assert_called_once_with("implement feature X")
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_token_estimation_skips_large(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path, caplog
@@ -921,7 +926,7 @@ class TestAiderAgentsRun:
         assert isinstance(result, AiderReturn)
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_returns_aider_return_with_cost(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path
@@ -944,7 +949,7 @@ class TestAiderAgentsRun:
         assert result.last_cost >= 0.0
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_log_dir_created(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path
@@ -968,7 +973,7 @@ class TestAiderAgentsRun:
 
     @patch(f"{MODULE}.summarize_test_output")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_max_test_output_wraps_cmd_test(
         self,
@@ -998,7 +1003,7 @@ class TestAiderAgentsRun:
         mock_summarize.assert_called_once()
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_test_first_no_errors_skips_coder_run(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path
@@ -1020,7 +1025,7 @@ class TestAiderAgentsRun:
         coder.run.assert_not_called()
 
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     @patch(f"{MODULE}.handle_logging")
     def test_thinking_capture_records_files_read(
         self, mock_logging, mock_io, mock_coder_cls, monkeypatch, tmp_path

@@ -144,7 +144,7 @@ class CppSpec(Spec):
             *revert_lines,
             "git status",
             *guard_heal_lines(),
-            f"{{{{ {build_cmd}; {test_cmd} {{test_ids}}; }}}} > test_output.txt 2>&1",
+            f"{{ {build_cmd}; {test_cmd} {{test_ids}}; }} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",
         ]
 

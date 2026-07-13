@@ -37,6 +37,23 @@ static bool isInTestFile(const clang::FunctionDecl *FD,
            has("/benchmarks/");
 }
 
+static bool isInHeaderFile(const clang::FunctionDecl *FD,
+                           const clang::SourceManager &SM) {
+    auto loc = FD->getLocation();
+    if (loc.isInvalid())
+        return false;
+    auto fname = SM.getFilename(SM.getSpellingLoc(loc));
+    if (fname.empty())
+        return false;
+    std::string lower = fname.lower();
+    for (const char *ext : {".h", ".hpp", ".hh", ".hxx", ".h++", ".ipp", ".tpp", ".inl"}) {
+        auto pos = lower.rfind(ext);
+        if (pos != std::string::npos && pos + std::string(ext).size() == lower.size())
+            return true;
+    }
+    return false;
+}
+
 StubVisitor::StubVisitor(clang::Rewriter &R, const StubConfig &cfg,
                          clang::ASTContext &ctx)
     : rewriter_(R), config_(cfg), context_(ctx) {}
@@ -89,6 +106,17 @@ bool StubVisitor::shouldSkip(const clang::FunctionDecl *FD) const {
     if (isInTestFile(FD, context_.getSourceManager()))
         return true;
 
+    if (FD->isConstexpr() &&
+        !llvm::isa<clang::CXXConstructorDecl>(FD) &&
+        !llvm::isa<clang::CXXDestructorDecl>(FD) &&
+        !FD->getReturnType()->isVoidType()) {
+        if (isInHeaderFile(FD, context_.getSourceManager()))
+            return true;
+        clang::QualType RT = FD->getReturnType().getCanonicalType();
+        if (!RT->isScalarType())
+            return true;
+    }
+
     return false;
 }
 
@@ -118,8 +146,13 @@ bool StubVisitor::isTestRelated(const clang::FunctionDecl *FD) const {
 }
 
 std::string StubVisitor::chooseMarker(const clang::FunctionDecl *FD) const {
-    if (FD->isConstexpr())
+    if (FD->isConstexpr()) {
+        if (llvm::isa<clang::CXXConstructorDecl>(FD) ||
+            llvm::isa<clang::CXXDestructorDecl>(FD) ||
+            FD->getReturnType()->isVoidType())
+            return "";
         return config_.constexpr_marker;
+    }
 
     auto *FPT = FD->getType()->getAs<clang::FunctionProtoType>();
     if (FPT && FPT->isNothrow())

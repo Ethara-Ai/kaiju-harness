@@ -118,6 +118,15 @@ def evaluate(
     branch: Optional[str] = typer.Option(None, help="Evaluate from git branch (generates patch from diff vs base_commit)"),
     timeout: int = typer.Option(600, help="Evaluation timeout in seconds"),
     num_workers: int = typer.Option(4, help="Parallel evaluation workers (multi-repo mode)"),
+    backend: str = typer.Option(
+        "local",
+        help="Execution backend: 'local' (Docker) or 'local_inplace' (git worktree, "
+             "no Docker daemon — REQUIRED inside the containerized pipeline).",
+    ),
+    log_dir: Optional[str] = typer.Option(
+        None,
+        help="Directory for eval artifacts (evaluate_java.log, eval.sh, compile_output.txt, test_output.txt, test_exit_code.txt, surefire reports). Defaults to logs/pytest/<repo>, which is EPHEMERAL inside pipeline containers — pass an explicit path on a persisted mount to enable post-mortem debugging.",
+    ),
 ) -> None:
     """Evaluate Java patches. Single-repo (--repo) or multi-repo (--branch without --repo)."""
     from pathlib import Path as _Path
@@ -132,6 +141,7 @@ def evaluate(
             branch=branch,
             timeout=timeout,
             num_workers=num_workers,
+            backend=backend,
         )
 
         typer.echo("repo,runtime,num_passed/num_tests")
@@ -214,7 +224,7 @@ def evaluate(
         typer.echo(f"Branch: {branch}")
 
     _start = _time.monotonic()
-    results = evaluate_java_repo(instance=instance, patch_path=patch_path, timeout=timeout)
+    results = evaluate_java_repo(instance=instance, patch_path=patch_path, timeout=timeout, backend=backend, log_dir=log_dir)
     _elapsed = _time.monotonic() - _start
 
     from commit0.harness.constants import TestStatus as _TS
@@ -320,6 +330,11 @@ def agent(
     model: str = typer.Option("gpt-4", help="LLM model name"),
     max_iteration: int = typer.Option(3, help="Max aider reflections"),
     run_tests: bool = typer.Option(True, help="Use test-driven mode"),
+    run_entire_dir_lint: bool = typer.Option(
+        False,
+        help="Stage 2 (lint) mode: run compile/lint first and drive fixes from its "
+        "errors (lint_first) instead of re-sending the draft prompt.",
+    ),
     log_dir: str = typer.Option("logs/agent", help="Log directory"),
     override_previous: bool = typer.Option(False, help="Reset to base commit"),
     use_unit_tests_info: bool = typer.Option(True, help="Include unit test context in prompts"),
@@ -355,6 +370,7 @@ def agent(
         model=model,
         max_iteration=max_iteration,
         run_tests=run_tests,
+        run_entire_dir_lint=run_entire_dir_lint,
         use_unit_tests_info=use_unit_tests_info,
         use_spec_info=use_spec_info,
         compile_check=compile_check,

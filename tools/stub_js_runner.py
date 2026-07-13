@@ -105,6 +105,15 @@ def run_stub_js(
     if not STUB_JS_PATH.exists():
         raise FileNotFoundError(f"JS stubber not found: {STUB_JS_PATH}")
 
+    # Resolve to ABSOLUTE paths. The stubber subprocess runs with cwd=STUBBER_DIR
+    # (so `npx` finds the jsstubber-local ts-node), so a RELATIVE --src-dir — which
+    # is what a relative --clone-dir produces (e.g. `repos_staging/<repo>`) — would
+    # wrongly resolve against tools/jsstubber/ and fail "src-dir does not exist".
+    # Absolute paths are CWD-independent.
+    src_dir = Path(src_dir).resolve()
+    if extra_scan_dirs:
+        extra_scan_dirs = [Path(d).resolve() for d in extra_scan_dirs]
+
     cmd: list[str] = [
         "npx",
         "ts-node",

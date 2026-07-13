@@ -267,9 +267,16 @@ def _semver_tilde(v: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def version_sort_key(v: str) -> tuple[int, ...]:
-    """Numeric sort key — ``'3.10'`` sorts above ``'3.9'``."""
-    return tuple(int(p) for p in v.split("."))
+def version_sort_key(v: "str | int") -> tuple[int, ...]:
+    """Numeric sort key — ``'3.10'`` sorts above ``'3.9'``.
+
+    Coerce to str first: some callers pass integer major versions (Node's
+    SUPPORTED_NODE_VERSIONS is ``{20, 22}``), and ``int.split`` raises
+    AttributeError. This is a shared helper across all languages, so it must
+    accept both str ("3.10.1") and int (20) forms. ``str(v)`` is a no-op for the
+    existing string callers, so there's no behavior change for them.
+    """
+    return tuple(int(p) for p in str(v).split("."))
 
 
 def _to_comparable_version(v: str, version_template: str) -> Version:

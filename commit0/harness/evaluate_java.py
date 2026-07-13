@@ -3,7 +3,9 @@
 Uses ExecutionContext for backend-agnostic container lifecycle (Docker/Modal/E2B).
 Supports single-repo evaluation and multi-repo parallel orchestration.
 """
+import bz2
 import logging
+import os
 import subprocess
 import time
 import traceback
@@ -121,12 +123,24 @@ def evaluate_java_repo(
         xml_dir = log_path / report_dir
         if xml_dir.exists():
             results = parse_surefire_reports(str(xml_dir))
-            return {
-                test_id: _java_to_test_status(result)
-                for test_id, result in results.items()
-            }
+            if results:
+                return {
+                    test_id: _java_to_test_status(result)
+                    for test_id, result in results.items()
+                }
 
-        logger.warning(f"No test reports found for {repo_name}")
+        test_output_file = log_path / "test_output.txt"
+        tail = ""
+        if test_output_file.exists():
+            try:
+                tail = test_output_file.read_text(errors="replace")[-2000:]
+            except OSError:
+                tail = "<test_output.txt unreadable>"
+        logger.error(
+            "No surefire XML reports for %s at %s (xml_dir_exists=%s). "
+            "test_output.txt tail:\n%s",
+            repo_name, xml_dir, xml_dir.exists(), tail or "<no test_output.txt>",
+        )
         return {}
 
     except Exception as e:
@@ -198,6 +212,29 @@ def _generate_patch_for_repo(
     return short_name, str(tmp_patch)
 
 
+def _load_java_test_ids(repo_name: str) -> Optional[List[str]]:
+    """Load the frozen canonical test inventory (test CLASSES) for repo_name, or None.
+
+    NOTE: the Java inventory is CLASS-level (e.g. ``org.json.junit.CDLTest``) while
+    surefire reports are METHOD-level — so this is NOT a method denominator. It is
+    used only to distinguish a genuine zero-tests result from an INFRA failure
+    (compile error / test-phase timeout / no reports) where the canonical suite says
+    tests DO exist. Resolved via find_test_ids_file so it works from both the host
+    dir (commit0/data/java_test_ids/) and the containerized KAIJU_TEST_IDS_DIR mount.
+    """
+    from kaiju.paths import find_test_ids_file
+
+    commit0_path = os.path.dirname(os.path.dirname(__file__))
+    p = find_test_ids_file(commit0_path, "java_test_ids", f"{repo_name}.bz2")
+    if p is None:
+        return None
+    try:
+        with bz2.open(str(p), "rt") as f:
+            return [line.strip() for line in f if line.strip()]
+    except (OSError, EOFError):
+        return None
+
+
 def _eval_single_repo(
     instance: dict,
     patch_path: str,
@@ -218,12 +255,30 @@ def _eval_single_repo(
             backend=backend,
         )
     except Exception as e:
-        logger.error("Evaluation failed for %s: %s", short_name, e)
-        return short_name, time.monotonic() - start, 0, 0
+        logger.error(
+            "Evaluation CRASHED for %s: %s\n%s",
+            short_name, e, traceback.format_exc(),
+        )
+        canonical = _load_java_test_ids(short_name)
+        num_total = len(canonical) if canonical else 0
+        return short_name, time.monotonic() - start, 0, num_total
 
     elapsed = time.monotonic() - start
-    num_passed = sum(1 for v in results.values() if v is TestStatus.PASSED)
-    num_total = len(results)
+    # Infra markers (TIMEOUT/COMPILATION) are not real tests — exclude them.
+    _special = {"TIMEOUT", "COMPILATION"}
+    real = {k: v for k, v in results.items() if k not in _special}
+    num_passed = sum(1 for v in real.values() if v is TestStatus.PASSED)
+    observed_total = len(real)
+    if observed_total == 0:
+        # No tests produced reports (compile fail / test-phase timeout / broken
+        # eval). If the frozen inventory says the canonical suite HAS tests, surface
+        # a non-zero denominator so the run reads as an INFRA failure (0/N) rather
+        # than a meaningless 0/0. When tests DID run, the observed (method-level)
+        # count is the correct total; the class-level inventory can't refine it.
+        canonical = _load_java_test_ids(short_name)
+        num_total = len(canonical) if canonical else 0
+    else:
+        num_total = observed_total
     return short_name, elapsed, num_passed, num_total
 
 

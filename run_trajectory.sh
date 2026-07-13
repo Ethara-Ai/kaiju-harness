@@ -262,8 +262,12 @@ PREP_CMD="python -m ${PREP_MOD} --repo $REPO $_ORG_FLAG $_OUT_FLAG --clone-dir $
 # "No such option: --single-arch"), so omit it for those.
 _ARCH_FLAG="--single-arch"; case "$LNG" in rust|cpp|java) _ARCH_FLAG="";; esac
 if [ "$LNG" = "java" ]; then
-  # cli_java build has no config/arch flags — it reads .commit0.java.yaml by default.
   BUILD_CMD="python -m ${BUILD_MOD} build"
+elif [ "$LNG" = "cpp" ]; then
+  # cpp build defaults to linux/amd64,linux/arm64 which needs cross-arch buildx.
+  # Pin to native arch unless the operator sets COMMIT0_BUILD_PLATFORMS themselves.
+  export COMMIT0_BUILD_PLATFORMS="${COMMIT0_BUILD_PLATFORMS:-linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')}"
+  BUILD_CMD="python -m ${BUILD_MOD} build --dataset-path $DATASET"
 else
   BUILD_CMD="python -m ${BUILD_MOD} build $_ARCH_FLAG --commit0-config-file $CONFIG"
 fi
@@ -293,9 +297,16 @@ python - "$DATASET" <<'PY'
 import json,glob,sys
 e=json.load(open(sys.argv[1]))[0]
 bc=e.get("base_compiles")
+# Already staged under the consolidated datasets dir?
 inv=glob.glob(f"outputs/{e['id']}/datasets/*_test_ids.bz2")
+# Not staged yet — the per-language prepare writes the inventory under
+# commit0/data/<subdir>/<repo>.bz2 and the containerized runner stages it at run
+# time (copy_inference_inputs). Check that source so this isn't a false "MISSING".
+if not inv:
+    reponame=e.get("repo","/").split("/")[-1]
+    inv=glob.glob(f"commit0/data/*/{reponame}.bz2")
 print("   base_compiles:", bc, "" if bc is not False else "  <-- WARNING: base does NOT compile; a 0% is infra not model")
-print("   mount inventory:", inv or "MISSING (containerized eval will fall back to observed count)")
+print("   test-id inventory:", inv or "MISSING (containerized eval will fall back to observed count)")
 PY
 
 # ---- 2. bridge ----
@@ -316,7 +327,7 @@ if [ "$BRIDGE" = "codex" ]; then
   if ! lsof -i :$BPORT | grep -q LISTEN; then
     python -m agent.openai_codex --check || { echo "ERROR: codex auth check failed (is ~/.codex/auth.json valid?)"; exit 1; }
     python -m agent.openai_codex --host 0.0.0.0 --port $BPORT >/tmp/codex_bridge.log 2>&1 &
-    sleep 3
+    for _i in $(seq 1 30); do lsof -i :$BPORT 2>/dev/null | grep -q LISTEN && break; sleep 1; done
   fi
   lsof -i :$BPORT | grep -q LISTEN && echo "   codex bridge up on $BPORT (secret matches container)" || { echo "ERROR: bridge not up (see /tmp/codex_bridge.log)"; exit 1; }
 elif [ "$BRIDGE" = "cc" ]; then
@@ -328,9 +339,14 @@ elif [ "$BRIDGE" = "cc" ]; then
   fi
   if ! lsof -i :$BPORT | grep -q LISTEN; then
     KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh start || { echo "ERROR: cc bridge start failed"; exit 1; }
-    sleep 3
+    for _i in $(seq 1 30); do lsof -i :$BPORT 2>/dev/null | grep -q LISTEN && break; sleep 1; done
   fi
   lsof -i :$BPORT | grep -q LISTEN && echo "   cc bridge up on $BPORT (secret matches container)" || { echo "ERROR: bridge not up"; exit 1; }
+  # Always (re)arm the self-healing watchdog. Covers --reuse-bridge (where we
+  # skipped `start`, so no monitor would otherwise be attached) and re-arms a
+  # monitor whose supervisor died — so a mid-run bridge crash is auto-restarted
+  # with no manual intervention.
+  KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh ensure-monitor >/dev/null 2>&1 || true
 else
   echo "   no bridge (direct provider creds)"
 fi

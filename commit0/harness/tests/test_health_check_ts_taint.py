@@ -106,7 +106,15 @@ def test_valid_package_name_passes_regex_and_runs_container(good_name: str) -> N
     ok, detail = check_require(client, "img:v1", good_name)
     assert ok is True, f"expected acceptance for {good_name!r}"
     assert good_name in detail
-    client.containers.run.assert_called_once()
+    # check_require now (a) runs a package-manager detection probe and (b) runs
+    # the require.resolve() probe, so containers.run may be called more than
+    # once (the detection result is cached per image, so the count varies with
+    # cache state). The invariant is that the require probe DID launch: the
+    # final call is the resolve probe carrying the package name.
+    assert client.containers.run.called
+    last_cmd = client.containers.run.call_args[0][1]
+    assert "require.resolve" in last_cmd[-1]
+    assert good_name in last_cmd[-1]
 
 
 def test_types_scope_short_circuits_before_regex() -> None:
@@ -136,10 +144,22 @@ def test_require_string_has_no_quote_injection_for_valid_name() -> None:
     client = _silent_client()
     check_require(client, "img:v1", "express")
     cmd = client.containers.run.call_args[0][1]
-    # cmd is ["node", "-e", 'require("express")']
+    # check_require now emits an install probe built by _build_require_cmd:
+    #   ["node", "-e", 'try{require.resolve("express")}catch(e){...}']
+    # The security invariant is unchanged: the package name is interpolated
+    # via json.dumps (see _build_require_cmd), so it appears as a single,
+    # fully-quoted JS string literal argument to require.resolve() with no
+    # quote/shell injection possible.
+    import json as _json
+
     assert cmd[0] == "node"
     assert cmd[1] == "-e"
-    assert cmd[2] == 'require("express")'
+    # The name is embedded exactly as a JSON string literal — verbatim, escaped.
+    assert _json.dumps("express") in cmd[2]
+    assert cmd[2] == (
+        'try{require.resolve("express")}'
+        'catch(e){if(e&&e.code=="MODULE_NOT_FOUND"){throw e}}'
+    )
 
 
 # ---------------------------------------------------------------------------

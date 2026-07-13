@@ -4,6 +4,7 @@ import platform as _platform
 import re
 import subprocess
 import tarfile
+import time
 import traceback
 import docker
 import docker.errors
@@ -248,7 +249,7 @@ class BuildImageError(Exception):
         )
 
 
-def build_image(
+def _build_image_once(
     image_name: str,
     setup_scripts: dict,
     dockerfile: str,
@@ -259,6 +260,9 @@ def build_image(
     mitm_ca_cert: Optional[Path] = None,
 ) -> None:
     """Builds a docker image with the given name, setup scripts, dockerfile, and platform.
+
+    Single attempt. Callers use the public :func:`build_image`, which wraps this with
+    transient-network retries.
 
     Produces two outputs:
       1. A multi-arch OCI tarball (linux/amd64 + linux/arm64) for pushing to a container registry.
@@ -433,6 +437,81 @@ def build_image(
         raise BuildImageError(image_name, str(e), logger) from e
     finally:
         close_logger(logger)
+
+
+# Substrings (lower-cased) that identify a TRANSIENT build failure — a network
+# reset/timeout/DNS blip while cloning or installing packages inside the build,
+# NOT a real defect in the repo or Dockerfile. A single such blip should not fail
+# an otherwise-healthy build, so build_image_with_retries re-runs the build (the
+# successful FROM/COPY layers stay cached; only the failed RUN re-executes).
+_TRANSIENT_BUILD_ERROR_MARKERS = (
+    "econnreset",
+    "etimedout",
+    "enetunreach",
+    "enotfound",
+    "eai_again",
+    "network aborted",
+    "network is unreachable",
+    "connection reset",
+    "socket hang up",
+    "temporary failure in name resolution",
+    "timed out",
+    "i/o timeout",
+    "tls handshake timeout",
+    "failed to fetch",
+    "could not resolve host",
+    "503 service unavailable",
+    "429 too many requests",
+    "unexpected eof",
+    "reset by peer",
+)
+
+
+def _is_transient_build_error(message: str) -> bool:
+    """True if *message* looks like a transient network failure worth retrying."""
+    low = (message or "").lower()
+    return any(marker in low for marker in _TRANSIENT_BUILD_ERROR_MARKERS)
+
+
+def _build_max_attempts() -> int:
+    """Total build attempts (>=1). Override with COMMIT0_BUILD_MAX_ATTEMPTS."""
+    raw = os.environ.get("COMMIT0_BUILD_MAX_ATTEMPTS", "3").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 3
+
+
+def build_image(*args: Any, **kwargs: Any) -> None:
+    """Build a docker image, retrying ONLY on transient network failures.
+
+    Public entry point for all languages (Python/JS/TS/Rust/C++). Delegates to
+    :func:`_build_image_once`; a network reset/timeout while cloning or installing
+    packages inside the build is retried with exponential backoff (the successful
+    FROM/COPY layers stay cached, so only the failed RUN re-executes). Non-transient
+    failures — a genuine compile/setup defect — raise immediately; retries never mask
+    a real bug. Image name is args[0] (or the image_name kwarg) for logging.
+    """
+    image_name = args[0] if args else kwargs.get("image_name", "<unknown>")
+    max_attempts = _build_max_attempts()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _build_image_once(*args, **kwargs)
+        except BuildImageError as e:
+            if attempt >= max_attempts or not _is_transient_build_error(str(e)):
+                raise
+            backoff = 5 * (2 ** (attempt - 1))  # 5s, 10s, 20s, ...
+            _logger.warning(
+                "Transient network failure building %s (attempt %d/%d); "
+                "retrying in %ds. Cause: %s",
+                image_name,
+                attempt,
+                max_attempts,
+                backoff,
+                str(e).splitlines()[-1] if str(e) else "unknown",
+            )
+            time.sleep(backoff)
+    return None
 
 
 def build_base_images(

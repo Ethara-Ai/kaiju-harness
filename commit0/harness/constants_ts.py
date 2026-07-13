@@ -35,8 +35,9 @@ TS_STUB_MARKER = 'throw new Error("STUB")'
 
 TS_TEST_FILE_PATTERNS = ("*.test.ts", "*.spec.ts", "*.test.tsx", "*.spec.tsx")
 
-# Node 18 removed: reached EOL April 2025 and has no Dockerfile
-SUPPORTED_NODE_VERSIONS = {"20", "22"}
+# 18 (older libs; EOL upstream but still widely targeted), 20/22 (active LTS),
+# 24 (current). Each has a matching commit0/harness/dockerfiles/Dockerfile.node<v>.
+SUPPORTED_NODE_VERSIONS = {"18", "20", "22", "24"}
 
 RUN_TS_TEST_LOG_DIR = Path("logs/ts_test")
 

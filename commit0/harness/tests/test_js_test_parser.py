@@ -171,8 +171,10 @@ class TestNodeTestTapParser:
             _fixture("node_test", "success.tap"), "node_test"
         )
         names = list(result.statuses.keys())
-        assert "alpha" in names
-        assert "beta" in names
+        # Names now carry the subtest hierarchy (e.g. "...top-level > alpha") from
+        # the shared subtest-aware TAP parser, so match by substring.
+        assert any("alpha" in n for n in names)
+        assert any("beta" in n for n in names)
 
     def test_mixed_fixture_counts(self) -> None:
         result = parse_js_test_output(
@@ -186,8 +188,12 @@ class TestNodeTestTapParser:
         result = parse_js_test_output(
             _fixture("node_test", "mixed_pass_fail.tap"), "node_test"
         )
-        assert result.statuses["third skip"] == JsTestStatus.SKIPPED
-        assert result.statuses["fourth todo"] == JsTestStatus.SKIPPED
+        # Keys carry the subtest hierarchy now; match by substring.
+        def _status(substr: str) -> JsTestStatus:
+            return next(v for k, v in result.statuses.items() if substr in k)
+
+        assert _status("third skip") == JsTestStatus.SKIPPED
+        assert _status("fourth todo") == JsTestStatus.SKIPPED
 
     def test_truncated_fixture_does_not_raise(self) -> None:
         result = parse_js_test_output(

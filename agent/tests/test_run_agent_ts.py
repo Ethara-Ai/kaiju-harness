@@ -53,6 +53,16 @@ def _make_agent_config(**overrides: Any) -> MagicMock:
         "capture_thinking": False,
         "trajectory_md": True,
         "output_jsonl": False,
+        # These default False in the real AgentConfig. Without explicit values a bare
+        # MagicMock returns TRUTHY auto-attributes — in particular a truthy
+        # `strip_non_stubs` makes run_agent_ts filter out target files that don't
+        # exist on disk (the mocked paths), emptying the loop so _mark_module_done is
+        # never called. Pin them to realistic defaults.
+        "strip_non_stubs": False,
+        "blind_tests": False,
+        "blind_lint": False,
+        "names_only_tests": False,
+        "inject_test_files_readonly": False,
     }
     defaults.update(overrides)
     cfg = MagicMock()
@@ -1197,14 +1207,18 @@ class TestThinkingCaptureTrajectoryFailure:
 
 
 class TestRunAgentTsImplPoolError:
-    """Cover line 484: Pool error handling (worker exception propagated via result.get())."""
+    """Pool error handling: a worker that raises before returning a status is
+    ISOLATED (logged, that repo marked failed) rather than propagated, so one bad
+    repo cannot abort the whole batch (parity with the JS worker isolation)."""
 
     @patch(f"{MODULE}.read_commit0_ts_config_file")
     @patch(f"{MODULE}.load_dataset_from_config")
     @patch(f"{MODULE}.load_agent_config")
-    def test_pool_worker_exception_propagates(
-        self, mock_load_agent, mock_load_dataset, mock_read_config
+    def test_pool_worker_exception_is_isolated_not_propagated(
+        self, mock_load_agent, mock_load_dataset, mock_read_config, caplog
     ) -> None:
+        import logging
+
         from agent.run_agent_ts import run_agent_ts_impl
 
         mock_load_agent.return_value = _make_agent_config()
@@ -1227,7 +1241,8 @@ class TestRunAgentTsImplPoolError:
             mock_pool.apply_async.return_value = mock_result
             mock_pool_cls.return_value = mock_pool
 
-            with pytest.raises(RuntimeError, match="worker crashed"):
+            # Must NOT raise — the crashed worker is isolated and logged.
+            with caplog.at_level(logging.ERROR, logger="agent.run_agent_ts"):
                 run_agent_ts_impl(
                     branch="commit0",
                     override_previous_changes=False,
@@ -1237,6 +1252,10 @@ class TestRunAgentTsImplPoolError:
                     log_dir="logs",
                     max_parallel_repos=1,
                 )
+        assert any(
+            "isolating" in rec.message.lower() or "worker raised" in rec.message.lower()
+            for rec in caplog.records
+        ), f"expected an isolation log; got {[r.message for r in caplog.records]}"
 
 
 class TestMainGuard:

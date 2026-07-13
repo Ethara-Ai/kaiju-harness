@@ -340,6 +340,10 @@ class TestCreateContainer:
             nano_cpus=500000000,
             environment=None,
             detach=True,
+            # C6: harness containers are tagged so orphans can be reaped, and
+            # auto_remove defaults to False.
+            labels={"kaiju.harness": "1"},
+            auto_remove=False,
         )
 
     @patch(f"{MODULE}.pull_image_from_docker_hub")

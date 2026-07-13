@@ -577,6 +577,47 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
 
     logger.info("Stubbed source (cppstubber): %d items", ok)
 
+    if use_compdb_mode:
+        unstubbed: list[str] = []
+        for cf in cpp_files:
+            try:
+                if "__builtin_trap" not in Path(cf).read_text(errors="ignore"):
+                    unstubbed.append(cf)
+            except OSError:
+                continue
+        if unstubbed:
+            logger.info(
+                "Per-file tree-sitter fallback: %d file(s) cppstubber couldn't stub",
+                len(unstubbed),
+            )
+            try:
+                from tools.stub_cpp import stub_cpp_file
+                ts_added = 0
+                ts_files_ok = 0
+                for cf in unstubbed:
+                    try:
+                        cnt = stub_cpp_file(cf)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "  ts-fallback failed on %s: %s", Path(cf).name, exc,
+                        )
+                        continue
+                    if cnt > 0:
+                        ts_added += cnt
+                        ts_files_ok += 1
+                        logger.info(
+                            "  ts-fallback: %d stub(s) placed in %s",
+                            cnt, Path(cf).name,
+                        )
+                if ts_added:
+                    logger.info(
+                        "Per-file tree-sitter fallback: +%d stubs across %d/%d file(s)",
+                        ts_added, ts_files_ok, len(unstubbed),
+                    )
+                    ok += ts_added
+            except ImportError:
+                logger.warning("Per-file tree-sitter fallback unavailable")
+
     if ok == 0 and any(src_dir.rglob(f"*{ext}") for ext in _CPP_EXTENSIONS):
         logger.warning("cppstubber produced 0 stubs but sources present — trying tree-sitter fallback")
         try:
@@ -1043,10 +1084,71 @@ base_dir: repos
     return yaml_path
 
 
+_CPP_IMPL_EXTS = (".cpp", ".cc", ".cxx", ".c++")
+_CPP_HEADER_EXTS = (".hpp", ".hh", ".hxx", ".h++", ".h")
+_SRC_DIR_CANDIDATES = ("src", "source", "sources", "lib")
+_SRC_DIR_SKIP = {
+    "build", "cmake-build-debug", "cmake-build-release", "builddir",
+    "test", "tests", "testing", "third_party", "3rdparty", "vendor", "extern",
+    "external", "deps", "examples", "example", "doc", "docs", "benchmark",
+    "benchmarks", "bench", "tools", "scripts", ".git",
+}
+
+
+def _dir_has_files(d: Path, exts: tuple[str, ...]) -> bool:
+    if not d.is_dir():
+        return False
+    for ext in exts:
+        for _ in d.rglob(f"*{ext}"):
+            return True
+    return False
+
+
+def _detect_src_dirs(repo_dir: Path) -> list[str]:
+    """Auto-detect the C++ source dir(s) to stub, from the repo layout.
+
+    Preference order: a conventional source dir (src/source/lib) that holds
+    IMPLEMENTATION files -> include/ for header-only libs -> a conventional dir with
+    only headers -> the shallowest other top-level dir with impl files -> repo root.
+    """
+    _all_cpp_exts = _CPP_IMPL_EXTS + _CPP_HEADER_EXTS
+    for cand in _SRC_DIR_CANDIDATES:
+        if _dir_has_files(repo_dir / cand, _CPP_IMPL_EXTS):
+            if _dir_has_files(repo_dir / "include", _all_cpp_exts):
+                return [cand, "include"]
+            return [cand]
+    if _dir_has_files(repo_dir / "include", _CPP_HEADER_EXTS):
+        return ["include"]
+    for cand in _SRC_DIR_CANDIDATES:
+        if _dir_has_files(repo_dir / cand, _CPP_HEADER_EXTS):
+            return [cand]
+    for child in sorted(p for p in repo_dir.iterdir() if p.is_dir()):
+        if child.name in _SRC_DIR_SKIP or child.name.startswith("."):
+            continue
+        if _dir_has_files(child, _CPP_IMPL_EXTS):
+            return [child.name]
+    # Repo root holds implementation files directly.
+    if any(
+        p.is_file() and p.suffix in _CPP_IMPL_EXTS for p in repo_dir.iterdir()
+    ):
+        return ["."]
+    return ["."]
+
+
+def _default_test_cmd(build_system: str) -> str:
+    """Default test command per build system (used when --test-cmd is omitted)."""
+    return {
+        "cmake": "ctest --test-dir build --output-on-failure",
+        "meson": "meson test -C build",
+        "autotools": "make check || make test",
+        "make": "make check || make test",
+    }.get(build_system, "ctest --test-dir build --output-on-failure")
+
+
 def prepare_cpp_repo(
     upstream: str,
-    src_dirs: list[str],
-    test_cmd: str,
+    src_dirs: list[str] | None = None,
+    test_cmd: str | None = None,
     org: str = DEFAULT_ORG,
     clone_dir: Path | None = None,
     dry_run: bool = False,
@@ -1083,6 +1185,16 @@ def prepare_cpp_repo(
     if build_system == "auto":
         build_system = detect_build_system(repo_dir)
     logger.info("Build system: %s", build_system)
+
+    # Auto-detect src dir(s) + test command when the caller didn't pass them, so
+    # `prepare_repo_cpp --repo X` works with no --src-dir/--test-cmd (parity with the
+    # other languages). Explicit values always win.
+    if not src_dirs:
+        src_dirs = _detect_src_dirs(repo_dir)
+        logger.info("Auto-detected source dir(s): %s", ",".join(src_dirs))
+    if not test_cmd:
+        test_cmd = _default_test_cmd(build_system)
+        logger.info("Auto-detected test command: %s", test_cmd)
 
     default_branch = default_branch_override or get_default_branch(repo_dir)
     try:
@@ -1250,12 +1362,14 @@ def main() -> None:
         help="Alias for --repo (kept for backwards compatibility).",
     )
     parser.add_argument(
-        "--src-dir", required=True,
-        help="Comma-separated source dir(s) (e.g. 'src' or 'src,include/fmt')",
+        "--src-dir", default=None,
+        help="Comma-separated source dir(s) (e.g. 'src' or 'src,include/fmt'). "
+             "AUTO-DETECTED from the repo layout if omitted.",
     )
     parser.add_argument(
-        "--test-cmd", required=True,
-        help='Test command (e.g. "ctest --test-dir build --output-on-failure")',
+        "--test-cmd", default=None,
+        help='Test command (e.g. "ctest --test-dir build --output-on-failure"). '
+             "AUTO-DETECTED from the build system if omitted.",
     )
     parser.add_argument(
         "--org", default=DEFAULT_ORG,
@@ -1332,9 +1446,14 @@ def main() -> None:
 
     setup_git_credentials(dry_run=args.dry_run)
 
-    src_dirs = [d.strip() for d in args.src_dir.split(",") if d.strip()]
-    if not src_dirs:
-        parser.error("--src-dir must contain at least one non-empty path")
+    # Optional now: prepare_cpp_repo auto-detects src dir(s) + test command from the
+    # cloned repo / build system when these are omitted (parity with the other
+    # languages' zero-config invocation).
+    src_dirs = None
+    if args.src_dir:
+        src_dirs = [d.strip() for d in args.src_dir.split(",") if d.strip()]
+        if not src_dirs:
+            parser.error("--src-dir, if given, must contain at least one non-empty path")
 
     entry = prepare_cpp_repo(
         upstream=args.repo,

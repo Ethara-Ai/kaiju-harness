@@ -109,6 +109,11 @@ class TestRunAgentForRepo:
         cfg.add_import_module_to_context = False
         cfg.max_test_output_length = 0
         cfg.spec_summary_max_tokens = 4000
+        cfg.strip_non_stubs = False
+        cfg.blind_tests = False
+        cfg.blind_lint = False
+        cfg.names_only_tests = False
+        cfg.inject_test_files_readonly = False
         for k, v in overrides.items():
             setattr(cfg, k, v)
         return cfg
@@ -143,7 +148,10 @@ class TestRunAgentForRepo:
         mock_repo,
         mock_config,
     ):
-        from agent.run_agent import run_agent_for_repo
+        # Test the inner impl directly: the public run_agent_for_repo now ISOLATES
+        # (logs + swallows) worker exceptions so one bad repo can't abort the batch;
+        # the raise itself lives in _run_agent_for_repo_impl ("raises on failure").
+        from agent.run_agent import _run_agent_for_repo_impl
 
         mock_config.return_value = {
             "dataset_name": "commit0/test",
@@ -157,19 +165,20 @@ class TestRunAgentForRepo:
         agent_config = self._make_agent_config(agent_name="unknown_agent")
 
         with pytest.raises(NotImplementedError, match="unknown_agent"):
-            run_agent_for_repo(
+            _run_agent_for_repo_impl(
                 "/base",
                 agent_config,
                 self._make_example(),
                 "branch",
                 q,
-                commit0_config_file=".commit0.yaml",
+                commit0_config_file="/repos/.commit0.yaml",
             )
 
     @patch(f"{MODULE}.read_commit0_config_file")
     @patch(f"{MODULE}.Repo")
     def test_not_a_git_repo_raises(self, mock_repo, mock_config):
-        from agent.run_agent import run_agent_for_repo
+        # Inner impl raises; the public wrapper isolates (see test above).
+        from agent.run_agent import _run_agent_for_repo_impl
 
         mock_config.return_value = {
             "dataset_name": "commit0/test",
@@ -180,14 +189,14 @@ class TestRunAgentForRepo:
         q = multiprocessing.Queue()
         agent_config = self._make_agent_config()
 
-        with pytest.raises(Exception, match="not a git repo"):
-            run_agent_for_repo(
+        with pytest.raises(Exception, match="[Nn]ot a git repo"):
+            _run_agent_for_repo_impl(
                 "/base",
                 agent_config,
                 self._make_example(),
                 "branch",
                 q,
-                commit0_config_file=".commit0.yaml",
+                commit0_config_file="/repos/.commit0.yaml",
             )
 
     @patch(f"{MODULE}.json.dump")
@@ -245,7 +254,7 @@ class TestRunAgentForRepo:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         # Verify auto-commit happened
@@ -410,6 +419,15 @@ class TestRunEvalEdgeCases:
 
 
 class TestRunAgentForRepoModes:
+    @pytest.fixture(autouse=True)
+    def _hermetic_module_done(self):
+        # experiment_log_dir lives under the STABLE RUN_AGENT_LOG_DIR (not tmp_path),
+        # so a `.done` marker left by a prior run makes _is_module_done skip EVERY
+        # module — the loop never calls agent.run (non-hermetic, order-dependent).
+        # Force it False so each test drives the loop deterministically.
+        with patch(f"{MODULE}._is_module_done", return_value=False):
+            yield
+
     def _make_agent_config(self, **overrides):
         cfg = MagicMock()
         cfg.agent_name = "aider"
@@ -427,6 +445,11 @@ class TestRunAgentForRepoModes:
         cfg.add_import_module_to_context = False
         cfg.max_test_output_length = 0
         cfg.spec_summary_max_tokens = 4000
+        cfg.strip_non_stubs = False
+        cfg.blind_tests = False
+        cfg.blind_lint = False
+        cfg.names_only_tests = False
+        cfg.inject_test_files_readonly = False
         for k, v in overrides.items():
             setattr(cfg, k, v)
         return cfg
@@ -534,7 +557,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         for c in mock_agent.run.call_args_list:
@@ -598,7 +621,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         assert mock_agent.run.call_count == 2
@@ -654,7 +677,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         assert mock_agent.run.call_count == 3
@@ -715,7 +738,7 @@ class TestRunAgentForRepoModes:
             "branch",
             q,
             override_previous_changes=True,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         repo_instance.git.reset.assert_called_once_with("--hard", "abc123")
@@ -776,7 +799,7 @@ class TestRunAgentForRepoModes:
             "branch",
             q,
             override_previous_changes=True,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         repo_instance.git.reset.assert_not_called()
@@ -831,7 +854,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         mock_json_dump.assert_called_once()
@@ -884,7 +907,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         actions = [
@@ -944,7 +967,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         money_msgs = [
@@ -1017,7 +1040,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         actions = [
@@ -1088,7 +1111,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         mock_eval.assert_called_once()
@@ -1142,7 +1165,7 @@ class TestRunAgentForRepoModes:
             self._make_example(),
             "branch",
             q,
-            commit0_config_file=".commit0.yaml",
+            commit0_config_file="/repos/.commit0.yaml",
         )
 
         all_puts = q.put.call_args_list
@@ -1260,7 +1283,7 @@ class TestRunAgentFiltering:
     @patch(f"{MODULE}.TerminalDisplay")
     @patch(f"{MODULE}.multiprocessing.Manager")
     @patch(f"{MODULE}.multiprocessing.Pool")
-    def test_name_match_fallback_to_all(
+    def test_unmatched_repo_split_fails_fast(
         self,
         mock_pool_cls,
         mock_manager,
@@ -1289,9 +1312,11 @@ class TestRunAgentFiltering:
         self._make_manager_context(mock_manager)
         mock_pool = self._make_pool_context(mock_pool_cls)
 
-        run_agent("main", False, "modal", ".agent.yaml", ".commit0.yaml", "logs", 4, 4)
-
-        assert mock_pool.apply_async.call_count == 3
+        # resolve_split documents "no match -> empty list; callers surface a clear
+        # error". An unmatched repo_split therefore FAILS FAST rather than silently
+        # falling back to running EVERY repo (which could run unintended repos).
+        with pytest.raises(AssertionError, match="No examples available"):
+            run_agent("main", False, "modal", ".agent.yaml", ".commit0.yaml", "logs", 4, 4)
 
     @patch(f"{MODULE}.subprocess.run")
     @patch(f"{MODULE}.load_agent_config")

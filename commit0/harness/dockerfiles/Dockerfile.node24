@@ -1,4 +1,4 @@
-FROM node:20.18.3-bookworm-slim
+FROM node:24-bookworm-slim
 
 ARG TARGETARCH
 ARG http_proxy=""
@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g typescript@5.6.3 ts-node@10.9.2
+RUN npm install -g typescript@latest ts-node@latest
 
 # Package managers beyond npm. corepack (bundled with Node) provides pnpm/yarn
 # shims whose EXACT version is resolved per-repo from the `packageManager` field

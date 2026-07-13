@@ -66,6 +66,12 @@ class Commit0JsSpec(Spec):
 
     def make_repo_script_list(self) -> list[str]:
         repo_url = self._instance_str("repo")
+        # The dataset stores `repo` as `owner/name` (the fork). git clone needs a
+        # real URL — a bare `owner/name` is treated as a nonexistent LOCAL path
+        # ("repository does not exist"). Prepend the GitHub base like spec_ts does;
+        # leave an already-qualified URL (http/https/ssh/git@) untouched.
+        if not repo_url.startswith(("http://", "https://", "git@", "ssh://")):
+            repo_url = f"https://github.com/{repo_url}"
         base_commit = self._instance_str("base_commit")
         reference_commit = self._instance_str("reference_commit", base_commit)
         clone_url = shlex.quote(repo_url)
@@ -77,7 +83,7 @@ class Commit0JsSpec(Spec):
             f"git clone --depth=50 -o origin {clone_url} {target}",
             f"cd {target}",
             f"git fetch --depth=1 origin {ref_sha} {base_sha} || true",
-            f"git checkout {ref_sha}",
+            f"git checkout {base_sha}",
             "git submodule update --init --recursive 2>/dev/null || true",
             "rm -rf node_modules .nyc_output coverage dist build .next .turbo .cache",
             self._install_cmd(),
@@ -158,11 +164,20 @@ class Commit0JsSpec(Spec):
             "if [ -s /tmp/_node_check_max_rc ]; then echo $(cat /tmp/_node_check_max_rc) > syntax_exit_code.txt; else echo 0 > syntax_exit_code.txt; fi",
         ]
         prefix = self._test_command_prefix(framework)
+        # Also capture stdout for the reporter-to-file frameworks: OLDER jest/vitest/
+        # mocha ignore --outputFile / --reporter-options output= and print the report
+        # to STDOUT instead, leaving the reporter file empty. The parser falls back to
+        # this stdout file when the reporter file is empty, so old versions still
+        # score instead of reading as infra/0.
+        stdout_path = "test_stdout.txt"
         test_cmd = {
-            "jest": f"{prefix} --json --outputFile={results_path} --reporters=default",
-            "vitest": f"{prefix} --reporter=json --outputFile={results_path}",
-            "mocha": f"{prefix} --reporter json --reporter-options output={results_path}",
+            "jest": f"{prefix} --json --outputFile={results_path} --reporters=default > {stdout_path} 2>&1",
+            "vitest": f"{prefix} --reporter=json --outputFile={results_path} > {stdout_path} 2>&1",
+            "mocha": f"{prefix} --reporter json --reporter-options output={results_path} > {stdout_path} 2>&1",
             "node_test": f"{prefix} --test-reporter=tap > {results_path}",
+            # AVA emits standard TAP with --tap; parsed via the shared TAP parser
+            # (js_test_parser routes any non jest/vitest/mocha framework to TAP).
+            "ava": f"{prefix} --tap > {results_path}",
         }[framework]
         steps += [
             test_cmd,
@@ -236,6 +251,14 @@ class Commit0JsSpec(Spec):
                     )
                 elif self._cmd_matches_framework(candidate, framework):
                     return candidate
+                else:
+                    logger.warning(
+                        "test_cmd %r does not directly name framework %s (e.g. a "
+                        "wrapper like 'npm test'); using the default '%s' runner. "
+                        "Any repo-specific env/config in the script is NOT applied — "
+                        "if the suite depends on it, results for this repo may differ.",
+                        candidate, framework, framework,
+                    )
         return self._default_test_command_prefix(framework)
 
     @staticmethod
@@ -260,10 +283,20 @@ class Commit0JsSpec(Spec):
 
     def _install_cmd(self) -> str:
         pm = self._detect_package_manager()
+        if pm == "yarn":
+            # Yarn Classic (v1) uses `--frozen-lockfile`; Yarn Berry (v2+) rejects
+            # that flag and uses `--immutable` (+ `--mode=skip-build` to skip build
+            # scripts, Berry's equivalent of --ignore-scripts). corepack resolves
+            # the version per-repo from packageManager/yarn.lock, so detect at
+            # runtime rather than baking in a single flag set.
+            return (
+                "if yarn --version 2>/dev/null | grep -q '^1\\.'; then "
+                "yarn install --frozen-lockfile --ignore-scripts; "
+                "else yarn install --immutable --mode=skip-build; fi"
+            )
         return {
             "npm": "npm ci --no-audit --no-fund --ignore-scripts",
             "pnpm": "pnpm install --frozen-lockfile --ignore-scripts",
-            "yarn": "yarn install --frozen-lockfile --ignore-scripts",
             "bun": "bun install --frozen-lockfile --ignore-scripts",
         }[pm]
 

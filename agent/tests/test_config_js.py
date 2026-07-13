@@ -111,9 +111,12 @@ class TestAgentNameValidation:
             assert "aider" in result.output.lower() or "agent" in result.output.lower()
 
     def test_downstream_rejects_non_aider_agent_name(self) -> None:
-        from agent.run_agent_js import run_agent_for_repo_js
+        # The agent-name guard now lives in the internal impl function;
+        # run_agent_for_repo_js is a thin non-raising worker wrapper that
+        # delegates to _run_agent_for_repo_js_impl.
+        from agent.run_agent_js import _run_agent_for_repo_js_impl
 
-        source = inspect.getsource(run_agent_for_repo_js)
+        source = inspect.getsource(_run_agent_for_repo_js_impl)
         assert (
             'agent_config.agent_name == "aider"' in source
             or "agent_config.agent_name != \"aider\"" in source

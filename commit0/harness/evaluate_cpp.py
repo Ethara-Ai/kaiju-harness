@@ -88,7 +88,7 @@ def evaluate_single_repo(
         eval_logger = logging.getLogger(f"eval.{repo_name}")
 
         patch_content = Path(patch_path).read_text()
-        eval_script = spec.eval_script.format(test_ids=test_ids)
+        eval_script = spec.eval_script.replace("{test_ids}", test_ids)
 
         patch_file = log_dir / "patch.diff"
         patch_file.write_text(patch_content, encoding="utf-8", errors="ignore")

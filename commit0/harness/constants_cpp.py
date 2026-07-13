@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -28,9 +29,14 @@ __all__ = [
     "TestStatus",
 ]
 
-CPP_STUB_MARKER = "std::abort() /* STUB: not implemented */"
+# __builtin_trap() (not std::abort()) so a stub compiles WITHOUT requiring the file
+# to #include <cstdlib>: many C++ sources pull in <stdlib.h> (global `abort`) but
+# not <cstdlib> (`std::abort`), so `std::abort()` fails to compile ("no member
+# named 'abort' in namespace 'std'"). __builtin_trap() is a Clang/GCC builtin that
+# needs no header and is `noreturn`, so it also satisfies non-void return paths.
+CPP_STUB_MARKER = "__builtin_trap() /* STUB: not implemented */"
 CPP_STUB_MARKER_CONSTEXPR = "return {}"
-CPP_STUB_MARKER_NOEXCEPT = "std::abort()"
+CPP_STUB_MARKER_NOEXCEPT = "__builtin_trap() /* STUB: not implemented */"
 
 CPP_BASE_BRANCH = "commit0"
 
@@ -52,7 +58,7 @@ CPP_TEST_FRAMEWORKS = ["gtest", "catch2", "doctest", "boost_test", "ctest"]
 # loaded dataset by ``commit0.harness.split_utils.resolve_split``.
 CPP_SPLIT: Dict[str, list[str]] = {}
 
-RUN_CPP_TESTS_LOG_DIR = Path("logs/cpp_tests")
+RUN_CPP_TESTS_LOG_DIR = Path(os.environ.get("COMMIT0_CPP_LOG_DIR", "logs/cpp_tests"))
 
 CPP_TEST_IDS_DIR = Path(__file__).parent.parent / "data" / "cpp_test_ids"
 

@@ -480,9 +480,20 @@ class TestPipelineShellNoArgEval:
         if not pipeline.exists():
             pytest.skip("run_pipeline_js.sh not at expected path")
         source = pipeline.read_text(encoding="utf-8")
+        # Scan only executable shell content: strip full-line and inline
+        # comments so English prose (e.g. "the eval writes ...") does not
+        # false-positive. The guard still catches a real `eval` command or an
+        # unquoted command substitution used on arguments.
+        code_lines = []
+        for line in source.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            code_lines.append(line.split(" #", 1)[0])
+        code = "\n".join(code_lines)
         forbidden = ("eval ", "eval\t", '"$($', '"`')
         for tok in forbidden:
-            assert tok not in source, (
+            assert tok not in code, (
                 f"PI-G5: pipeline shell must not use eval/command-substitution "
                 f"on arguments; found {tok!r}"
             )

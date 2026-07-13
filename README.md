@@ -31,7 +31,26 @@ Commit0 is an interactive environment that makes it easy to design and test new 
 * Distribute testing and development across cloud systems
 * Track and log all changes made throughout.
 
-To install Commit0, run:
+## Fresh install (EC2, Docker host, or new dev machine)
+
+This fork ships a one-shot bootstrap that installs every system dependency the
+harness needs (LLVM/Clang dev libs for the C++ stubber, Docker, Node.js, uv,
+Python 3.12, Playwright, and all Python packages from `uv.lock`):
+
+```bash
+bash scripts/bootstrap_ec2.sh
+```
+
+Supported hosts: Ubuntu 22.04 / 24.04, Debian 12, Amazon Linux 2023. Safe to
+re-run — each step skips when the target is already installed. On macOS use
+`brew install llvm docker node uv` then `uv sync && bash scripts/build_cppstubber.sh`.
+
+The bootstrap ends by verifying the tree-sitter fallback AND the compiled
+`tools/cppstubber/build/cppstubber` binary are both importable/runnable so you
+know the C++ prepare pipeline will not silently fall back to the corruption-prone
+path (see `tools/stub_cpp.py` docstrings for context).
+
+## Upstream install (legacy — pinned to the public `commit0` package, not this fork)
 
 ```
 pip install commit0

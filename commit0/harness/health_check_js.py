@@ -8,7 +8,10 @@ import threading
 import docker
 import docker.errors
 
-from commit0.harness.constants_js import DEFAULT_NODE_VERSION
+from commit0.harness.constants_js import (
+    DEFAULT_NODE_VERSION,
+    SUPPORTED_TEST_FRAMEWORKS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,16 @@ _LOCKFILE_TO_PM: dict[str, str] = {
 _NPM_PACKAGE_RE = re.compile(
     r"(@[a-z0-9\-~][a-z0-9\-._~]*/)?[a-z0-9\-~][a-z0-9\-._~]*"
 )
+
+_PKG_FRAMEWORK_PRIORITY: tuple[str, ...] = ("jest", "vitest", "mocha", "ava")
+
+_missing_frameworks = set(_PKG_FRAMEWORK_PRIORITY).difference(SUPPORTED_TEST_FRAMEWORKS)
+if _missing_frameworks:
+    raise ImportError(
+        f"health_check_js._PKG_FRAMEWORK_PRIORITY references frameworks not in "
+        f"SUPPORTED_TEST_FRAMEWORKS: {sorted(_missing_frameworks)}"
+    )
+del _missing_frameworks
 
 
 class MultipleLockfilesError(RuntimeError):
@@ -98,12 +111,9 @@ def detect_test_framework_from_package_json(
         **(pkg.get("dependencies") or {}),
         **(pkg.get("devDependencies") or {}),
     }
-    if "jest" in deps:
-        return "jest"
-    if "vitest" in deps:
-        return "vitest"
-    if "mocha" in deps:
-        return "mocha"
+    for framework in _PKG_FRAMEWORK_PRIORITY:
+        if framework in deps:
+            return framework
     scripts = pkg.get("scripts") or {}
     test_script = str(scripts.get("test", ""))
     if test_script.startswith("node --test") or " node --test" in test_script:
@@ -112,7 +122,28 @@ def detect_test_framework_from_package_json(
 
 
 def _build_require_cmd(package_name: str, pkg_manager: str) -> list[str]:
-    script = f"require({_json.dumps(package_name)})"
+    """Build an *installation* probe that respects the package manager's
+    module-resolution layout (pnpm symlinks, yarn pnp, etc.).
+
+    Uses bare ``require.resolve("<pkg>")`` wrapped in a try/catch that
+    only fails on ``MODULE_NOT_FOUND``. Two previous approaches were
+    incorrect:
+
+    1. ``require("<pkg>")`` executes the module, so ESM-only packages
+       such as **ava** (v6+) and **vitest** (v1+) throw at load time even
+       when perfectly installed (their CJS entrypoints deliberately throw).
+    2. ``require.resolve("<pkg>/package.json")`` resolves a subpath, so
+       packages with a strict ``exports`` field that does not list
+       ``./package.json`` (e.g. **ava**, **xo**) throw
+       ``ERR_PACKAGE_PATH_NOT_EXPORTED`` even when installed.
+
+    Bare ``require.resolve("<pkg>")`` follows the package's main export
+    and succeeds for every layout we care about. ``MODULE_NOT_FOUND`` is
+    the only error code that unambiguously means the package is missing;
+    any other resolution error means it IS installed but its exports
+    policy blocks a particular subpath — not a health failure.
+    """
+    script = f'try{{require.resolve({_json.dumps(package_name)})}}catch(e){{if(e&&e.code=="MODULE_NOT_FOUND"){{throw e}}}}'
     if pkg_manager == "pnpm":
         return ["pnpm", "exec", "node", "-e", script]
     if pkg_manager == "yarn":

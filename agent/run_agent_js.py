@@ -28,6 +28,7 @@ from git import Repo
 from tqdm import tqdm
 
 from agent.agent_utils_js import (
+    collect_js_test_files,
     create_branch,
     get_changed_js_files_from_commits,
     get_js_lint_cmd,
@@ -238,6 +239,7 @@ def _run_agent_for_repo_js_impl(
             example.get("test", {}).get("test_dir", "tests"),
             branch,
             example["reference_commit"],
+            base_commit=example.get("base_commit"),
         )
         if agent_config.strip_non_stubs:
             orig_count = len(target_edit_files)
@@ -251,31 +253,61 @@ def _run_agent_for_repo_js_impl(
                 len(target_edit_files), orig_count,
             )
 
+        # Fail loud on an empty target set: get_target_edit_files_js returns []
+        # when the stubbed source diff against reference_commit is empty (stubbing
+        # missed src_dir, or reference_commit == stub state), or when strip_non_stubs
+        # filtered everything out. Proceeding would emit a degenerate 0-work
+        # trajectory that looks like a valid run — refuse it instead.
+        if not target_edit_files:
+            raise RuntimeError(
+                f"No target-edit source files for {repo_name}: the stubbed-source "
+                f"diff against reference_commit is empty (src_dir="
+                f"{example.get('src_dir', '.')!r}, strip_non_stubs="
+                f"{agent_config.strip_non_stubs}). This would produce a degenerate "
+                "0-work trajectory; failing loud. Verify stubbing landed in src_dir "
+                "and reference_commit is correct."
+            )
+
+        # Resolve the test FILES stage 3 will drive. Canonical inventory ids may be
+        # file-prefixed (jest/vitest: "src/x.test.js > desc > it") OR bare framework
+        # case-names (ava: "counter", "supports Arabic") with NO file prefix. Try to
+        # map ids to real files first; if that yields nothing (bare names), DISCOVER
+        # the repo's actual test files instead of skipping every id and doing zero
+        # work (the old behavior: "Test file not found, skipping: <name>" x N -> 0
+        # modules processed).
         test_files_str = [xx for x in get_js_tests(repo_name, verbose=0) for xx in x]
         test_files_raw = sorted(
-            list(
-                set(
-                    [
-                        i.split(" > ")[0].strip() if " > " in i else i.split(":")[0]
-                        for i in test_files_str
-                        if i.strip()
-                    ]
-                )
-            )
+            {
+                i.split(" > ")[0].strip() if " > " in i else i.split(":")[0]
+                for i in test_files_str
+                if i.strip()
+            }
         )
-        test_dir = example.get("test", {}).get("test_dir", "tests")
+        test_dir = example.get("test", {}).get("test_dir", ".") or "."
         test_files: list[str] = []
         for tf in test_files_raw:
-            full_path = Path(repo_path) / tf
-            if full_path.exists():
+            if (Path(repo_path) / tf).exists():
                 test_files.append(tf)
             elif (Path(repo_path) / test_dir / tf).exists():
                 resolved = os.path.join(test_dir, tf)
                 test_files.append(resolved)
                 logger.info("Resolved test file with prefix: %s -> %s", tf, resolved)
+
+        if not test_files:
+            # Bare-name ids (ava et al.) don't map to files — discover them directly.
+            test_files = _discover_js_test_files(repo_path, test_dir)
+            if test_files:
+                logger.info(
+                    "Discovered %d JS test file(s) for %s: %s",
+                    len(test_files), repo_name, test_files,
+                )
             else:
-                logger.warning("Test file not found, skipping: %s", tf)
-        test_files.sort()
+                logger.warning(
+                    "No JS test files found for %s (test_dir=%r) — stage 3 will run "
+                    "the whole suite once via the default test command.",
+                    repo_name, test_dir,
+                )
+        test_files = sorted(set(test_files))
 
         experiment_log_dir = prospective_log_dir
 
@@ -314,8 +346,12 @@ def _run_agent_for_repo_js_impl(
 
         with DirContext(repo_path):
             if agent_config.run_tests:
-                for test_file in test_files:
-                    test_file_name = _js_module_slug(test_file)
+                # An empty list falls back to one whole-suite pass (test_file="" ->
+                # empty test_ids -> cli_js test runs every test).
+                for test_file in (test_files or [""]):
+                    test_file_name = (
+                        _js_module_slug(test_file) if test_file else "all_tests"
+                    )
                     test_log_dir = experiment_log_dir / test_file_name
 
                     if _is_module_done(test_log_dir):
@@ -324,6 +360,13 @@ def _run_agent_for_repo_js_impl(
                             test_file_name,
                         )
                         continue
+
+                    # Live-flush this module's turns to <module>/turns.jsonl and
+                    # touch .heartbeat (crash-resilience + watchdog liveness) —
+                    # parity with go/rust/python. Without it a mid-module kill loses
+                    # the partial trajectory and .heartbeat is never written.
+                    if thinking_capture is not None:
+                        thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
 
                     test_cmd = (
                         f"{sys.executable} -m commit0.cli_js test"
@@ -343,7 +386,8 @@ def _run_agent_for_repo_js_impl(
                     if agent_config.blind_lint and lint_cmd:
                         lint_cmd = _make_blind_lint_cmd(lint_cmd)
                     message, spec_costs = get_message_js(
-                        agent_config, repo_path, test_files=[test_file]
+                        agent_config, repo_path,
+                        test_files=[test_file] if test_file else [],
                     )
                     if thinking_capture is not None:
                         for c in spec_costs:
@@ -429,6 +473,9 @@ def _run_agent_for_repo_js_impl(
                         )
                         continue
 
+                    if thinking_capture is not None:
+                        thinking_capture.set_live_path(lint_log_dir / "turns.jsonl")
+
                     lint_cmd = get_js_lint_cmd(
                         repo_name, agent_config.use_lint_info, commit0_config_file
                     )
@@ -506,6 +553,9 @@ def _run_agent_for_repo_js_impl(
                         logger.info("Skipping already-drafted file: %s", file_name)
                         continue
 
+                    if thinking_capture is not None:
+                        thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
+
                     iter_message = message
 
                     lint_cmd = get_js_lint_cmd(
@@ -568,6 +618,41 @@ def _run_agent_for_repo_js_impl(
 
         if thinking_capture is not None:
             try:
+                # Backstop (parity with go/rust): a module marked `.done` by a PRIOR
+                # run is skipped by `_is_module_done` before its in-loop output.json
+                # write can run on resume, leaving it `.done` but output.json-less.
+                # Fill any such gap here. NEVER touches a module that already has
+                # output.json, so it cannot double-write or double-count metrics.
+                # Stage derives from the module's own first turn.
+                for module_name in {
+                    t.module for t in thinking_capture.turns if t.module
+                }:
+                    module_log_dir = experiment_log_dir / module_name
+                    if (module_log_dir / "output.json").exists():
+                        continue
+                    module_turns = thinking_capture.get_module_turns(module_name)
+                    if not module_turns:
+                        continue
+                    write_module_output_json(
+                        output_dir=str(module_log_dir),
+                        module_turns=module_turns,
+                        module=module_name,
+                        instance_id=f"{instance_id}__{module_name}"
+                        if instance_id
+                        else module_name,
+                        git_patch=module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            target_edit_files,
+                            logger=logger,
+                        ),
+                        instruction="",
+                        metadata=metadata,
+                        metrics=thinking_capture.get_module_metrics(module_name),
+                        stage=module_turns[0].stage or "unknown",
+                    )
+
                 from agent.trajectory_writer import write_trajectory_md
 
                 logger.info(
@@ -661,18 +746,50 @@ def _collect_worker_results_js(results: list) -> dict:
     return {"succeeded": succeeded, "failed": failed, "failed_repos": failed_repos}
 
 
-def _js_module_slug(rel_path: str) -> str:
-    """Build a deterministic module slug from a JS file path.
+_AVA_ROOT_TEST_NAMES = (
+    "test.js", "test.mjs", "test.cjs", "test.ts",
+    "test.jsx", "test.tsx", "test.cts", "test.mts",
+)
 
-    Strips JS source extensions (.js, .mjs, .cjs, .jsx) and replaces path
-    separators with '__'. The result is used as a log-directory name.
+
+def _discover_js_test_files(repo_path: str, test_dir: str = ".") -> list[str]:
+    """Discover the repo's ACTUAL test files (repo-relative), robustly.
+
+    Stage 3 must run real test files. The canonical inventory ids are sometimes
+    bare framework case-names (ava: ``"counter"``, ``"supports Arabic"``) with NO
+    file prefix, so deriving a filename from an id yields a non-file and every id
+    gets skipped → zero-work stage 3. Discover the files directly instead:
+
+    * ``collect_js_test_files`` — jest/vitest/mocha ``*.test.*`` / ``*.spec.*`` and
+      files under ``test/`` / ``tests/`` / ``__tests__/``.
+    * ava root convention — a bare ``test.js`` (etc.) at the repo root or the
+      dataset ``test_dir``, which ``collect_js_test_files`` does NOT match.
     """
-    stripped = rel_path
-    for ext in (".jsx", ".mjs", ".cjs", ".js"):
-        if stripped.endswith(ext):
-            stripped = stripped[: -len(ext)]
-            break
-    return stripped.replace("/", "__").replace(".", "_")
+    found: set[str] = set()
+    for f in collect_js_test_files(repo_path):
+        try:
+            found.add(os.path.relpath(f, repo_path))
+        except ValueError:
+            continue
+    roots = {".", (test_dir or ".").strip("/") or "."}
+    for base in roots:
+        for name in _AVA_ROOT_TEST_NAMES:
+            candidate = Path(repo_path) / base / name
+            if candidate.exists():
+                found.add(os.path.relpath(candidate, repo_path))
+    return sorted(found)
+
+
+def _js_module_slug(rel_path: str) -> str:
+    """Build a deterministic, collision-free module slug from a JS file path.
+
+    The extension is RETAINED (folded into the slug, not stripped) so dual-package
+    files that differ ONLY by extension — e.g. ``src/foo.js`` and ``src/foo.mjs`` —
+    map to DISTINCT slugs (``src__foo_js`` vs ``src__foo_mjs``) instead of colliding
+    into one log directory and overwriting each other's ``output.json``/``.done``
+    (which would also make ``_is_module_done`` skip a genuinely distinct file).
+    """
+    return rel_path.replace("/", "__").replace(".", "_")
 
 
 def run_agent_js_impl(

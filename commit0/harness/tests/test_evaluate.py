@@ -422,7 +422,11 @@ class TestCsvOutput:
         main(**_default_kwargs())
 
         prints = [c.args[0] for c in base_patches["print"].call_args_list]
-        assert prints[0] == "repo,runtime,num_passed/num_tests"
+        # With exists=False the report is missing, so main() first prints a
+        # machine-readable PYTEST_INFRA_ERROR marker for the crashed eval; the
+        # CSV header is emitted afterwards. Assert the header is present rather
+        # than assuming it is the very first line.
+        assert "repo,runtime,num_passed/num_tests" in prints
 
     def test_csv_sorted_by_runtime_descending(self, base_patches):
         e1 = _make_example(instance_id="org/r1", repo="github/r1")

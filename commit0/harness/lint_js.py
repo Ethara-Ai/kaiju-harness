@@ -46,7 +46,15 @@ class JsLintResult:
         return max(self.eslint_exit_code, self.node_check_exit_code)
 
 
-_ESLINT_CONFIG_NAMES: tuple[str, ...] = (
+_ESLINT_FLAT_CONFIG_NAMES: tuple[str, ...] = (
+    "eslint.config.js",
+    "eslint.config.cjs",
+    "eslint.config.mjs",
+    "eslint.config.ts",
+    "eslint.config.mts",
+    "eslint.config.cts",
+)
+_ESLINT_LEGACY_CONFIG_NAMES: tuple[str, ...] = (
     ".eslintrc",
     ".eslintrc.js",
     ".eslintrc.cjs",
@@ -54,11 +62,28 @@ _ESLINT_CONFIG_NAMES: tuple[str, ...] = (
     ".eslintrc.json",
     ".eslintrc.yaml",
     ".eslintrc.yml",
-    "eslint.config.js",
-    "eslint.config.cjs",
-    "eslint.config.mjs",
-    "eslint.config.ts",
 )
+_ESLINT_CONFIG_NAMES: tuple[str, ...] = (
+    _ESLINT_FLAT_CONFIG_NAMES + _ESLINT_LEGACY_CONFIG_NAMES
+)
+
+
+def _eslint_config_style(repo_dir: str) -> str | None:
+    """Return 'flat', 'legacy', or None for the repo's ESLint config style."""
+    d = Path(repo_dir)
+    if any((d / n).exists() for n in _ESLINT_FLAT_CONFIG_NAMES):
+        return "flat"
+    if any((d / n).exists() for n in _ESLINT_LEGACY_CONFIG_NAMES):
+        return "legacy"
+    pkg_path = d / "package.json"
+    if pkg_path.exists():
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(pkg, dict) and "eslintConfig" in pkg:
+                return "legacy"
+        except (OSError, json.JSONDecodeError):
+            pass
+    return None
 
 
 def _detect_exec_prefix(repo_dir: str) -> list[str]:
@@ -67,7 +92,7 @@ def _detect_exec_prefix(repo_dir: str) -> list[str]:
         return ["pnpm", "exec"]
     if (d / "yarn.lock").exists():
         return ["yarn"]
-    if (d / "bun.lockb").exists():
+    if (d / "bun.lockb").exists() or (d / "bun.lock").exists():
         return ["bunx"]
     return ["npx"]
 
@@ -147,7 +172,17 @@ def run_eslint(
     else:
         cmd.append(".")
 
-    logger.info("Running ESLint: %s", " ".join(cmd))
+    # Reconcile config style with the installed ESLint major: ESLint 9 defaults to
+    # FLAT config and errors on a legacy-only repo; ESLint 8 needs opt-in for flat.
+    # Pin the mode explicitly so lint works regardless of which major is installed.
+    env = dict(os.environ)
+    style = _eslint_config_style(repo_dir)
+    if style == "legacy":
+        env["ESLINT_USE_FLAT_CONFIG"] = "false"
+    elif style == "flat":
+        env["ESLINT_USE_FLAT_CONFIG"] = "true"
+
+    logger.info("Running ESLint (%s config): %s", style or "unknown", " ".join(cmd))
     try:
         result = subprocess.run(
             cmd,
@@ -156,6 +191,7 @@ def run_eslint(
             text=True,
             timeout=300,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         logger.warning("ESLint timed out after 300s in %s", repo_dir)

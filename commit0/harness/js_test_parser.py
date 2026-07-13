@@ -122,7 +122,9 @@ def parse_js_test_output(report_path: Path, framework: str) -> JsTestResult:
         return _parse_vitest(text)
     if framework == "mocha":
         return _parse_mocha(text)
-    return _parse_node_test_tap(text)
+    # node_test AND ava both emit TAP. Route through the shared, subtest-aware
+    # TAP parser (the one TS trusts) rather than a flat top-level-only scan.
+    return _parse_tap(text, framework)
 
 
 def _parse_jest(text: str) -> JsTestResult:
@@ -262,45 +264,30 @@ def _parse_mocha(text: str) -> JsTestResult:
     return result
 
 
-_TAP_TEST_LINE_RE = re.compile(
-    r"^(ok|not ok)\s+(\d+)\s+-\s+(.+?)(?:\s+#\s+(SKIP|TODO)\b.*)?$"
-)
-_TAP_DURATION_RE = re.compile(r"^\s*duration_ms:\s*([0-9.]+)\s*$", re.IGNORECASE)
+def _parse_tap(text: str, framework: str) -> JsTestResult:
+    """Parse node:test / ava TAP via the shared subtest-aware parser.
 
+    The prior implementation counted only top-level (indent==0) ``ok`` lines,
+    which for ``node --test`` are the SUITE SUMMARY lines — so nested subtests
+    (the real assertions) were dropped, undercounting every suite. ``node_test_tap``
+    walks the subtest stack, YAML diagnostic blocks, and js-builtin-test tree
+    comments, and detects bail-out/suite-crash. It is the same code path TS uses.
+    """
+    from commit0.harness.node_test_tap import (
+        detect_tap_suite_crash,
+        tap_to_jest_report_shape,
+    )
 
-def _parse_node_test_tap(text: str) -> JsTestResult:
-    result = JsTestResult(framework="node_test")
-    duration_ms_total = 0.0
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip())
-        match = _TAP_TEST_LINE_RE.match(stripped)
-        if match:
-            if indent > 0:
-                continue
-            verdict, _index, raw_name, directive = match.groups()
-            name = raw_name.strip()
-            if directive:
-                status = JsTestStatus.SKIPPED
-            elif verdict == "ok":
-                status = JsTestStatus.PASSED
-            else:
-                status = JsTestStatus.FAILED
-            key = name or f"<unnamed-{len(result.statuses)}>"
-            result.statuses[key] = status
-            continue
-        dur = _TAP_DURATION_RE.match(stripped)
-        if dur:
-            try:
-                duration_ms_total += float(dur.group(1))
-            except ValueError:
-                continue
-
-    result.duration_seconds = duration_ms_total / 1000.0
+    result = JsTestResult(framework=framework)
+    if detect_tap_suite_crash(text):
+        # Bail-out or zero parsed tests: the suite crashed before/while running.
+        # Leave statuses empty + flag it so the caller treats this as an infra/
+        # compile failure (canonical denominator), NOT a legitimate all-fail run.
+        result.parse_error = "TAP suite crash / bail-out (no runnable tests parsed)"
+        return result
+    report = tap_to_jest_report_shape(text)
+    _harvest_jest_vitest_assertions(report, result)
+    result.framework = framework
     if not result.statuses:
         result.parse_error = "no TAP test lines matched"
     return result

@@ -235,6 +235,7 @@ KNOWN_TEST_PACKAGES = {
     "mocha",
     "chai",
     "@types/mocha",
+    "ava",
 }
 
 from commit0.harness.constants_ts import TS_DATASET_BRANCH
@@ -359,6 +360,16 @@ _TEST_FILE_SUFFIXES = (
     ".spec.mts",
     ".test.cjs",
     ".spec.cjs",
+)
+
+# Single-file test convention: a bare `test.ts`/`test.js` at the repo root (AVA and
+# many small packages). NOT covered by the `.test.*`/`.spec.*` SUFFIXES above, so
+# without this the recursive scan misses root-level tests (mirrors the JS fix).
+_TEST_FILE_NAMES: frozenset[str] = frozenset(
+    {
+        "test.ts", "test.tsx", "test.mts", "test.cts",
+        "test.js", "test.mjs", "test.cjs", "test.jsx",
+    }
 )
 
 
@@ -529,9 +540,9 @@ def _detect_test_dirs_recursive_scan(repo_dir: Path) -> list[Path]:
             ]
             if ts_js_files:
                 counts[dirpath] = counts.get(dirpath, 0) + len(ts_js_files)
-        # (b) Files with .test.* / .spec.* suffix
+        # (b) Files with .test.* / .spec.* suffix OR a bare root-level test file.
         for f in filenames:
-            if f.endswith(_TEST_FILE_SUFFIXES):
+            if f.endswith(_TEST_FILE_SUFFIXES) or f in _TEST_FILE_NAMES:
                 counts[dirpath] = counts.get(dirpath, 0) + 1
     # Sort by count desc, then by shortest path (closer to root = more canonical).
     return [
@@ -767,7 +778,14 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
 
     test_dirs, test_dir_detected_by = detect_ts_test_dirs_with_provenance(repo_dir)
     if test_dirs:
-        test_dir = test_dirs[0].name
+        # RELATIVE to repo root: "." for root-level tests, "test"/"tests" for a
+        # top-level dir, "pkg/x/test" for a nested one. `.name` returned the repo
+        # folder name for root tests (wrong) and dropped the path for nested (mirrors
+        # the JS fix).
+        try:
+            test_dir = str(test_dirs[0].relative_to(repo_dir))
+        except ValueError:
+            test_dir = test_dirs[0].name
     else:
         raise RuntimeError(
             f"Could not detect a test directory for {repo_dir.name}. "

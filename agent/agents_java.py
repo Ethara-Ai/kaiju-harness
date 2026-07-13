@@ -38,6 +38,7 @@ def _apply_thinking_capture_patches(
     coder._turn_counter = getattr(coder, "_turn_counter", 0)
     coder._last_reasoning_content = None
     coder._last_completion_usage = None
+    coder._last_response_id = None
 
     _original_show_send_output = coder.show_send_output
     _original_show_send_output_stream = coder.show_send_output_stream
@@ -62,6 +63,7 @@ def _apply_thinking_capture_patches(
             except AttributeError:
                 coder._last_reasoning_content = None
         coder._last_completion_usage = getattr(completion, "usage", None)
+        coder._last_response_id = getattr(completion, "id", None) or coder._last_response_id
         _original_show_send_output(completion)
 
     def _reasoning_interceptor(completion: Any) -> Any:
@@ -69,7 +71,8 @@ def _apply_thinking_capture_patches(
 
         coder._last_reasoning_content = ""
         saw_finish_reason = False
-        for chunk in completion:
+        completion_iter = iter(completion)
+        for chunk in completion_iter:
             try:
                 rc = chunk.choices[0].delta.reasoning_content
             except AttributeError:
@@ -82,6 +85,9 @@ def _apply_thinking_capture_patches(
 
             if hasattr(chunk, "usage") and chunk.usage:
                 coder._last_completion_usage = chunk.usage
+            chunk_id = getattr(chunk, "id", None)
+            if chunk_id:
+                coder._last_response_id = chunk_id
 
             if (
                 not saw_finish_reason
@@ -92,6 +98,17 @@ def _apply_thinking_capture_patches(
                 saw_finish_reason = True
 
             yield chunk
+
+        # Drain any trailing chunks (usage/id often arrive after finish_reason).
+        try:
+            for trailing in completion_iter:
+                if hasattr(trailing, "usage") and trailing.usage:
+                    coder._last_completion_usage = trailing.usage
+                trailing_id = getattr(trailing, "id", None)
+                if trailing_id:
+                    coder._last_response_id = trailing_id
+        except Exception:
+            pass
 
         if not coder._last_reasoning_content:
             coder._last_reasoning_content = None
@@ -139,6 +156,18 @@ def _apply_thinking_capture_patches(
                     if _od and hasattr(_od, "get"):
                         thinking_tokens = _od.get("thinking_tokens", 0) or 0
 
+            # Anthropic/Vertex AI Claude does not expose thinking_tokens in usage. Count from text.
+            if not thinking_tokens and coder._last_reasoning_content:
+                try:
+                    import litellm as _litellm
+                    _mn = getattr(getattr(coder, "main_model", None), "name", "") or ""
+                    thinking_tokens = _litellm.token_counter(
+                        model=_mn or "claude-3-opus-20240229",
+                        text=coder._last_reasoning_content,
+                    )
+                except Exception:
+                    thinking_tokens = max(1, len(coder._last_reasoning_content) // 4)
+            from datetime import datetime, timezone
             _model_name = getattr(getattr(coder, "main_model", None), "name", "") or ""
             _provider = ""
             if _model_name.startswith("vertex_ai/") or _model_name.startswith("vertex_ai_beta/"):
@@ -149,6 +178,8 @@ def _apply_thinking_capture_patches(
                 _provider = "openai"
             elif _model_name.startswith("gemini/"):
                 _provider = "gemini"
+            elif _model_name.startswith("anthropic/"):
+                _provider = "anthropic"
             coder._thinking_capture.add_assistant_turn(
                 content=coder.partial_response_content,
                 thinking=coder._last_reasoning_content,
@@ -161,6 +192,8 @@ def _apply_thinking_capture_patches(
                 stage=coder._current_stage,
                 module=coder._current_module,
                 turn_number=coder._turn_counter,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                llm_response_id=coder._last_response_id,
                 provider=_provider,
             )
         _original_add_assistant_reply()
@@ -336,6 +369,7 @@ class JavaAgents(Agents):
         fnames: list,
         log_dir: Path,
         test_first: bool = False,
+        lint_first: bool = False,
         thinking_capture: Optional[ThinkingCapture] = None,
         current_stage: str = "",
         current_module: str = "",
@@ -522,6 +556,13 @@ class JavaAgents(Agents):
                     logger.info("Running coder with test errors for %s", fnames)
                     coder.run(test_errors)
                     logger.info("Coder finished for %s", fnames)
+            elif lint_first:
+                # Stage 2 (lint): drive fixes from compile/lint errors directly,
+                # NOT the draft prompt. aider's cmd_lint runs lint_cmd and, on
+                # errors, runs the coder to fix them (parity with python/go/rust).
+                logger.info("Running lint-first for %s", fnames)
+                coder.commands.cmd_lint(fnames=fnames)
+                logger.info("Lint finished for %s", fnames)
             else:
                 max_input = self.model.info.get("max_input_tokens", 0)
                 if max_input > 0:

@@ -152,6 +152,7 @@ def run_agent_for_repo_ts(
             example["test"]["test_dir"],
             branch,
             example["reference_commit"],
+            base_commit=example.get("base_commit"),
         )
         if agent_config.strip_non_stubs:
             orig_count = len(target_edit_files)
@@ -229,7 +230,7 @@ def run_agent_for_repo_ts(
         with DirContext(repo_path):
             if agent_config.run_tests:
                 for test_file in test_files:
-                    test_file_name = test_file.replace(".ts", "").replace("/", "__")
+                    test_file_name = test_file.replace("/", "__").replace(".", "_")
                     test_log_dir = experiment_log_dir / test_file_name
 
                     if _is_module_done(test_log_dir):
@@ -237,6 +238,11 @@ def run_agent_for_repo_ts(
                             f"Skipping already-completed test module: {test_file_name}"
                         )
                         continue
+
+                    # Live-flush per-module turns.jsonl + touch .heartbeat
+                    # (crash-resilience + watchdog liveness) — parity with go/rust.
+                    if thinking_capture is not None:
+                        thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
 
                     test_cmd = (
                         f"{sys.executable} -m commit0.cli_ts test"
@@ -377,12 +383,15 @@ def run_agent_for_repo_ts(
                     local_repo, "HEAD", example["base_commit"]
                 )
                 for lint_file in lint_files:
-                    lint_file_name = lint_file.replace(".ts", "").replace("/", "__")
+                    lint_file_name = lint_file.replace("/", "__").replace(".", "_")
                     lint_log_dir = experiment_log_dir / lint_file_name
 
                     if _is_module_done(lint_log_dir):
                         logger.info(f"Skipping already-linted file: {lint_file_name}")
                         continue
+
+                    if thinking_capture is not None:
+                        thinking_capture.set_live_path(lint_log_dir / "turns.jsonl")
 
                     lint_cmd = get_ts_lint_cmd(
                         repo_name, agent_config.use_lint_info, commit0_config_file
@@ -453,12 +462,15 @@ def run_agent_for_repo_ts(
                         thinking_capture.summarizer_costs.add(c)
 
                 for f in target_edit_files:
-                    file_name = f.replace(".ts", "").replace("/", "__")
+                    file_name = f.replace("/", "__").replace(".", "_")
                     file_log_dir = experiment_log_dir / file_name
 
                     if _is_module_done(file_log_dir):
                         logger.info(f"Skipping already-drafted file: {file_name}")
                         continue
+
+                    if thinking_capture is not None:
+                        thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
 
                     # No dependency resolution for TS — use message as-is
                     iter_message = message
@@ -522,6 +534,39 @@ def run_agent_for_repo_ts(
 
         if thinking_capture is not None:
             try:
+                # Backstop (parity with go/rust): a module marked `.done` by a PRIOR
+                # run is skipped before its in-loop output.json write can run on
+                # resume, leaving it `.done` but output.json-less. Fill any such gap.
+                # NEVER touches a module that already has output.json.
+                for module_name in {
+                    t.module for t in thinking_capture.turns if t.module
+                }:
+                    module_log_dir = experiment_log_dir / module_name
+                    if (module_log_dir / "output.json").exists():
+                        continue
+                    module_turns = thinking_capture.get_module_turns(module_name)
+                    if not module_turns:
+                        continue
+                    write_module_output_json(
+                        output_dir=str(module_log_dir),
+                        module_turns=module_turns,
+                        module=module_name,
+                        instance_id=f"{instance_id}__{module_name}"
+                        if instance_id
+                        else module_name,
+                        git_patch=module_file_patch(
+                            local_repo,
+                            example["base_commit"],
+                            "HEAD",
+                            target_edit_files,
+                            logger=logger,
+                        ),
+                        instruction="",
+                        metadata=metadata,
+                        metrics=thinking_capture.get_module_metrics(module_name),
+                        stage=module_turns[0].stage or "unknown",
+                    )
+
                 from agent.trajectory_writer import write_trajectory_md
 
                 logger.info(

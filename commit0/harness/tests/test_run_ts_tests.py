@@ -1084,7 +1084,7 @@ class TestMiscEdgeCases:
         with patch(f"{MODULE}.RUN_TS_TEST_LOG_DIR", tmp_path):
             from commit0.harness.run_ts_tests import main
 
-            with pytest.raises(ValueError, match="TS pipeline only supports LOCAL"):
+            with pytest.raises(ValueError, match="TS pipeline supports LOCAL"):
                 main(**_default_kwargs(backend="modal"))
 
     @patch(f"{MODULE}.sys")
@@ -1192,17 +1192,19 @@ class TestInjectTestIds:
     def test_appends_to_force_exit_line(self):
         from commit0.harness.run_ts_tests import _inject_test_ids
 
-        script = "#!/bin/bash\nnpx jest --forceExit\necho done"
+        # Only the test-invocation line (identified by its ``>`` output
+        # redirect) is rewritten; ids are appended at the end of that line.
+        script = "#!/bin/bash\nnpx jest --forceExit > test_output.txt 2>&1\necho done"
         result = _inject_test_ids(script, "src/foo.test.ts")
-        assert "npx jest --forceExit src/foo.test.ts" in result
+        assert "> test_output.txt 2>&1 src/foo.test.ts" in result
         assert "echo done" in result
 
     def test_appends_to_vitest_line(self):
         from commit0.harness.run_ts_tests import _inject_test_ids
 
-        script = "#!/bin/bash\nnpx vitest run\necho done"
+        script = "#!/bin/bash\nnpx vitest run > test_output.txt 2>&1\necho done"
         result = _inject_test_ids(script, "src/bar.test.ts")
-        assert "npx vitest run src/bar.test.ts" in result
+        assert "> test_output.txt 2>&1 src/bar.test.ts" in result
 
     def test_no_matching_line_returns_unchanged(self):
         from commit0.harness.run_ts_tests import _inject_test_ids

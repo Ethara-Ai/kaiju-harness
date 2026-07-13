@@ -22,12 +22,13 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from kaiju.paths import datasets_dir, spec_path as consolidated_spec_path
+from kaiju.paths import REPO_ROOT, datasets_dir, spec_path as consolidated_spec_path
 from typing import Iterator
 import uuid as _uuid_mod
 
@@ -108,6 +109,18 @@ _TEST_FILE_SUFFIXES: tuple[str, ...] = (
     ".spec.jsx",
 )
 
+# Single-file test convention: a bare `test.js` (or `test.mjs`/`.cjs`) at the repo
+# root, used by AVA and many small npm packages (e.g. sindresorhus/slugify). These
+# are NOT covered by the `.test.js`/`.spec.js` SUFFIXES above (a bare `test.js`
+# doesn't end with `.test.js`), so without this the test-dir detection returns
+# nothing and prepare aborts with "Could not detect a test directory".
+_TEST_FILE_NAMES: frozenset[str] = frozenset(
+    {
+        "test.js", "test.mjs", "test.cjs", "test.jsx",
+        "test.ts", "test.mts", "test.cts", "test.tsx",
+    }
+)
+
 KNOWN_TEST_PACKAGES: frozenset[str] = frozenset(
     {
         "jest",
@@ -117,6 +130,7 @@ KNOWN_TEST_PACKAGES: frozenset[str] = frozenset(
         "mocha",
         "chai",
         "@vitest/coverage-v8",
+        "ava",
     }
 )
 
@@ -183,7 +197,10 @@ _FROZEN_INSTALL_CMDS: dict[str, tuple[str, ...]] = {
 # dependency tree and WRITE a lockfile, which prepare then commits into the
 # stubbed branch so downstream frozen installs (npm ci) are reproducible.
 _GENERATING_INSTALL_CMDS: dict[str, tuple[str, ...]] = {
-    "npm": ("npm", "install", "--no-audit", "--no-fund", "--ignore-scripts"),
+    # `--package-lock=true` FORCES the lockfile even when the repo ships an
+    # `.npmrc` with `package-lock=false` (common in small libs, e.g. sindresorhus)
+    # — a CLI flag overrides `.npmrc`, so npm still writes package-lock.json.
+    "npm": ("npm", "install", "--no-audit", "--no-fund", "--ignore-scripts", "--package-lock=true"),
     "pnpm": ("pnpm", "install", "--ignore-scripts"),
     "yarn": ("yarn", "install", "--ignore-scripts"),
     "bun": ("bun", "install", "--ignore-scripts"),
@@ -196,6 +213,34 @@ _LOCKFILE_BY_PM: dict[str, str] = {
     "yarn": "yarn.lock",
     "bun": "bun.lockb",
 }
+
+# `.npmrc` directives that SUPPRESS lockfile generation. Repos that .gitignore
+# their lockfile frequently also disable it here (`package-lock=false` for npm,
+# `lockfile=false` for pnpm), so even a generating install writes no lockfile.
+_NPMRC_LOCKFILE_DISABLE_RE = re.compile(
+    r"^[ \t]*(?:package-lock|lockfile)[ \t]*=[ \t]*false[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _neutralize_npmrc_lockfile_disable(repo_dir: Path) -> str | None:
+    """Comment out any lockfile-disabling directive in ``.npmrc`` so a generating
+    install can produce a lockfile. Package-manager-agnostic (any npmrc-reading PM:
+    npm/pnpm/yarn). Returns the ORIGINAL file text so the caller can restore it
+    verbatim afterwards, or ``None`` when no change was needed.
+    """
+    npmrc = repo_dir / ".npmrc"
+    if not npmrc.exists():
+        return None
+    original = npmrc.read_text()
+    neutralized = _NPMRC_LOCKFILE_DISABLE_RE.sub(
+        lambda m: "# kaiju: neutralized for lockfile generation -> " + m.group(0).strip(),
+        original,
+    )
+    if neutralized == original:
+        return None
+    npmrc.write_text(neutralized)
+    return original
 
 
 def _frozen_install_cmd(pkg_manager: str) -> list[str]:
@@ -216,8 +261,23 @@ def _generating_install_cmd(pkg_manager: str) -> list[str]:
         ) from exc
 
 
+# A PM may emit more than one lockfile filename across versions (bun switched from
+# binary `bun.lockb` to text `bun.lock` in 1.1+). Detection accepts ALL candidates;
+# the generating install commits whichever was actually produced.
+_EXTRA_LOCKFILE_NAMES: dict[str, tuple[str, ...]] = {
+    "bun": ("bun.lock",),
+}
+
+
+def _lockfile_candidates(pm: str) -> tuple[str, ...]:
+    return (_LOCKFILE_BY_PM[pm], *_EXTRA_LOCKFILE_NAMES.get(pm, ()))
+
+
 def _has_committed_lockfile(repo_dir: Path) -> bool:
-    return any((repo_dir / name).exists() for name in _LOCKFILE_BY_PM.values())
+    all_names = {
+        name for pm in _LOCKFILE_BY_PM for name in _lockfile_candidates(pm)
+    }
+    return any((repo_dir / name).exists() for name in all_names)
 
 
 def _ensure_pkg_manager(pkg_manager: str) -> None:
@@ -361,7 +421,7 @@ def detect_js_test_dirs(repo_dir: Path) -> list[Path]:
             if count > 0:
                 counts[dirpath] = counts.get(dirpath, 0) + count
         for f in filenames:
-            if f.endswith(_TEST_FILE_SUFFIXES):
+            if f.endswith(_TEST_FILE_SUFFIXES) or f in _TEST_FILE_NAMES:
                 counts[dirpath] = counts.get(dirpath, 0) + 1
     return [
         p
@@ -385,6 +445,80 @@ def _detect_node_version_for_repo(repo_dir: Path) -> tuple[int, str, list[str]]:
         return DEFAULT_NODE_VERSION, "default", []
 
 
+def _leading_dir_from_glob(glob: str, repo_dir: Path) -> str | None:
+    """Return the leading non-wildcard directory of a test glob relative to the
+    repo (e.g. ``test/**/*.spec.js`` -> ``test``), ``"."`` for a root/recursive
+    glob (``**/*.test.js``), or ``None`` if the derived dir does not exist."""
+    g = glob.strip().lstrip("./")
+    if not g or g[0] in "*!":
+        return "."
+    lead: list[str] = []
+    for part in g.split("/"):
+        if part in ("", ".") or any(c in part for c in "*?[]{}"):
+            break
+        lead.append(part)
+    # Drop a trailing filename component (has a dot) so `test/foo.test.js` -> `test`.
+    if lead and "." in lead[-1]:
+        lead = lead[:-1]
+    if not lead:
+        return "."
+    candidate = "/".join(lead)
+    return candidate if (repo_dir / candidate).is_dir() else None
+
+
+_TEST_GLOB_KEYS_RE = re.compile(
+    r"(?:include|testMatch|roots|files|testRegex)\s*:\s*"
+    r"(\[[^\]]*\]|['\"`][^'\"`]+['\"`])"
+)
+_QUOTED_RE = re.compile(r"['\"`]([^'\"`]+)['\"`]")
+
+
+def _detect_test_dir_from_config(repo_dir: Path) -> str | None:
+    """Best-effort test-dir from framework config when filesystem heuristics find
+    nothing. Consults package.json (``jest`` roots/testMatch, ``ava`` files) and the
+    common config files (jest/vitest/vite/ava). Returns a repo-relative dir, ``"."``
+    for root/recursive globs, or ``None`` when no test globs are found at all."""
+    globs: list[str] = []
+    pkg_path = repo_dir / "package.json"
+    if pkg_path.exists():
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pkg = {}
+        if isinstance(pkg, dict):
+            jest = pkg.get("jest")
+            if isinstance(jest, dict):
+                for key in ("roots", "testMatch", "testRegex"):
+                    v = jest.get(key)
+                    if isinstance(v, str):
+                        globs.append(v)
+                    elif isinstance(v, list):
+                        globs += [x for x in v if isinstance(x, str)]
+            ava = pkg.get("ava")
+            if isinstance(ava, dict) and isinstance(ava.get("files"), list):
+                globs += [x for x in ava["files"] if isinstance(x, str)]
+    for name in (
+        "jest.config.js", "jest.config.cjs", "jest.config.mjs", "jest.config.ts",
+        "vitest.config.ts", "vitest.config.js", "vitest.config.mjs",
+        "vite.config.ts", "vite.config.js",
+        "ava.config.js", "ava.config.cjs", "ava.config.mjs",
+    ):
+        p = repo_dir / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in _TEST_GLOB_KEYS_RE.finditer(text):
+            globs += _QUOTED_RE.findall(m.group(1))
+    for g in globs:
+        d = _leading_dir_from_glob(g, repo_dir)
+        if d and d != ".":
+            return d
+    return "." if globs else None
+
+
 def generate_setup_dict_js(repo_dir: Path) -> tuple[dict, dict, str, str]:
     """Build setup/test dicts and return (setup, test, framework, package_manager)."""
     info = detect_pm_and_framework(repo_dir)
@@ -406,13 +540,32 @@ def generate_setup_dict_js(repo_dir: Path) -> tuple[dict, dict, str, str]:
             pass
 
     test_dirs = detect_js_test_dirs(repo_dir)
-    if not test_dirs:
-        raise RuntimeError(
-            f"Could not detect a test directory for {repo_dir.name}. "
-            "Inspect package.json (jest/vitest/mocha), config files, or the "
-            "filesystem layout, and set test_dir manually."
-        )
-    test_dir = test_dirs[0].name
+    if test_dirs:
+        # RELATIVE to the repo root: "." when tests live at the root (single-file
+        # `test.js` convention), "test"/"tests" for a top-level dir, "pkg/x/test" for
+        # a nested one. Using `.name` before dropped the path (nested) and returned
+        # the REPO folder name for root-level tests (wrong test_dir).
+        test_dir = str(test_dirs[0].relative_to(repo_dir))
+    else:
+        # Filesystem heuristics found nothing (config-only test layouts: jest
+        # roots/testMatch, vitest include, package.json "ava"). Consult the config
+        # before giving up; if still nothing, default to "." so the config-driven
+        # runner self-discovers its tests — a genuinely test-less repo then surfaces
+        # downstream as 0 collected (infra) instead of aborting a valid repo here.
+        cfg_dir = _detect_test_dir_from_config(repo_dir)
+        if cfg_dir is not None and cfg_dir != ".":
+            logger.warning(
+                "  No test dir via filesystem heuristics; using config-derived "
+                "test_dir=%r for %s", cfg_dir, repo_dir.name,
+            )
+            test_dir = cfg_dir
+        else:
+            logger.warning(
+                "  Could not detect a test directory for %s via filesystem or "
+                "config; defaulting test_dir='.' (framework self-discovers).",
+                repo_dir.name,
+            )
+            test_dir = "."
 
     node_version, version_source, version_conflicts = _detect_node_version_for_repo(
         repo_dir
@@ -692,16 +845,51 @@ def create_js_stubbed_branch(
                 f"  stderr tail: {install_result.stderr[-500:].strip()}"
             )
         if not has_lockfile:
-            lockfile_name = _LOCKFILE_BY_PM[pkg_manager]
-            lockfile_path = repo_dir / lockfile_name
-            if not lockfile_path.exists():
+            candidates = _lockfile_candidates(pkg_manager)
+
+            def _produced_lockfile() -> Path | None:
+                for name in candidates:
+                    p = repo_dir / name
+                    if p.exists():
+                        return p
+                return None
+
+            lockfile_path = _produced_lockfile()
+            if lockfile_path is None:
+                # The repo's `.npmrc` disabled lockfile generation. npm's
+                # `--package-lock=true` already overrides this, but pnpm/yarn have
+                # no clean CLI equivalent — so neutralize the directive, retry the
+                # generating install once, then restore `.npmrc` verbatim (a
+                # committed lockfile + `package-lock=false` is fine for `npm ci`).
+                original_npmrc = _neutralize_npmrc_lockfile_disable(repo_dir)
+                if original_npmrc is not None:
+                    logger.info(
+                        "  .npmrc suppressed the lockfile; neutralized it and "
+                        "retrying generating install via %s...", pkg_manager,
+                    )
+                    retry = subprocess.run(
+                        install_cmd, cwd=str(repo_dir), capture_output=True,
+                        text=True, timeout=600, check=False,
+                    )
+                    (repo_dir / ".npmrc").write_text(original_npmrc)
+                    if retry.returncode != 0:
+                        raise RuntimeError(
+                            f"Retry install (after neutralizing .npmrc) failed for "
+                            f"{full_name} via {pkg_manager} "
+                            f"(returncode={retry.returncode}).\n"
+                            f"  cmd: {' '.join(install_cmd)}\n"
+                            f"  stderr tail: {retry.stderr[-500:].strip()}"
+                        )
+                    lockfile_path = _produced_lockfile()
+            if lockfile_path is None:
                 raise RuntimeError(
                     f"Generating install for {full_name} via {pkg_manager} did not "
-                    f"produce {lockfile_name}; cannot commit a reproducible lockfile "
-                    "into the stubbed branch. A committed lockfile is required so the "
-                    "downstream frozen install (e.g. `npm ci`) can rebuild "
-                    "node_modules deterministically inside the harness container."
+                    f"produce any of {list(candidates)}; cannot commit a reproducible "
+                    "lockfile into the stubbed branch. A committed lockfile is "
+                    "required so the downstream frozen install (e.g. `npm ci`) can "
+                    "rebuild node_modules deterministically inside the container."
                 )
+            lockfile_name = lockfile_path.name
             git(repo_dir, "add", "-f", "--", lockfile_name)
             git(repo_dir, "commit", "-m", f"Add generated {lockfile_name}")
             logger.info(
@@ -746,7 +934,11 @@ def create_js_stubbed_branch(
     status = git(repo_dir, "status", "--porcelain")
     if not status:
         logger.warning("  No changes after stubbing -- source may already be stubs?")
-        return reference_commit, reference_commit, 0
+        # 4-tuple to match the signature/caller (base_commit, reference_commit,
+        # functions_stubbed, base_compiles); base_compiles=None (unknown — the
+        # syntax gate never ran because nothing was stubbed). Returning a 3-tuple
+        # here raised ValueError on unpack, turning a benign no-op into a crash.
+        return reference_commit, reference_commit, 0, None
 
     functions_stubbed = int(report.get("functions_stubbed", 0))
     if functions_stubbed == 0:
@@ -832,6 +1024,77 @@ def _resolve_commits_from_remote(
         return None
 
 
+# Conventional directories that hold COMPILED output (not hand-written source).
+_BUILD_OUTPUT_DIRS = frozenset(
+    {"dist", "lib", "build", "es", "esm", "cjs", "umd", "out", "output", "_bundles"}
+)
+
+
+def _package_entry_points(pkg: dict) -> list[str]:
+    """All consumer-facing entry paths declared in package.json."""
+    pts: list[str] = []
+    for key in ("main", "module", "browser", "unpkg", "jsdelivr"):
+        v = pkg.get(key)
+        if isinstance(v, str):
+            pts.append(v)
+
+    def _walk(x: object) -> None:
+        if isinstance(x, str):
+            pts.append(x)
+        elif isinstance(x, dict):
+            for vv in x.values():
+                _walk(vv)
+        elif isinstance(x, list):
+            for vv in x:
+                _walk(vv)
+
+    _walk(pkg.get("exports"))
+    return pts
+
+
+def _detect_build_step_risk(repo_dir: Path, src_dir: str) -> str | None:
+    """Return a reason string if the repo tests COMPILED OUTPUT rather than the
+    stubbed source (so stubbing ``src_dir`` would be invisible to the tests — a
+    silent-corruption / degenerate-row risk), else ``None``.
+
+    Two signals: (a) the test script itself runs a build or targets a build dir;
+    (b) a package entry point (main/module/exports) resolves into a build-output
+    directory DIFFERENT from the detected ``src_dir`` (if ``src_dir`` IS that dir,
+    it's source, not build — no risk)."""
+    pkg_path = repo_dir / "package.json"
+    if not pkg_path.exists():
+        return None
+    try:
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(pkg, dict):
+        return None
+
+    scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+    test_script = str(scripts.get("test", ""))
+    src_top = "." if src_dir in (".", "") else src_dir.strip("./").split("/")[0]
+
+    if re.search(r"\b(build|tsc|rollup|webpack|prepare|prepack)\b", test_script) or any(
+        f"{d}/" in test_script for d in _BUILD_OUTPUT_DIRS
+    ):
+        return (
+            f"test script runs a build / targets a build dir (scripts.test="
+            f"{test_script!r}); tests would run against compiled output, not the "
+            "stubbed source"
+        )
+
+    for ep in _package_entry_points(pkg):
+        top = ep.strip("./").split("/")[0] if ep else ""
+        if top and top in _BUILD_OUTPUT_DIRS and top != src_top:
+            return (
+                f"entry point {ep!r} resolves to build dir {top!r} (outside src_dir "
+                f"{src_dir!r}); the test suite likely imports compiled output, so "
+                "stubbing the source would not affect it"
+            )
+    return None
+
+
 def prepare_js_repo(
     full_name: str,
     clone_dir: Path,
@@ -868,6 +1131,17 @@ def prepare_js_repo(
         return None
     logger.info("  Source directory: %s", src_dir)
     _assert_monorepo_safety(repo_dir, src_dir, src_dir_override)
+
+    # Reject build-step repos: if the suite tests COMPILED output (dist/lib/...),
+    # stubbing src_dir is invisible to the tests -> a trivially-passing, degenerate
+    # dataset row that LOOKS healthy. Skip loudly rather than emit silent corruption.
+    build_risk = _detect_build_step_risk(repo_dir, src_dir)
+    if build_risk:
+        logger.error(
+            "  Rejecting %s: build-step repo (%s). Skipping to avoid a "
+            "degenerate/false-pass row.", full_name, build_risk,
+        )
+        return None
 
     try:
         setup_dict, test_dict, test_framework, pkg_manager = generate_setup_dict_js(
@@ -912,6 +1186,36 @@ def prepare_js_repo(
                     reference_commit[:12],
                 )
                 return None
+
+    # README-based spec doc — parity with TS (prepare_repo_ts.py). Generates
+    # specs/<repo>_readme_spec.pdf.bz2 so the host-side copy_inference_inputs stages
+    # a <repo>_spec.pdf.bz2 into each run's datasets/ dir, consistent with the other
+    # languages. JS uses the README as its spec source (no URL scraping in the JS
+    # flow), so we go straight to the README fallback. The repo is on the stubbed
+    # dataset branch here, which still contains the README. Non-fatal.
+    repo_short = full_name.split("/")[-1]
+    try:
+        from tools.scrape_pdf import scrape_readme_spec as _scrape_readme_spec
+
+        specs_dir = REPO_ROOT / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        readme_spec_path, _readme_spec_url = _scrape_readme_spec(
+            repo_dir, specs_dir, repo_short
+        )
+        if readme_spec_path:
+            logger.info("  README spec generated -> %s", readme_spec_path)
+        else:
+            logger.warning(
+                "  README spec generation returned no output for %s — "
+                "datasets/ will lack %s_spec.pdf.bz2", repo_short, repo_short,
+            )
+    except ImportError:
+        logger.warning(
+            "  Skipping README spec (install PyMuPDF; optionally playwright + "
+            "chromium) — datasets/ will lack %s_spec.pdf.bz2", repo_short,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("  README spec generation failed (non-fatal): %s", e)
 
     return {
         "instance_id": f"commit-0/{full_name.split('/')[-1]}",

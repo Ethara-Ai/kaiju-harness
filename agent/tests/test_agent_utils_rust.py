@@ -36,7 +36,6 @@ def _make_agent_config(**overrides):
         run_tests=False,
         max_iteration=3,
         record_test_for_each_commit=False,
-        language="rust",
     )
     defaults.update(overrides)
     return AgentConfig(**defaults)

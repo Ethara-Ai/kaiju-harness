@@ -406,9 +406,12 @@ class TestSetupRustBranchEdge:
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
+        # A dataset name containing a path separator is treated as a
+        # config/path reference, so the branch routes to the aggregate
+        # "commit0_all" branch rather than the last path segment.
         main("org/my_branch", "test", "all", "/base")
         clone_args = mock_clone.call_args
-        assert clone_args[0][2] == "my_branch"
+        assert clone_args[0][2] == "commit0_all"
 
     @patch(f"{MODULE}.clone_repo")
     @patch(f"{MODULE}.load_dataset_from_config")
@@ -520,7 +523,9 @@ class TestSetupRustFilteringEdge:
         mock_repo = MagicMock()
         mock_repo.branches = []
         mock_clone.return_value = mock_repo
-        main("ORG/MyBranch", "test", "all", "/base")
+        # A plain (non-path) dataset name is lowercased before being used to
+        # derive the branch, so "MyBranch" -> "mybranch".
+        main("MyBranch", "test", "all", "/base")
         clone_args = mock_clone.call_args
         assert clone_args[0][2] == "mybranch"
 

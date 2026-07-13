@@ -1,5 +1,7 @@
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 MODULE = "commit0.harness.get_pytest_ids"
 
 
@@ -43,6 +45,20 @@ class TestRead:
 
 
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def _resolve_passthrough(self):
+        # main() resolves the inventory path via kaiju.paths.find_test_ids_file
+        # (added so containerized runs find the mounted KAIJU_TEST_IDS_DIR). These
+        # tests exercise main()'s parsing logic, not real file resolution, so make
+        # resolution a PASS-THROUGH that returns the requested filename — the path
+        # assertions (e.g. "<repo>.bz2", "#fail_to_pass.bz2") then still hold, and
+        # read() is mocked per-test.
+        with patch(
+            "kaiju.paths.find_test_ids_file",
+            side_effect=lambda _commit0_path, _subdir, fname: fname,
+        ):
+            yield
+
     @patch(f"{MODULE}.os.path.dirname", return_value="/fake/commit0")
     @patch(f"{MODULE}.read")
     def test_lowercases_repo_name(self, mock_read, mock_dirname):

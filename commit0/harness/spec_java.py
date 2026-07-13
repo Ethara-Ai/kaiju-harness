@@ -105,10 +105,28 @@ class Commit0JavaSpec(Spec):
         "-Dgpg.skip=true"
     )
 
+    # Bound maven's HTTP waits so a slow/blocked registry (no network egress, MITM
+    # proxy, uncached artifact) fails FAST instead of hanging the eval budget.
+    _MVN_NET_FLAGS = (
+        "-Dmaven.wagon.http.retryHandler.count=2 "
+        "-Dmaven.wagon.httpconnectionManager.ttlSeconds=30 "
+        "-Daether.connector.connectTimeout=15000 "
+        "-Daether.connector.requestTimeout=60000"
+    )
+
+    # Surefire per-FORK timeout (forkedProcessTimeoutInSeconds): if the test fork
+    # runs longer than this, surefire kills it and writes the reports produced so
+    # far — so a single infinite-loop test can't consume the whole eval budget.
+    # Overridable via env; default 300s.
+    _SUREFIRE_FORK_TIMEOUT = "-Dsurefire.timeout=${KAIJU_JAVA_FORK_TIMEOUT:-300}"
+
     def _get_compile_cmd(self) -> str:
         if self.build_system == "gradle":
             return "$GRADLE_CMD classes testClasses --no-daemon -q"
-        return f"$MVN_CMD compile test-compile -q -B {self._MVN_SKIP_FLAGS}"
+        return (
+            f"$MVN_CMD compile test-compile -q -B "
+            f"{self._MVN_SKIP_FLAGS} {self._MVN_NET_FLAGS}"
+        )
 
     def _get_test_cmd(self, test_ids: Optional[List[str]] = None) -> str:
         if self.build_system == "gradle":
@@ -117,11 +135,12 @@ class Commit0JavaSpec(Spec):
                 return f"$GRADLE_CMD test {filters} --no-daemon"
             return "$GRADLE_CMD test --no-daemon"
         else:
+            common = f"-B {self._MVN_SKIP_FLAGS} {self._MVN_NET_FLAGS} {self._SUREFIRE_FORK_TIMEOUT}"
             if test_ids:
                 # Maven Surefire: -Dtest=TestClass#testMethod
                 tests = ",".join(test_ids)
-                return f'$MVN_CMD test -Dtest="{tests}" -B {self._MVN_SKIP_FLAGS}'
-            return f"$MVN_CMD test -B {self._MVN_SKIP_FLAGS}"
+                return f'$MVN_CMD test -Dtest="{tests}" {common}'
+            return f"$MVN_CMD test {common}"
 
     def _get_report_dir(self) -> str:
         if self.build_system == "gradle":
@@ -243,7 +262,10 @@ class Commit0JavaSpec(Spec):
             *self._wrapper_preamble(),
             *self._toolchains_xml_commands(),
             f"git remote add origin https://github.com/{repo} 2>/dev/null || true",
-            f"git fetch --depth 1 origin {base_commit} && git tag -f {base_commit} FETCH_HEAD 2>/dev/null || true",
+            # Bound the per-eval fetch so a slow/blocked network can't stall the eval
+            # (the worktree is already at base for local_inplace; the fetch is a
+            # best-effort refresh).
+            f"timeout 180 git fetch --depth 1 origin {base_commit} && git tag -f {base_commit} FETCH_HEAD 2>/dev/null || true",
             f"git reset --hard {base_commit}",
             # A failed `git apply` must NOT fall through to compiling/testing the
             # UNPATCHED base tree — that scores a bad patch as a model 0% (or, if
@@ -267,8 +289,13 @@ class Commit0JavaSpec(Spec):
             '    echo "COMPILATION_FAILED" > test_exit_code.txt',
             '    exit 0',
             'fi',
-            # Run tests
-            f"{test_cmd} 2>&1 | tee test_output.txt",
+            # Run tests, bounding the WHOLE test phase (belt-and-suspenders with the
+            # surefire per-fork timeout baked into test_cmd): a hung/infinite-loop
+            # test or a stuck maven download can no longer consume the entire eval
+            # budget. On expiry (rc 124) the surefire reports written so far are
+            # STILL collected below, so the eval yields partial results instead of a
+            # 3600s hang -> 0/0. `-k 15` hard-kills if SIGTERM is ignored.
+            f"timeout -k 15 ${{KAIJU_JAVA_TEST_TIMEOUT:-900}} {test_cmd} 2>&1 | tee test_output.txt",
             "echo $? > test_exit_code.txt",
             # Consolidate reports from all modules into the top-level report dir
             *self._collect_reports_commands(),

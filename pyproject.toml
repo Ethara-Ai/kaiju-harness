@@ -32,6 +32,12 @@ dependencies = [
     "google-cloud-aiplatform>=1.156.0",
     "google-genai>=2.8.0",
     "google-auth>=2.53.0",
+    # Tree-sitter parsers for the C++ stubber fallback path (tools/stub_cpp.py).
+    # Direct dep because we cannot rely on aider-chat transitively pulling these
+    # in forever; the C++ prepare pipeline WILL corrupt files if the fallback is
+    # missing when cppstubber (Clang LibTooling binary) is unavailable.
+    "tree-sitter>=0.23.0,<1.0",
+    "tree-sitter-language-pack>=0.13.0,<1.0",
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",
@@ -44,7 +50,10 @@ agent = "agent.__main__:main"
 kaiju-stage-runner = "agent.cli_stage_runner:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["commit0", "agent", "kaiju_harbor", "kaiju"]
+# NOTE: no "kaiju_harbor" — that package dir does not exist (0 tracked files, no
+# imports). Editable installs tolerate a missing declared package, but a
+# non-editable wheel build would fail on it. Keep this list to dirs that exist.
+packages = ["commit0", "agent", "kaiju"]
 
 [project.optional-dependencies]
 agent = [

@@ -39,7 +39,7 @@ def _run_main(
 
     with (
         patch(
-            f"{MODULE}.load_dataset_from_config", return_value=iter(dataset)
+            f"{MODULE}.load_dataset_from_config", return_value=list(dataset)
         ) as m_load,
         patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel) as m_spec,
         patch("docker.from_env", return_value=mock_client),
@@ -74,11 +74,21 @@ class TestFilterBySplit:
         _, m_spec, _, _, _ = _run_main(examples, split="nonexistent")
         assert m_spec.call_count == 0
 
-    def test_empty_split_repos_means_all(self) -> None:
+    def test_curated_split_selects_listed_repo(self) -> None:
+        # A curated key resolves to its listed repos (basenames). Only the
+        # matching repo is built.
+        examples = [_ts_example("anything"), _ts_example("other")]
+        with patch(f"{MODULE}.TS_SPLIT", {"custom": ["anything"]}):
+            _, m_spec, _, _, _ = _run_main(examples, split="custom")
+            assert m_spec.call_count == 1
+
+    def test_empty_curated_split_matches_nothing(self) -> None:
+        # Under resolve_split an empty curated list resolves to no repos, so
+        # nothing is built (the old "empty means all" semantics are gone).
         examples = [_ts_example("anything")]
         with patch(f"{MODULE}.TS_SPLIT", {"custom": []}):
             _, m_spec, _, _, _ = _run_main(examples, split="custom")
-            assert m_spec.call_count == 1
+            assert m_spec.call_count == 0
 
 
 class TestBuildExecution:
@@ -95,7 +105,7 @@ class TestBuildExecution:
     def test_docker_from_env_called(self) -> None:
         examples = [_ts_example()]
         with (
-            patch(f"{MODULE}.load_dataset_from_config", return_value=iter(examples)),
+            patch(f"{MODULE}.load_dataset_from_config", return_value=list(examples)),
             patch(f"{MODULE}.make_ts_spec", return_value=MagicMock()),
             patch("docker.from_env", return_value=MagicMock()) as m_docker,
             patch(f"{MODULE}.build_repo_images", return_value=(["img"], [])),
@@ -131,7 +141,7 @@ class TestHealthChecks:
         spec_sentinel._get_setup_dict.return_value = {"node": "20"}
         with (
             patch(
-                f"{MODULE}.load_dataset_from_config", return_value=iter([_ts_example()])
+                f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
             patch("docker.from_env", return_value=MagicMock()),
@@ -161,72 +171,80 @@ class TestEdgeCases:
         assert m_spec.call_args[1]["absolute"] is True
 
 
-class TestFilterBySplitAllTsWithSplitRepos:
-    """all_ts split with non-empty split_repos list still returns True."""
+class TestResolveSplitAllVariants:
+    """'all' / 'all_*' splits are dataset-derived, ignoring the curated map.
 
-    def test_all_ts_split_with_nonempty_ts_split(self) -> None:
+    Replaces the removed ``_filter_by_split`` helper: filtering is now done
+    by ``resolve_split(split, dataset, curated=TS_SPLIT)`` in ``main``.
+    """
+
+    def test_all_ts_ignores_curated_and_uses_dataset(self) -> None:
+        # Even with an 'all_ts' key in the curated map, resolve_split derives
+        # 'all_ts' from the dataset (every repo), never the curated list.
         with patch(f"{MODULE}.TS_SPLIT", {"all_ts": ["repoA", "repoB"]}):
             examples = [_ts_example("repoA"), _ts_example("repoC")]
             _, m_spec, _, _, _ = _run_main(examples, split="all_ts")
             assert m_spec.call_count == 2
 
-    def test_filter_by_split_direct_all_ts(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
+    def test_resolve_split_all_ts_derives_from_dataset(self) -> None:
+        from commit0.harness.split_utils import resolve_split
+        from commit0.harness.constants_ts import TS_SPLIT
 
-        assert _filter_by_split({"repo": "org/whatever"}, "all_ts") is True
+        dataset = [{"repo": "org/whatever"}]
+        assert resolve_split("all_ts", dataset, curated=TS_SPLIT) == ["whatever"]
 
-    def test_filter_by_split_direct_all(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
+    def test_resolve_split_all_derives_from_dataset(self) -> None:
+        from commit0.harness.split_utils import resolve_split
+        from commit0.harness.constants_ts import TS_SPLIT
 
-        assert _filter_by_split({"repo": "org/whatever"}, "all") is True
+        dataset = [{"repo": "org/whatever"}]
+        assert resolve_split("all", dataset, curated=TS_SPLIT) == ["whatever"]
 
 
-class TestFilterBySplitNamedSplitRepos:
-    """_filter_by_split with specific named split_repos (line 33)."""
+class TestResolveSplitNamedCurated:
+    """Named curated splits resolve to their listed repo basenames."""
 
     def test_named_split_includes_matching_repo(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
+        from commit0.harness.split_utils import resolve_split
 
-        with patch(f"{MODULE}.TS_SPLIT", {"my_split": ["repoA", "repoB"]}):
-            assert _filter_by_split({"repo": "org/repoA"}, "my_split") is True
+        curated = {"my_split": ["repoA", "repoB"]}
+        allowed = resolve_split("my_split", [{"repo": "org/repoA"}], curated=curated)
+        assert "repoA" in allowed
 
     def test_named_split_excludes_non_matching_repo(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
+        from commit0.harness.split_utils import resolve_split
 
-        with patch(f"{MODULE}.TS_SPLIT", {"my_split": ["repoA", "repoB"]}):
-            assert _filter_by_split({"repo": "org/repoC"}, "my_split") is False
+        curated = {"my_split": ["repoA", "repoB"]}
+        allowed = resolve_split("my_split", [{"repo": "org/repoC"}], curated=curated)
+        assert "repoC" not in allowed
 
-    def test_named_split_empty_list_means_all(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
+    def test_empty_curated_list_resolves_to_nothing(self) -> None:
+        from commit0.harness.split_utils import resolve_split
 
-        with patch(f"{MODULE}.TS_SPLIT", {"empty_split": []}):
-            assert _filter_by_split({"repo": "org/anything"}, "empty_split") is True
+        curated = {"empty_split": []}
+        allowed = resolve_split(
+            "empty_split", [{"repo": "org/anything"}], curated=curated
+        )
+        assert allowed == []
 
-    def test_filter_non_dict_example_with_repo_attr(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
-
-        class FakeInstance:
-            repo = "org/repoA"
-
+    def test_named_split_via_main_includes_matching(self) -> None:
         with patch(f"{MODULE}.TS_SPLIT", {"s": ["repoA"]}):
-            assert _filter_by_split(FakeInstance(), "s") is True
+            examples = [_ts_example("repoA"), _ts_example("repoX")]
+            _, m_spec, _, _, _ = _run_main(examples, split="s")
+            assert m_spec.call_count == 1
 
-    def test_filter_non_dict_example_not_matching(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
-
-        class FakeInstance:
-            repo = "org/repoX"
-
+    def test_named_split_via_main_excludes_non_matching(self) -> None:
         with patch(f"{MODULE}.TS_SPLIT", {"s": ["repoA"]}):
-            assert _filter_by_split(FakeInstance(), "s") is False
+            examples = [_ts_example("repoX")]
+            _, m_spec, _, _, _ = _run_main(examples, split="s")
+            assert m_spec.call_count == 0
 
-    def test_fallthrough_normalization_with_non_dict(self) -> None:
-        from commit0.harness.build_ts import _filter_by_split
+    def test_fallthrough_normalization_matches_by_fuzzy(self) -> None:
+        from commit0.harness.split_utils import resolve_split
 
-        class FakeInstance:
-            repo = "org/my-repo"
-
-        assert _filter_by_split(FakeInstance(), "my_repo") is True
+        # No curated key; split 'my_repo' fuzzy-matches dataset repo 'my-repo'.
+        allowed = resolve_split("my_repo", [{"repo": "org/my-repo"}], curated={})
+        assert allowed == ["my-repo"]
 
 
 class TestClientClose:
@@ -240,7 +258,7 @@ class TestClientClose:
 
         with (
             patch(
-                f"{MODULE}.load_dataset_from_config", return_value=iter([_ts_example()])
+                f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
             patch("docker.from_env", return_value=mock_client),
@@ -262,7 +280,7 @@ class TestClientClose:
 
         with (
             patch(
-                f"{MODULE}.load_dataset_from_config", return_value=iter([_ts_example()])
+                f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
             patch("docker.from_env", return_value=mock_client),
@@ -287,7 +305,7 @@ class TestClientClose:
 
         with (
             patch(
-                f"{MODULE}.load_dataset_from_config", return_value=iter([_ts_example()])
+                f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
             patch("docker.from_env", return_value=mock_client),

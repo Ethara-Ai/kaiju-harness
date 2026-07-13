@@ -20,6 +20,7 @@ import io
 import logging
 import os
 import tarfile
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -197,32 +198,63 @@ def build_agent_image(
             pass
 
     dockerfile = _agent_dockerfile(repo_image_key)
-    context = build_context_tar(root)
-    # Inject the generated Dockerfile into the tar context.
-    df_bytes = dockerfile.encode()
-    with tarfile.open(fileobj=context, mode="a") as tar:
-        info = tarfile.TarInfo("Dockerfile")
-        info.size = len(df_bytes)
-        tar.addfile(info, io.BytesIO(df_bytes))
-    context.seek(0)
+
+    def _build_context() -> io.BytesIO:
+        # Regenerated per attempt: client.api.build consumes the fileobj, and a retry
+        # needs a fresh stream.
+        ctx = build_context_tar(root)
+        df_bytes = dockerfile.encode()
+        with tarfile.open(fileobj=ctx, mode="a") as tar:
+            info = tarfile.TarInfo("Dockerfile")
+            info.size = len(df_bytes)
+            tar.addfile(info, io.BytesIO(df_bytes))
+        ctx.seek(0)
+        return ctx
+
+    def _attempt() -> tuple[str | None, str]:
+        """Run one build. Returns (error_message_or_None, tail_of_build_output)."""
+        stream = client.api.build(
+            fileobj=_build_context(),
+            custom_context=True,
+            tag=tag,
+            rm=True,
+            forcerm=True,
+            decode=True,
+        )
+        tail: "deque[str]" = deque(maxlen=250)
+        for chunk in stream:
+            if "stream" in chunk:
+                line = chunk["stream"].rstrip()
+                if line:
+                    logger.debug(line)
+                    tail.append(line)
+            elif "error" in chunk:
+                return str(chunk["error"]), "\n".join(l for l in tail if l.strip())
+        return None, ""
 
     logger.info("Building agent image %s (FROM %s)", tag, repo_image_key)
-    # Low-level API streams build logs; surface them to the logger.
-    stream = client.api.build(
-        fileobj=context,
-        custom_context=True,
-        tag=tag,
-        rm=True,
-        forcerm=True,
-        decode=True,
-    )
-    for chunk in stream:
-        if "stream" in chunk:
-            line = chunk["stream"].rstrip()
-            if line:
-                logger.debug(line)
-        elif "error" in chunk:
-            raise RuntimeError(f"Agent image build failed: {chunk['error']}")
+    # A fresh agent image installs a LARGE dependency tree (aider-chat et al.), so
+    # `uv pip install` can fail with a bare exit-1 on a transient network/disk/memory
+    # hiccup. Retry once (Docker layer cache lets the retry resume), and on final
+    # failure surface the ACTUAL build output — the docker 'error' chunk is only the
+    # generic "command returned non-zero code 1"; the real pip/compiler error lives
+    # in the preceding stream lines, which were previously dropped to logger.debug.
+    err, tail = _attempt()
+    if err is not None:
+        logger.warning(
+            "Agent image build failed (attempt 1/2): %s — retrying (layer cache "
+            "resumes; transient network/disk/memory is the usual cause).", err,
+        )
+        err, tail = _attempt()
+    if err is not None:
+        raise RuntimeError(
+            f"Agent image build failed after 2 attempts: {err}\n"
+            f"--- last build output (the real error) ---\n{tail[-4000:]}\n"
+            "--------------------------------------------\n"
+            "If this is a transient network/disk/memory hiccup, re-run with "
+            "--rebuild-agent-image. If it persists, check Docker Desktop free "
+            "disk + memory (a fresh agent image needs several GB)."
+        )
     logger.info("Built agent image %s", tag)
     return tag
 

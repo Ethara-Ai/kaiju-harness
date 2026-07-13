@@ -85,6 +85,16 @@ def _summarize_log_dir(
     else:
         parsed = parse_js_test_output(report_file, framework)
 
+    # Fallback: older jest/vitest/mocha ignore --outputFile and print the report to
+    # STDOUT, leaving test_results.json empty. If the reporter file yielded nothing
+    # usable, try the captured stdout before concluding infra/0.
+    if parsed.raw_empty or (parsed.parse_error and parsed.num_total == 0):
+        stdout_file = log_dir / "test_stdout.txt"
+        if stdout_file.exists() and stdout_file.stat().st_size > 0:
+            alt = parse_js_test_output(stdout_file, framework)
+            if alt.num_total > 0:
+                parsed = alt
+
     report_missing_or_empty = (
         (not report_file.exists())
         or report_file.stat().st_size == 0
@@ -105,13 +115,37 @@ def _summarize_log_dir(
         compile_failed = (install_code is not None and install_code != 0) or (
             syntax_code is not None and syntax_code != 0
         )
-        tests_failed = parsed.num_failed > 0 or (
-            test_code is not None and test_code != 0 and not compile_failed
+        observed_total = parsed.num_total
+        # The frozen (canonical) inventory is the AUTHORITATIVE denominator when
+        # present: a run that collected fewer tests than the repo actually has (a
+        # describe block threw at load, an ESM import silently failed, the suite
+        # bailed after N tests) must NOT be scored over only the tests that
+        # registered — that inflates the pass rate toward a false 100%. Score over
+        # the larger of observed vs canonical.
+        num_total = max(observed_total, canonical_count)
+
+        # "0 collected while the frozen inventory says there ARE tests" is an
+        # infra/compile failure masquerading as a clean 0%: `node --check` gates
+        # syntax but NOT ESM import-resolution / load-time throws. A truncated or
+        # unparseable report is likewise untrustworthy (its counts are
+        # regex-fabricated). In either case refuse to emit a confident verdict and
+        # flag it as infra so it is excluded, not scored as a legitimate 0%.
+        zero_but_expected = observed_total == 0 and canonical_count > 0
+        untrustworthy = parsed.truncated or (
+            bool(parsed.parse_error) and observed_total == 0
         )
-        num_total = parsed.num_total if parsed.num_total > 0 else canonical_count
-        passed_rate = (
-            parsed.num_passed / num_total if num_total > 0 else 0.0
-        )
+        if not compile_failed and (zero_but_expected or untrustworthy):
+            infra_failed = True
+            compile_failed = None
+            tests_failed = None
+            passed_rate = 0.0
+        else:
+            tests_failed = parsed.num_failed > 0 or (
+                test_code is not None and test_code != 0 and not compile_failed
+            )
+            passed_rate = (
+                parsed.num_passed / num_total if num_total > 0 else 0.0
+            )
 
     return {
         "framework": framework,
@@ -267,8 +301,20 @@ def main(
 
     out: list[dict[str, object]] = []
     for display_name, log_dir, framework in tqdm(log_dirs, desc="Parsing JS results"):
-        test_ids_raw = get_ts_test_ids(display_name, verbose=0)
-        test_ids = [xx for x in test_ids_raw for xx in x if xx]
+        # The frozen test-id inventory is best-effort in prepare (capture "never
+        # raises"), so a repo whose capture failed has no <repo>.bz2 and
+        # get_ts_test_ids RAISES FileNotFoundError. Without this guard a SINGLE such
+        # repo aborts the whole parse loop -> zero results written for the entire
+        # batch. Degrade to an empty inventory (summarizer tolerates test_ids=[]).
+        try:
+            test_ids_raw = get_ts_test_ids(display_name, verbose=0)
+            test_ids = [xx for x in test_ids_raw for xx in x if xx]
+        except FileNotFoundError:
+            logger.warning(
+                "No frozen test-id inventory for %s; scoring without a canonical "
+                "denominator (observed counts only).", display_name,
+            )
+            test_ids = []
         summary = _summarize_log_dir(log_dir, framework, test_ids=test_ids)
         summary["name"] = display_name
         summary["log_dir"] = str(log_dir)

@@ -252,9 +252,19 @@ class TestC5DeadCode:
     """Commit0Config in config_class.py is dead code — never imported."""
 
     def test_config_class_not_imported_anywhere(self) -> None:
-        """Verify no Python file imports Commit0Config (proving it's dead)."""
-        import subprocess
+        """Verify no *production* Python file imports Commit0Config (proving it's dead).
 
+        The dead-code guard's spirit is preserved: Commit0Config in
+        config_class.py must never be imported by production (non-test) code.
+        Test files legitimately import it now to exercise the dataclass, so
+        anything under a ``tests/`` directory (or a ``test_`` module) is excluded.
+        The repo root is resolved from this file rather than hard-coded so the
+        test is location-independent.
+        """
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[3]
         result = subprocess.run(
             [
                 "grep",
@@ -265,15 +275,18 @@ class TestC5DeadCode:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/macbookpro/Desktop/kaiju_harness/commit0_jsonl",
+            cwd=str(repo_root),
         )
-        # Exclude test files (this file checks for it)
+        # Exclude test files — only production imports would make it "live".
         lines = [
             l
             for l in result.stdout.strip().split("\n")
-            if l and "test_config_validation" not in l
+            if l
+            and "/tests/" not in l
+            and "/test_" not in l
+            and not Path(l.split(":", 1)[0]).name.startswith("test_")
         ]
-        assert len(lines) == 0, f"Commit0Config is imported somewhere: {lines}"
+        assert len(lines) == 0, f"Commit0Config is imported by production code: {lines}"
 
 
 # ---------------------------------------------------------------------------

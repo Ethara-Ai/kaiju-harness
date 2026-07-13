@@ -116,6 +116,7 @@ def test_create_ts_hf_dataset_dict():
     result = create_ts_hf_dataset_dict(entries)
     assert len(result) == 1
     assert set(result[0].keys()) == {
+        "id",
         "instance_id",
         "repo",
         "original_repo",
@@ -453,7 +454,7 @@ def test_main_patch_constants(tmp_path):
             ],
         ),
         patch(
-            "tools.create_dataset_ts.generate_split_constants",
+            "tools.create_dataset_ts.generate_ts_split_constants",
             return_value="# generated code\n",
         ) as mock_gen,
     ):
@@ -470,7 +471,7 @@ def test_main_patch_constants(tmp_path):
     args = mock_gen.call_args[0]
     assert len(args[0]) == 1
     assert args[1] == "test_split"
-    constants_file = tmp_path / "split_test_split.py"
+    constants_file = tmp_path / "split_test_split_ts.py"
     assert constants_file.exists()
 
 
@@ -497,7 +498,7 @@ def test_main_generate_yaml(tmp_path):
             ],
         ),
         patch(
-            "tools.create_dataset_ts.generate_commit0_yaml",
+            "tools.create_dataset_ts.generate_commit0_ts_yaml",
             return_value="dataset: test\n",
         ) as mock_yaml,
     ):

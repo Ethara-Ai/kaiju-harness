@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,7 +24,8 @@ SUPPORTED_PMS_BY_LOCKFILE: dict[str, str] = {
     "package-lock.json": "npm",
     "pnpm-lock.yaml": "pnpm",
     "yarn.lock": "yarn",
-    "bun.lockb": "bun",
+    "bun.lockb": "bun",   # bun <1.1 (binary)
+    "bun.lock": "bun",    # bun >=1.1 (text)
 }
 
 REQUIRED_PKG_FIELDS: tuple[str, ...] = ("name", "version")
@@ -108,23 +110,43 @@ def detect_pm_and_framework(repo: Path) -> dict[str, str]:
             deps_raw = pkg.get("dependencies")
             dev_raw = pkg.get("devDependencies")
             deps = {**(deps_raw or {}), **(dev_raw or {})}
-            if "jest" in deps:
+            scripts = pkg.get("scripts") or {}
+            test_script = (
+                str(scripts.get("test", "")) if isinstance(scripts, dict) else ""
+            )
+            # 1) AUTHORITATIVE: the runner actually invoked by `scripts.test`. A repo
+            #    may carry jest in devDeps for one thing but run vitest in its test
+            #    script — the script wins, otherwise we emit the wrong test_cmd.
+            resolved = _framework_from_test_script(test_script)
+            if resolved:
+                framework = resolved
+            # 2) Fall back to dependency presence (priority jest>vitest>mocha>ava).
+            elif "jest" in deps:
                 framework = "jest"
             elif "vitest" in deps:
                 framework = "vitest"
             elif "mocha" in deps:
                 framework = "mocha"
-            else:
-                scripts = pkg.get("scripts") or {}
-                test_script = (
-                    str(scripts.get("test", "")) if isinstance(scripts, dict) else ""
-                )
-                if (
-                    test_script.startswith("node --test")
-                    or " node --test" in test_script
-                ):
-                    framework = "node_test"
+            elif "ava" in deps:
+                # AVA (sindresorhus & many small packages): single root `test.js`,
+                # run via `ava --tap`, parsed like node_test.
+                framework = "ava"
     return {"package_manager": pm, "test_framework": framework}
+
+
+def _framework_from_test_script(test_script: str) -> str | None:
+    """Resolve the test framework from the runner named in ``scripts.test``.
+
+    Returns one of the supported frameworks, or ``None`` when the script names no
+    recognizable runner (caller falls back to dependency presence)."""
+    s = test_script.lower()
+    if "node --test" in s or "node:test" in s:
+        return "node_test"
+    tokens = set(re.split(r"[\s&|;,()]+", s))
+    for fw in ("vitest", "jest", "mocha", "ava"):
+        if fw in tokens:
+            return fw
+    return None
 
 
 def _clone_repo(

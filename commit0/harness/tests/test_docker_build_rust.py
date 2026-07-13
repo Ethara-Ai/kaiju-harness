@@ -10,9 +10,15 @@ import pytest
 MODULE = "commit0.harness.docker_build_rust"
 
 
-def _make_rust_spec(repo_image_key, setup_script, repo_dockerfile, platform):
+def _make_rust_spec(
+    repo_image_key="repo1",
+    setup_script="setup.sh",
+    repo_dockerfile="Dockerfile",
+    platform="linux/amd64",
+    repo=None,
+):
     spec = MagicMock()
-    spec.repo_image_key = repo_image_key
+    spec.repo_image_key = repo if repo is not None else repo_image_key
     spec.setup_script = setup_script
     spec.repo_dockerfile = repo_dockerfile
     spec.platform = platform
@@ -30,7 +36,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_builds_when_no_image_exists(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -46,14 +52,18 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_skips_when_daemon_and_oci_exist(
         self, mock_gdf, mock_mba, mock_bi, tmp_path
     ):
         client = MagicMock()
         client.images.get.return_value = MagicMock()
-        oci_dir = tmp_path / "commit0.base.rust_latest" / "commit0.base.rust_latest.tar"
+        oci_dir = (
+            tmp_path
+            / "commit0.base.rust__latest"
+            / "commit0.base.rust__latest.tar"
+        )
         oci_dir.parent.mkdir(parents=True)
         oci_dir.touch()
         with patch(f"{MODULE}.OCI_IMAGE_DIR", tmp_path):
@@ -65,14 +75,18 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_warns_when_skipping_with_mitm_cert(
         self, mock_gdf, mock_mba, mock_bi, tmp_path, caplog
     ):
         client = MagicMock()
         client.images.get.return_value = MagicMock()
-        oci_dir = tmp_path / "commit0.base.rust_latest" / "commit0.base.rust_latest.tar"
+        oci_dir = (
+            tmp_path
+            / "commit0.base.rust__latest"
+            / "commit0.base.rust__latest.tar"
+        )
         oci_dir.parent.mkdir(parents=True)
         oci_dir.touch()
         with (
@@ -91,7 +105,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_rebuilds_when_daemon_exists_but_no_oci(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -106,7 +120,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_uses_env_platform(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -117,14 +131,14 @@ class TestBuildBaseImagesRust:
             from commit0.harness.docker_build_rust import build_base_images_rust
 
             build_base_images_rust(client)
-        mock_mba.assert_called_once()
-        args = mock_mba.call_args
-        assert "linux/arm64" in str(args)
+        # The env-provided platform flows into build_image(platform=...).
+        mock_bi.assert_called_once()
+        assert "linux/arm64" in str(mock_bi.call_args)
 
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_default_platform_dual_arch(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -140,13 +154,14 @@ class TestBuildBaseImagesRust:
             from commit0.harness.docker_build_rust import build_base_images_rust
 
             build_base_images_rust(client)
-        call_str = str(mock_mba.call_args)
+        # Default dual-arch platform flows into build_image(platform=...).
+        call_str = str(mock_bi.call_args)
         assert "amd64" in call_str or "arm64" in call_str
 
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_passes_mitm_cert_to_build(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -161,7 +176,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_none_mitm_cert_default(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -176,7 +191,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_get_dockerfile_called_with_correct_args(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -191,7 +206,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_build_image_receives_image_name(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -207,7 +222,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_build_image_error_propagates(self, mock_gdf, mock_mba, mock_bi):
         client = MagicMock()
@@ -227,11 +242,11 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
     @patch(f"{MODULE}.get_dockerfile_base_rust")
-    @patch(f"{MODULE}.BASE_IMAGE_BUILD_DIR", Path("/build"))
+    @patch(f"{MODULE}.base_image_build_dir", lambda: Path("/build"))
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_oci_key_derivation(self, mock_gdf, mock_mba, mock_bi, tmp_path):
         client = MagicMock()
-        oci_key = "commit0.base.rust_latest"
+        oci_key = "commit0.base.rust__latest"
         tar_path = tmp_path / oci_key / f"{oci_key}.tar"
         tar_path.parent.mkdir(parents=True)
         tar_path.touch()
@@ -277,7 +292,7 @@ class TestGetRustRepoConfigsToBuild:
             docker.errors.ImageNotFound("nope"),
         ]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -292,7 +307,7 @@ class TestGetRustRepoConfigsToBuild:
         client.images.get.side_effect = [base_img, repo_img]
         mock_ts.side_effect = ["2024-01-01T00:00:00", "2024-06-01T00:00:00"]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -307,7 +322,7 @@ class TestGetRustRepoConfigsToBuild:
         client.images.get.side_effect = [base_img, repo_img]
         mock_ts.side_effect = ["2024-06-01T00:00:00", "2024-01-01T00:00:00"]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -320,9 +335,11 @@ class TestGetRustRepoConfigsToBuild:
         base_img = MagicMock()
         repo_img = MagicMock()
         client.images.get.side_effect = [base_img, repo_img]
-        mock_ts.side_effect = ValueError("bad timestamp")
+        # Unparseable timestamp strings make datetime.fromisoformat raise
+        # ValueError inside the stale-check; the code must fail SAFE and rebuild.
+        mock_ts.side_effect = ["not-a-timestamp", "also-bad"]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -335,9 +352,11 @@ class TestGetRustRepoConfigsToBuild:
         base_img = MagicMock()
         repo_img = MagicMock()
         client.images.get.side_effect = [base_img, repo_img]
-        mock_ts.side_effect = TypeError("bad type")
+        # A non-str (bytes) timestamp makes str.replace / fromisoformat raise
+        # TypeError inside the stale-check; the code must fail SAFE and rebuild.
+        mock_ts.side_effect = [b"2024-06-01T00:00:00", b"2024-01-01T00:00:00"]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -357,7 +376,7 @@ class TestGetRustRepoConfigsToBuild:
         mock_ts.side_effect = ["2024-01-01T00:00:00", "2024-06-01T00:00:00"]
         spec1 = _make_rust_spec("new_repo", "setup.sh", "Dockerfile", "linux/amd64")
         spec2 = _make_rust_spec("fresh_repo", "setup.sh", "Dockerfile", "linux/amd64")
-        mock_specs.return_value = {"new_repo": spec1, "fresh_repo": spec2}
+        mock_specs.return_value = [spec1, spec2]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -373,7 +392,7 @@ class TestGetRustRepoConfigsToBuild:
             docker.errors.ImageNotFound("nope"),
         ]
         spec = _make_rust_spec("repo1", "my_setup.sh", "Dockerfile.rust", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -388,7 +407,7 @@ class TestGetRustRepoConfigsToBuild:
             docker.errors.ImageNotFound("nope"),
         ]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile.rust", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -403,7 +422,7 @@ class TestGetRustRepoConfigsToBuild:
             docker.errors.ImageNotFound("nope"),
         ]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile", "linux/arm64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -434,7 +453,7 @@ class TestGetRustRepoConfigsToBuild:
 
         client.images.get.side_effect = track_get
         spec = _make_rust_spec("repo1", "s", "d", "p")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         get_rust_repo_configs_to_build(client, "ds")
@@ -452,7 +471,7 @@ class TestGetRustRepoConfigsToBuild:
         client.images.get.side_effect = [base_img, repo_img]
         mock_ts.side_effect = ["2024-06-01T00:00:00", "2024-06-01T00:00:00"]
         spec = _make_rust_spec("repo1", "setup.sh", "Dockerfile", "linux/amd64")
-        mock_specs.return_value = {"repo1": spec}
+        mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
 
         result = get_rust_repo_configs_to_build(client, "ds")
@@ -463,10 +482,10 @@ class TestGetRustRepoConfigsToBuild:
     def test_many_repos_all_new(self, mock_ts, mock_specs):
         client = MagicMock()
         effects = [MagicMock()]
-        specs = {}
+        specs = []
         for i in range(5):
             effects.append(docker.errors.ImageNotFound("nope"))
-            specs[f"repo{i}"] = _make_rust_spec(f"repo{i}", "s", "d", "p")
+            specs.append(_make_rust_spec(f"repo{i}", "s", "d", "p"))
         client.images.get.side_effect = effects
         mock_specs.return_value = specs
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
@@ -479,11 +498,11 @@ class TestGetRustRepoConfigsToBuild:
     def test_many_repos_all_fresh(self, mock_ts, mock_specs):
         client = MagicMock()
         effects = [MagicMock()]
-        specs = {}
+        specs = []
         ts_effects = []
         for i in range(5):
             effects.append(MagicMock())
-            specs[f"repo{i}"] = _make_rust_spec(f"repo{i}", "s", "d", "p")
+            specs.append(_make_rust_spec(f"repo{i}", "s", "d", "p"))
             ts_effects.extend(["2024-01-01T00:00:00", "2024-06-01T00:00:00"])
         client.images.get.side_effect = effects
         mock_ts.side_effect = ts_effects
@@ -1613,7 +1632,8 @@ class TestGetRustRepoConfigsEdge:
     def test_stale_image_included(self, mock_specs, mock_ts):
         client = MagicMock()
         client.images.get.return_value = MagicMock()
-        mock_ts.return_value = "2000-01-01T00:00:00Z"
+        # base built AFTER repo -> repo image is stale -> must be rebuilt.
+        mock_ts.side_effect = ["2024-06-01T00:00:00Z", "2000-01-01T00:00:00Z"]
         spec = _make_rust_spec()
         mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
@@ -1626,7 +1646,8 @@ class TestGetRustRepoConfigsEdge:
     def test_value_error_timestamp_includes_image(self, mock_specs, mock_ts):
         client = MagicMock()
         client.images.get.return_value = MagicMock()
-        mock_ts.side_effect = ValueError("bad timestamp")
+        # Unparseable timestamps -> ValueError in the stale-check -> fail safe rebuild.
+        mock_ts.side_effect = ["not-a-timestamp", "also-bad"]
         spec = _make_rust_spec()
         mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build
@@ -1639,7 +1660,8 @@ class TestGetRustRepoConfigsEdge:
     def test_type_error_timestamp_includes_image(self, mock_specs, mock_ts):
         client = MagicMock()
         client.images.get.return_value = MagicMock()
-        mock_ts.side_effect = TypeError("bad type")
+        # Non-str (bytes) timestamps -> TypeError in the stale-check -> fail safe rebuild.
+        mock_ts.side_effect = [b"2024-06-01T00:00:00", b"2000-01-01T00:00:00"]
         spec = _make_rust_spec()
         mock_specs.return_value = [spec]
         from commit0.harness.docker_build_rust import get_rust_repo_configs_to_build

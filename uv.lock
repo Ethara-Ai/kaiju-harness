@@ -603,6 +603,8 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "ruff" },
     { name = "strenum" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
     { name = "typer" },
 ]
 
@@ -652,6 +654,8 @@ requires-dist = [
     { name = "requests", marker = "extra == 'scrape'", specifier = ">=2.31.0" },
     { name = "ruff", specifier = ">=0.6.4" },
     { name = "strenum", specifier = ">=0.4.15" },
+    { name = "tree-sitter", specifier = ">=0.23.0,<1.0" },
+    { name = "tree-sitter-language-pack", specifier = ">=0.13.0,<1.0" },
     { name = "typer", specifier = ">=0.12.0" },
 ]
 provides-extras = ["agent", "scrape"]

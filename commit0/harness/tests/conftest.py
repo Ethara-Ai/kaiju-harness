@@ -5,7 +5,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from commit0.harness.constants import RepoInstance, SimpleInstance
+# Install proper stubs for uninstalled optional [agent] deps (aider, import_deps)
+# BEFORE any test module is collected, so tests that import agent.* modules behave
+# deterministically regardless of collection order. Shared with agent/tests so both
+# directories install the exact same valid module objects. See the helper's docstring.
+from commit0.harness._optional_dep_stubs import install_missing_optional_dep_stubs
+
+install_missing_optional_dep_stubs()
+
+
+from commit0.harness.constants import RepoInstance, SimpleInstance  # noqa: E402
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-FROM node:20.18.3-bookworm-slim
+FROM node:18-bookworm-slim
 
 ARG TARGETARCH
 ARG http_proxy=""
@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Node 18 (older libs): pin TypeScript to a version known to run on Node 18.
 RUN npm install -g typescript@5.6.3 ts-node@10.9.2
 
 # Package managers beyond npm. corepack (bundled with Node) provides pnpm/yarn

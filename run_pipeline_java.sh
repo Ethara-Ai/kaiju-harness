@@ -310,6 +310,20 @@ if [[ -z "$DATASET_UUID" ]]; then
 fi
 export KAIJU_EXPERIMENT_UUID="$DATASET_UUID"
 
+# Mirror the commit0-java config into the canonical outputs/<uuid>/configs/ folder
+# for provenance + parity with the other languages (which write their configs
+# there). The LIVE copy MUST stay at BASE_DIR because `commit0-java evaluate`
+# reads the default .commit0.java.yaml from CWD (it has no --commit0-config-file
+# flag) — this is an ADDITIONAL copy for the run's audit trail, never a move, so
+# it can't affect config resolution. Best-effort; never aborts the run.
+if [[ -f "${BASE_DIR}/.commit0.java.yaml" ]]; then
+    _java_cfg_dir="$(configs_dir "$DATASET_UUID" 2>/dev/null || true)"
+    if [[ -n "${_java_cfg_dir:-}" ]]; then
+        cp "${BASE_DIR}/.commit0.java.yaml" "${_java_cfg_dir}/commit0_java.yaml" 2>/dev/null || true
+        log "  Mirrored config -> ${_java_cfg_dir}/commit0_java.yaml" 2>/dev/null || true
+    fi
+fi
+
 # Build branch name: aider-java-<model_short>-<dataset_short>
 BASE_BRANCH_NAME="${BRANCH_OVERRIDE:-aider-java-${MODEL_SHORT}-${DATASET_SHORT}}"
 if [[ -z "$BRANCH_OVERRIDE" ]] && [[ "$NO_STAGE3_LINT" == "true" ]]; then
@@ -679,6 +693,7 @@ run_java_agent_loop() {
     local compile_check="$4"
     local override="$5"
     local log_dir="$6"
+    local run_entire_dir_lint="${7:-false}"
 
     local agent_log="${log_dir}/agent_run.log"
 
@@ -698,6 +713,12 @@ run_java_agent_loop() {
         common_flags+=(--run-tests)
     else
         common_flags+=(--no-run-tests)
+    fi
+
+    if [[ "$run_entire_dir_lint" == "true" ]]; then
+        common_flags+=(--run-entire-dir-lint)
+    else
+        common_flags+=(--no-run-entire-dir-lint)
     fi
 
     if [[ "$use_unit_tests_info" == "true" ]]; then
@@ -777,7 +798,7 @@ run_java_agent_loop() {
 }
 
 # run_agent_java: wraps run_java_agent_loop with watchdog
-# Args: run_tests use_unit_tests_info use_spec_info compile_check override log_dir
+# Args: run_tests use_unit_tests_info use_spec_info compile_check override log_dir [run_entire_dir_lint]
 run_agent_java() {
     local run_tests="$1"
     local use_unit_tests_info="$2"
@@ -785,6 +806,7 @@ run_agent_java() {
     local compile_check="$4"
     local override="$5"
     local log_dir="$6"
+    local run_entire_dir_lint="${7:-false}"
 
     mkdir -p "$log_dir"
 
@@ -794,7 +816,7 @@ run_agent_java() {
     start_time=$(date +%s)
 
     set +e
-    run_java_agent_loop "$run_tests" "$use_unit_tests_info" "$use_spec_info" "$compile_check" "$override" "$log_dir" &
+    run_java_agent_loop "$run_tests" "$use_unit_tests_info" "$use_spec_info" "$compile_check" "$override" "$log_dir" "$run_entire_dir_lint" &
     local agent_pid=$!
     AGENT_PID=$agent_pid
 
@@ -881,10 +903,16 @@ run_evaluate_java() {
     while IFS= read -r repo; do
         [[ -z "$repo" ]] && continue
         log "  Evaluating repo: ${repo}"
+        local repo_short repo_eval_dir
+        repo_short=$(basename "$repo")
+        repo_eval_dir="${LOG_BASE}/${stage_label:-eval}_eval_artifacts/${repo_short}"
+        mkdir -p "$repo_eval_dir"
         timeout "$EVAL_TIMEOUT" "$COMMIT0_JAVA" evaluate \
             --repo "$repo" \
             --branch "$branch" \
             --timeout "$EVAL_TIMEOUT" \
+            --backend "$BACKEND" \
+            --log-dir "$repo_eval_dir" \
             >>"$eval_log" 2>&1
         local eval_rc=$?
         if [[ $eval_rc -ne 0 ]]; then
@@ -1043,7 +1071,16 @@ PYEOF
     source_part="${result#* }"
     if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
         if [[ "${source_part:-none}" == "none" ]]; then
-            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run." >&2
+            local artifact_count done_count
+            artifact_count=$(find "$log_dir" \( -name aider.log -o -name output.json -o -name turns.jsonl \) 2>/dev/null | wc -l | tr -d ' ')
+            done_count=$(find "$log_dir" -name .done 2>/dev/null | wc -l | tr -d ' ')
+            if [[ "${artifact_count:-0}" == "0" && "${done_count:-0}" == "0" ]]; then
+                log "  WARNING: no agent artifacts in ${log_dir} \$0.0000 reported — AGENT SKIPPED (no target files, module init failure, or crash before first LLM call). Check agent_run.log for the failure reason." >&2
+            elif [[ "${artifact_count:-0}" == "0" && "${done_count:-0}" != "0" ]]; then
+                log "  INFO: ${done_count} .done marker(s) but no aider.log/output.json in ${log_dir} — \$0.0000 reported (all modules resumed from prior cache; not an extraction failure)." >&2
+            else
+                log "  WARNING: ${artifact_count} agent artifact(s) present in ${log_dir} but cost extraction found NO output.json/aider.log cost — \$0.0000 reported, this is an EXTRACTION FAILURE." >&2
+            fi
         fi
         echo "$cost_part ${source_part:-none}"
     else
@@ -1153,8 +1190,8 @@ stage_1_draft() {
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
 
-    # Stage 1: run_tests=false, use_unit_tests_info=true, use_spec_info=$USE_SPEC_INFO, compile_check=true, override=true
-    run_agent_java "false" "true" "$USE_SPEC_INFO" "true" "true" "$stage_log_dir"
+    # Stage 1 (draft): run_tests=false, use_unit_tests_info=true, use_spec_info=$USE_SPEC_INFO, compile_check=true, override=true, run_entire_dir_lint=false
+    run_agent_java "false" "true" "$USE_SPEC_INFO" "true" "true" "$stage_log_dir" "false"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
 
@@ -1208,8 +1245,10 @@ stage_2_lint_refine() {
     local stage_log_dir="${LOG_BASE}/stage2_lint"
     mkdir -p "$stage_log_dir"
 
-    # Stage 2: run_tests=false, use_unit_tests_info=false, use_spec_info=$USE_SPEC_INFO, compile_check=true, override=false
-    run_agent_java "false" "false" "$USE_SPEC_INFO" "true" "false" "$stage_log_dir"
+    # Stage 2 (lint): run_tests=false, use_unit_tests_info=false, use_spec_info=$USE_SPEC_INFO, compile_check=true, override=false, run_entire_dir_lint=TRUE
+    # run_entire_dir_lint=true drives the model from compile/lint errors (lint_first),
+    # matching python/go/rust — NOT a re-send of the draft "implement stubs" prompt.
+    run_agent_java "false" "false" "$USE_SPEC_INFO" "true" "false" "$stage_log_dir" "true"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
 
@@ -1276,8 +1315,8 @@ stage_3_test_refine() {
     local stage_log_dir="${LOG_BASE}/stage3_tests"
     mkdir -p "$stage_log_dir"
 
-    # Stage 3: run_tests=true, use_unit_tests_info=false, use_spec_info=$USE_SPEC_INFO, compile_check=$s3_compile_check, override=false
-    run_agent_java "true" "false" "$USE_SPEC_INFO" "$s3_compile_check" "false" "$stage_log_dir"
+    # Stage 3 (tests): run_tests=true, use_unit_tests_info=false, use_spec_info=$USE_SPEC_INFO, compile_check=$s3_compile_check, override=false, run_entire_dir_lint=false
+    run_agent_java "true" "false" "$USE_SPEC_INFO" "$s3_compile_check" "false" "$stage_log_dir" "false"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
 

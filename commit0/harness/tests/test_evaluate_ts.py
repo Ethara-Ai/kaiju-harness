@@ -29,7 +29,7 @@ class TestParseJestVitestReport:
                 }
             ]
         }
-        counter, duration = parse_jest_vitest_report(report, [])
+        counter, duration = parse_jest_vitest_report(report, ["test 1", "test 2"])
         assert counter["passed"] == 2
         assert counter.get("failed", 0) == 0
         assert duration == pytest.approx(0.3)
@@ -48,7 +48,9 @@ class TestParseJestVitestReport:
                 }
             ]
         }
-        counter, duration = parse_jest_vitest_report(report, [])
+        counter, duration = parse_jest_vitest_report(
+            report, ["test 1", "test 2", "test 3"]
+        )
         assert counter["passed"] == 1
         assert counter["failed"] == 1
         assert counter["skipped"] == 1
@@ -124,7 +126,7 @@ class TestParseJestVitestReport:
                 }
             ]
         }
-        counter, _ = parse_jest_vitest_report(report, [])
+        counter, _ = parse_jest_vitest_report(report, ["a", "b", "c", "d"])
         assert counter["skipped"] == 3
         assert counter["passed"] == 1
 
@@ -140,7 +142,7 @@ class TestParseJestVitestReport:
                 }
             ]
         }
-        counter, _ = parse_jest_vitest_report(report, [])
+        counter, _ = parse_jest_vitest_report(report, ["a"])
         assert counter["failed"] == 1
 
     def test_missing_duration_defaults_to_zero(self) -> None:
@@ -183,7 +185,9 @@ class TestParseJestVitestReport:
                 },
             ]
         }
-        counter, duration = parse_jest_vitest_report(report, [])
+        counter, duration = parse_jest_vitest_report(
+            report, ["suite1 > test1", "suite2 > test2"]
+        )
         assert counter["passed"] == 1
         assert counter["failed"] == 1
         assert duration == pytest.approx(0.3)
@@ -200,8 +204,11 @@ class TestParseJestVitestReport:
                 }
             ]
         }
+        # The assertion has no fullName, so it can never match a canonical
+        # test_id and is ignored. "my test" therefore has no matching
+        # assertion and is scored failed.
         counter, _ = parse_jest_vitest_report(report, ["my test"])
-        assert counter["passed"] == 1
+        assert counter.get("passed", 0) == 0
         assert counter["failed"] == 1
 
 
@@ -583,11 +590,13 @@ class TestReportParsingAndPassRate:
                                 rebuild_image=False,
                             )
 
-        # The report has 3 assertion results (2 passed, 1 failed),
-        # test_ids has 1 entry. num_total = max(3, 1) = 3.
-        # num_passed = 2, pass_rate = 2/3
+        # parse_jest_vitest_report is canonical-only: only report assertions
+        # whose fullName matches a test_id (or its bare name) are counted, and
+        # num_total = len(test_ids). test_ids has 1 entry ("test1"); test2/test3
+        # in the report are agent-added and ignored (anti-cheat). So test1
+        # passed => num_passed=1, num_total=1 => "1/1".
         output_str = " ".join(captured_out)
-        assert "2/3" in output_str
+        assert "1/1" in output_str
 
     @patch(f"{MODULE}.run_ts_tests")
     @patch(f"{MODULE}.get_ts_test_ids", return_value=[["t1", "t2", "t3", "t4", "t5"]])
@@ -680,9 +689,10 @@ class TestParseJestVitestReportEdgeCases:
     """
 
     def test_duplicate_full_names_in_report(self) -> None:
-        """When the same fullName appears twice in the report, both
-        assertion results are counted (the set dedup only affects the
-        missing-test-id check, not the status list).
+        """When the same fullName appears twice in the report, the single
+        matching test_id is scored once. The parser upgrades failed->passed
+        for a duplicated name, so the test_id is scored ``passed``. Both
+        assertions' durations are still accumulated.
         """
         from commit0.harness.evaluate_ts import parse_jest_vitest_report
 
@@ -696,9 +706,9 @@ class TestParseJestVitestReportEdgeCases:
                 }
             ]
         }
-        counter, duration = parse_jest_vitest_report(report, [])
+        counter, duration = parse_jest_vitest_report(report, ["dup test"])
         assert counter["passed"] == 1
-        assert counter["failed"] == 1
+        assert counter.get("failed", 0) == 0
         assert duration == pytest.approx(0.03)
 
     def test_duplicate_full_names_not_double_counted_as_missing(self) -> None:
@@ -719,7 +729,9 @@ class TestParseJestVitestReportEdgeCases:
         }
         test_ids = ["file.ts > my test"]
         counter, _ = parse_jest_vitest_report(report, test_ids)
-        assert counter["passed"] == 2
+        # One test_id whose bare name matches the (duplicated) fullName is
+        # scored once as passed; it is NOT counted as missing/failed.
+        assert counter["passed"] == 1
         assert counter.get("failed", 0) == 0
 
     def test_bare_name_matches_but_full_tid_does_not(self) -> None:
@@ -768,7 +780,9 @@ class TestParseJestVitestReportEdgeCases:
         }
         test_ids = ["file.ts > totally different"]
         counter, _ = parse_jest_vitest_report(report, test_ids)
-        assert counter["passed"] == 1
+        # "something else" is not a canonical test_id, so it is ignored
+        # (anti-cheat). The one test_id has no match => scored failed.
+        assert counter.get("passed", 0) == 0
         assert counter["failed"] == 1
 
     def test_tid_without_separator_checks_fullname_directly(self) -> None:

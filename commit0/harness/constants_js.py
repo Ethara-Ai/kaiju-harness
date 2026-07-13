@@ -23,14 +23,18 @@ JS_TEST_FILE_PATTERNS: tuple[str, ...] = (
     "**/test/**/*.js", "**/tests/**/*.js",
 )
 
-SUPPORTED_NODE_VERSIONS: frozenset[int] = frozenset({20, 22})
+# 18 (older libs, EOL upstream but still widely targeted), 20/22 (active LTS),
+# 24 (current). Each has a matching Dockerfile.node<version>.
+SUPPORTED_NODE_VERSIONS: frozenset[int] = frozenset({18, 20, 22, 24})
 
 SUPPORTED_PACKAGE_MANAGERS: frozenset[str] = frozenset(
     {"npm", "pnpm", "yarn", "bun"}
 )
 
 SUPPORTED_TEST_FRAMEWORKS: frozenset[str] = frozenset(
-    {"jest", "mocha", "vitest", "node_test"}
+    # ava runs with `ava --tap` and is parsed via the shared TAP parser (same as
+    # node_test), so it needs no dedicated parser branch.
+    {"jest", "mocha", "vitest", "node_test", "ava"}
 )
 
 JS_SHELL_METACHARS: frozenset[str] = frozenset(";&|`$(){}!><\n\r\t\\\"'")

@@ -119,7 +119,7 @@ def main(
         local_repo, example["base_commit"], commit_id
     )
 
-    eval_script = spec.eval_script.format(test_ids=test_ids)
+    eval_script = spec.eval_script.replace("{test_ids}", test_ids)
 
     patch_file = Path(log_dir / "patch.diff")
     patch_file.write_text(patch, encoding="utf-8", errors="ignore")

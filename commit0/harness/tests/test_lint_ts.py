@@ -54,6 +54,7 @@ class TestDetectExecPrefix:
 class TestRunEslintPkgManager:
     def test_pnpm_exec_eslint(self, tmp_path: Path) -> None:
         (tmp_path / "pnpm-lock.yaml").write_text("")
+        (tmp_path / "eslint.config.js").write_text("export default [];")
 
         from commit0.harness.lint_ts import run_eslint
 
@@ -68,6 +69,7 @@ class TestRunEslintPkgManager:
 
     def test_yarn_eslint(self, tmp_path: Path) -> None:
         (tmp_path / "yarn.lock").write_text("")
+        (tmp_path / "eslint.config.js").write_text("export default [];")
 
         from commit0.harness.lint_ts import run_eslint
 
@@ -81,6 +83,7 @@ class TestRunEslintPkgManager:
 
     def test_bunx_eslint(self, tmp_path: Path) -> None:
         (tmp_path / "bun.lockb").write_bytes(b"")
+        (tmp_path / "eslint.config.js").write_text("export default [];")
 
         from commit0.harness.lint_ts import run_eslint
 
@@ -141,8 +144,9 @@ class TestRunEslint:
         mock_result.stdout = "All files pass"
         mock_result.stderr = ""
 
-        with patch(f"{MODULE}.subprocess.run", return_value=mock_result) as mock_run:
-            rc, output = run_eslint("/repo")
+        with patch(f"{MODULE}._repo_has_eslint_config", return_value=True):
+            with patch(f"{MODULE}.subprocess.run", return_value=mock_result) as mock_run:
+                rc, output = run_eslint("/repo")
 
         assert rc == 0
         assert "All files pass" in output
@@ -156,8 +160,9 @@ class TestRunEslint:
 
         mock_result = MagicMock(returncode=0, stdout="ok", stderr="")
 
-        with patch(f"{MODULE}.subprocess.run", return_value=mock_result) as mock_run:
-            run_eslint("/repo", files=["src/a.ts", "src/b.ts"])
+        with patch(f"{MODULE}._repo_has_eslint_config", return_value=True):
+            with patch(f"{MODULE}.subprocess.run", return_value=mock_result) as mock_run:
+                run_eslint("/repo", files=["src/a.ts", "src/b.ts"])
 
         cmd = mock_run.call_args[0][0]
         assert "src/a.ts" in cmd
@@ -181,8 +186,9 @@ class TestRunEslint:
 
         mock_result = MagicMock(returncode=1, stdout="errors found", stderr="warning")
 
-        with patch(f"{MODULE}.subprocess.run", return_value=mock_result):
-            rc, output = run_eslint("/repo")
+        with patch(f"{MODULE}._repo_has_eslint_config", return_value=True):
+            with patch(f"{MODULE}.subprocess.run", return_value=mock_result):
+                rc, output = run_eslint("/repo")
 
         assert rc == 1
         assert "errors found" in output
@@ -193,8 +199,9 @@ class TestRunEslint:
 
         mock_result = MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch(f"{MODULE}.subprocess.run", return_value=mock_result) as mock_run:
-            run_eslint("/my/repo")
+        with patch(f"{MODULE}._repo_has_eslint_config", return_value=True):
+            with patch(f"{MODULE}.subprocess.run", return_value=mock_result) as mock_run:
+                run_eslint("/my/repo")
 
         assert mock_run.call_args[1]["cwd"] == "/my/repo"
 
@@ -413,7 +420,7 @@ class TestRunTsTestsMain:
             "commit0.harness.run_ts_tests.setup_logger", return_value=MagicMock()
         ):
             with patch("commit0.harness.run_ts_tests.close_logger"):
-                with pytest.raises(ValueError, match="only supports LOCAL"):
+                with pytest.raises(ValueError, match="supports LOCAL"):
                     run_main(
                         dataset_name="test.json",
                         dataset_split="test",
@@ -438,17 +445,25 @@ class TestInjectTestIds:
     def test_appends_to_forceExit_line(self) -> None:
         from commit0.harness.run_ts_tests import _inject_test_ids
 
-        script = "#!/bin/bash\nnpx jest --forceExit --json\necho done\n"
+        # The injector only rewrites the actual test-invocation line, which is
+        # identified by the presence of a ``>`` output redirect (as produced by
+        # the real eval-script template). Ids are appended at the end of that
+        # line, after the redirect.
+        script = (
+            "#!/bin/bash\n"
+            "npx jest --forceExit --json > test_output.txt 2>&1\n"
+            "echo done\n"
+        )
         result = _inject_test_ids(script, "test/foo.test.ts")
-        assert "npx jest --forceExit --json test/foo.test.ts" in result
+        assert "> test_output.txt 2>&1 test/foo.test.ts" in result
         assert "echo done" in result
 
     def test_appends_to_vitest_line(self) -> None:
         from commit0.harness.run_ts_tests import _inject_test_ids
 
-        script = "npx vitest run --reporter=json\n"
+        script = "npx vitest run --reporter=json > test_output.txt 2>&1\n"
         result = _inject_test_ids(script, "src/bar.test.ts")
-        assert "npx vitest run --reporter=json src/bar.test.ts" in result
+        assert "> test_output.txt 2>&1 src/bar.test.ts" in result
 
     def test_no_test_ids(self) -> None:
         from commit0.harness.run_ts_tests import _inject_test_ids
@@ -467,7 +482,7 @@ class TestInjectTestIds:
     def test_multiple_test_ids(self) -> None:
         from commit0.harness.run_ts_tests import _inject_test_ids
 
-        script = "npx jest --forceExit\n"
+        script = "npx jest --forceExit > test_output.txt 2>&1\n"
         result = _inject_test_ids(script, "a.test.ts b.test.ts")
         assert "a.test.ts b.test.ts" in result
 
@@ -476,11 +491,12 @@ class TestRunEslintTimeout:
     def test_timeout_returns_exit_code_1(self) -> None:
         from commit0.harness.lint_ts import run_eslint
 
-        with patch(
-            f"{MODULE}.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="eslint", timeout=300),
-        ):
-            rc, output = run_eslint("/repo")
+        with patch(f"{MODULE}._repo_has_eslint_config", return_value=True):
+            with patch(
+                f"{MODULE}.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="eslint", timeout=300),
+            ):
+                rc, output = run_eslint("/repo")
 
         assert rc == 1
         assert "timed out" in output

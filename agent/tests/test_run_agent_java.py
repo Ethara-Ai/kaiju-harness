@@ -78,6 +78,23 @@ class TestFindAllTestFiles:
         assert "BarTests.java" in names
         assert "TestBaz.java" in names
 
+    def test_finds_in_root_level_src_test(self, tmp_path: Path) -> None:
+        # Regression: the common Maven/Gradle layout puts src/test at the REPO
+        # ROOT (no leading module dir), e.g. JSON-java's
+        # src/test/java/org/json/junit/*Test.java. The old "/src/test/" in rel
+        # check missed this (rel has no leading slash), returning 0 test files and
+        # silently making Java stage 3 (test-first refine) do zero work.
+        test_dir = tmp_path / "src" / "test" / "java" / "org" / "json" / "junit"
+        test_dir.mkdir(parents=True)
+        (test_dir / "JSONObjectTest.java").write_text("class JSONObjectTest {}")
+        (test_dir / "CDLTest.java").write_text("class CDLTest {}")
+
+        result = _find_all_test_files(str(tmp_path))
+        names = [Path(f).name for f in result]
+        assert "JSONObjectTest.java" in names
+        assert "CDLTest.java" in names
+        assert len(result) == 2
+
     def test_empty_repo_returns_empty(self, tmp_path: Path) -> None:
         result = _find_all_test_files(str(tmp_path))
         assert result == []
@@ -185,6 +202,27 @@ class TestRunJavaAgent:
         )
         assert result is not None
 
+    def test_lint_mode_uses_lint_first(self) -> None:
+        # Stage 2 (run_entire_dir_lint=True) must drive fixes from compile/lint
+        # errors via lint_first with an EMPTY message — parity with go/rust/python
+        # — NOT re-send the draft "implement stubs" prompt (which no-ops once the
+        # stubs are already implemented).
+        _, _, mock_agent, _ = self._run(
+            config_overrides={"run_entire_dir_lint": True},
+        )
+        mock_agent.run.assert_called()
+        kwargs = mock_agent.run.call_args.kwargs
+        assert kwargs.get("lint_first") is True
+        assert kwargs.get("current_stage") == "lint"
+        assert kwargs.get("message") == ""
+
+    def test_draft_mode_is_not_lint_first(self) -> None:
+        # Stage 1 (draft, default) sends the draft prompt, not lint_first.
+        _, _, mock_agent, _ = self._run()
+        kwargs = mock_agent.run.call_args.kwargs
+        assert kwargs.get("current_stage") == "draft"
+        assert not kwargs.get("lint_first", False)
+
     def test_stashes_dirty_repo(self) -> None:
         _, _, _, mock_repo = self._run()
         mock_repo.git.add.assert_not_called()
@@ -194,6 +232,7 @@ class TestRunJavaAgent:
         mock_create_branch.assert_called_once()
 
     def test_handles_empty_stubs(self) -> None:
+        import pytest
         from agent.config_java import JavaAgentConfig
         from agent.run_agent_java import run_java_agent
 
@@ -217,8 +256,13 @@ class TestRunJavaAgent:
 
             inst = {"repo": "org/myrepo", "repo_path": "/tmp/myrepo"}
             cfg = JavaAgentConfig()
-            result = run_java_agent(inst, cfg, log_dir="/tmp/test_logs")
-            assert result is None
+            with pytest.raises(RuntimeError) as exc_info:
+                run_java_agent(inst, cfg, log_dir="/tmp/test_logs")
+            msg = str(exc_info.value)
+            assert "No stubbed Java files" in msg
+            assert "myrepo" in msg
+            assert "stub_base=abc123" in msg
+            assert "degenerate 0-work trajectory" in msg
 
 
 class TestMatchTestToStub:

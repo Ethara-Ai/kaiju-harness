@@ -198,7 +198,7 @@ class TestInstanceIdFormat:
             patch.object(
                 prepare_repo_js,
                 "create_js_stubbed_branch",
-                return_value=("a" * 40, "b" * 40, 5),
+                return_value=("a" * 40, "b" * 40, 5, True),
             ),
             patch.object(prepare_repo_js, "_assert_monorepo_safety"),
         ):
@@ -279,7 +279,7 @@ class TestDryRunSkipsPush:
             patch.object(
                 prepare_repo_js,
                 "create_js_stubbed_branch",
-                return_value=("a" * 40, "b" * 40, 5),
+                return_value=("a" * 40, "b" * 40, 5, True),
             ),
             patch.object(prepare_repo_js, "_assert_monorepo_safety"),
             patch.object(prepare_repo_js, "push_to_fork") as mock_push,
@@ -319,7 +319,7 @@ class TestEntryFields:
             patch.object(
                 prepare_repo_js,
                 "create_js_stubbed_branch",
-                return_value=("a" * 40, "b" * 40, 5),
+                return_value=("a" * 40, "b" * 40, 5, True),
             ),
             patch.object(prepare_repo_js, "_assert_monorepo_safety"),
         ):
@@ -589,7 +589,7 @@ class TestF007UnpushableRowsRejected:
         monkeypatch.setattr(
             prj,
             "create_js_stubbed_branch",
-            lambda *_a, **_kw: ("a" * 40, "b" * 40, 5),
+            lambda *_a, **_kw: ("a" * 40, "b" * 40, 5, True),
         )
         monkeypatch.setattr(prj, "git", MagicMock())
 

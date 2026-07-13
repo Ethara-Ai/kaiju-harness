@@ -735,7 +735,11 @@ class TestGetMessageTsSpec:
 
         cfg = _make_agent_config(use_spec_info=True, max_spec_info_length=100)
         msg, _ = get_message_ts(cfg, str(tmp_path))
-        assert len(msg) < 500
+        # Raw README is 10000 chars but spec info is truncated to 100 chars; the
+        # remainder is fixed task boilerplate, so the total stays far below the
+        # raw size. Bound accounts for the current (grown) message template.
+        assert len(msg) < 700
+        assert "x" * 200 not in msg
 
     def test_no_readme_no_spec(self, tmp_path: Path) -> None:
         from agent.agent_utils_ts import get_message_ts, SPEC_INFO_HEADER
@@ -887,7 +891,11 @@ class TestGetMessageTsUnitTests:
             max_unit_tests_info_length=100,
         )
         msg, _ = get_message_ts(cfg, str(tmp_path), test_files=["big.test.ts"])
-        assert len(msg) < 500
+        # Raw test file is 20000 chars but unit-tests info is truncated to 100
+        # chars; the remainder is fixed task boilerplate. Bound accounts for the
+        # current (grown) message template.
+        assert len(msg) < 700
+        assert "x" * 200 not in msg
 
 
 # ===================================================================

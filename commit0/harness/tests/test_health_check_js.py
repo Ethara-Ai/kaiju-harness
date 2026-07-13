@@ -97,7 +97,7 @@ class TestBuildRequireCmd:
     def test_per_pkg_manager(self, pm: str, expected_head: list[str]) -> None:
         cmd = _build_require_cmd("lodash", pm)
         assert cmd[: len(expected_head)] == expected_head
-        assert cmd[-1] == 'require("lodash")'
+        assert cmd[-1] == 'try{require.resolve("lodash")}catch(e){if(e&&e.code=="MODULE_NOT_FOUND"){throw e}}'
 
     def test_unknown_pm_falls_back_to_node(self) -> None:
         cmd = _build_require_cmd("lodash", "deno")
@@ -115,8 +115,8 @@ class TestBuildRequireCmd:
     def test_json_dumps_quotes_name(self, name: str) -> None:
         cmd = _build_require_cmd(name, "npm")
         script = cmd[-1]
-        assert script == f"require({json.dumps(name)})"
-        assert script.count('"') == 2
+        assert script == f'try{{require.resolve({json.dumps(name)})}}catch(e){{if(e&&e.code=="MODULE_NOT_FOUND"){{throw e}}}}'
+        assert script.count('"') == 4
 
 
 class TestCheckRequireRejectsInjection:
@@ -168,7 +168,7 @@ class TestCheckRequireRejectsInjection:
         args, kwargs = client.containers.run.call_args
         cmd = args[1] if len(args) > 1 else kwargs.get("command")
         assert cmd[0] == "node"
-        assert cmd[-1] == 'require("lodash")'
+        assert cmd[-1] == 'try{require.resolve("lodash")}catch(e){if(e&&e.code=="MODULE_NOT_FOUND"){throw e}}'
 
 
 @pytest.fixture(autouse=True)
@@ -396,3 +396,37 @@ class TestCheckNodeVersionTypeContract:
         ok, detail = check_node_version(client, "img:none_exp")
         assert ok is True
         assert "Node 20" in detail
+
+
+class TestDetectTestFrameworkAva:
+    def test_detects_ava_from_dev_dependencies(self) -> None:
+        client = MagicMock(spec=["containers"])
+        client.containers.run.return_value = json.dumps(
+            {"devDependencies": {"ava": "^6.4.1"}}
+        ).encode()
+        result = detect_test_framework_from_package_json(client, "img:ava_dev")
+        assert result == "ava"
+
+    def test_detects_ava_from_dependencies(self) -> None:
+        client = MagicMock(spec=["containers"])
+        client.containers.run.return_value = json.dumps(
+            {"dependencies": {"ava": "^6.4.1"}}
+        ).encode()
+        result = detect_test_framework_from_package_json(client, "img:ava_dep")
+        assert result == "ava"
+
+    def test_priority_jest_over_ava(self) -> None:
+        client = MagicMock(spec=["containers"])
+        client.containers.run.return_value = json.dumps(
+            {"devDependencies": {"jest": "29", "ava": "6"}}
+        ).encode()
+        result = detect_test_framework_from_package_json(client, "img:priority")
+        assert result == "jest"
+
+
+class TestPkgFrameworkPriorityInvariant:
+    def test_priority_is_subset_of_supported(self) -> None:
+        from commit0.harness.constants_js import SUPPORTED_TEST_FRAMEWORKS
+        from commit0.harness.health_check_js import _PKG_FRAMEWORK_PRIORITY
+
+        assert set(_PKG_FRAMEWORK_PRIORITY) <= SUPPORTED_TEST_FRAMEWORKS

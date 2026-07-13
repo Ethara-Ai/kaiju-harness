@@ -359,10 +359,13 @@ def main() -> None:
 
     hf_entries = create_ts_hf_dataset_dict(valid)
 
-    if _consolidated and hf_entries and hf_entries[0].get("id"):
-        output_path = datasets_dir(hf_entries[0]["id"]) / "dataset.json"
-    elif args.output:
+    # An explicit --output ALWAYS wins (documented override); only fall back to the
+    # consolidated UUID path when no specific file was requested. The consolidated
+    # side-effects below run regardless, so honoring --output is safe.
+    if args.output:
         output_path = Path(args.output)
+    elif _consolidated and hf_entries and hf_entries[0].get("id"):
+        output_path = datasets_dir(hf_entries[0]["id"]) / "dataset.json"
     elif hf_entries and hf_entries[0].get("id"):
         output_path = Path(f"{hf_entries[0]['id']}.json")
     else:

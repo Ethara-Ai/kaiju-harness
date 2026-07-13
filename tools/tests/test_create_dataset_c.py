@@ -91,6 +91,7 @@ class TestHfProjection:
         assert len(out) == 1
         assert set(out[0].keys()) == {
             "instance_id",
+            "id",
             "repo",
             "original_repo",
             "base_commit",

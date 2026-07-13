@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+from agent.agent_utils import MODULE_SCOPE_NOTE
 from agent.agent_utils_go import SPEC_INFO_HEADER, get_go_message
 from agent.class_types import AgentConfig
 
@@ -184,9 +185,12 @@ class TestGoReadmeFallback:
         assert spec_start != -1
         # Header is followed by a newline in parts.append join, so we
         # measure the injected README region (capped at max_spec_info_length).
+        # The message ends with MODULE_SCOPE_NOTE, so strip it first.
         readme_portion = message[spec_start + len(SPEC_INFO_HEADER):]
-        # Strip leading newline(s) that came from "\n".join of parts
-        assert len(readme_portion.lstrip("\n")) <= 600  # 500 + small tolerance
+        assert readme_portion.endswith(MODULE_SCOPE_NOTE)
+        readme_portion = readme_portion[: -len(MODULE_SCOPE_NOTE)]
+        # Strip leading/trailing newline(s) that came from "\n".join of parts
+        assert len(readme_portion.strip("\n")) <= 600  # 500 + small tolerance
 
     def test_neither_spec_nor_readme(self, tmp_path: Path) -> None:
         _write_stubbed_repo(tmp_path)

@@ -976,7 +976,16 @@ PYEOF
     source_part="${result#* }"
     if [[ "$cost_part" =~ ^[0-9]+\.[0-9]+$ ]]; then
         if [[ "${source_part:-none}" == "none" ]]; then
-            log "  WARNING: cost extraction found NO output.json/aider.log cost in ${log_dir} — reporting \$0.0000 but this is an EXTRACTION FAILURE, not a free run." >&2
+            local artifact_count done_count
+            artifact_count=$(find "$log_dir" \( -name aider.log -o -name output.json -o -name turns.jsonl \) 2>/dev/null | wc -l | tr -d ' ')
+            done_count=$(find "$log_dir" -name .done 2>/dev/null | wc -l | tr -d ' ')
+            if [[ "${artifact_count:-0}" == "0" && "${done_count:-0}" == "0" ]]; then
+                log "  WARNING: no agent artifacts in ${log_dir} \$0.0000 reported \u2014 AGENT SKIPPED (no target files, module init failure, or crash before first LLM call). Check agent_run.log for the failure reason." >&2
+            elif [[ "${artifact_count:-0}" == "0" && "${done_count:-0}" != "0" ]]; then
+                log "  INFO: ${done_count} .done marker(s) but no aider.log/output.json in ${log_dir} \u2014 \$0.0000 reported (all modules resumed from prior cache; not an extraction failure)." >&2
+            else
+                log "  WARNING: ${artifact_count} agent artifact(s) present in ${log_dir} but cost extraction found NO output.json/aider.log cost \u2014 \$0.0000 reported, this is an EXTRACTION FAILURE." >&2
+            fi
         fi
         echo "$cost_part ${source_part:-none}"
     else

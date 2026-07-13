@@ -44,8 +44,11 @@ class Commit0TsSpec(Spec):
 
     def _get_node_version(self) -> str:
         setup = self._get_setup_dict()
-        if "node_version" in setup:
-            return str(setup["node_version"])
+        # Canonical key is `node_version` (what prepare emits); also accept the
+        # `node` shorthand so either schema resolves rather than silently defaulting.
+        for key in ("node_version", "node"):
+            if key in setup and setup[key] not in (None, ""):
+                return str(setup[key])
         logger.debug(
             "No node version specified, defaulting to %s", DEFAULT_NODE_VERSION
         )
@@ -90,9 +93,15 @@ class Commit0TsSpec(Spec):
 
         _SHELL_DANGER = set(";&|`$(){}!><\\\n\r")
         if any(c in _SHELL_DANGER for c in install_cmd):
-            raise ValueError(
-                f"install_cmd contains shell metacharacters (injection risk): {install_cmd!r}"
+            # Defense against a malicious/corrupt dataset row: NEVER execute a
+            # metachar-bearing install command. Warn and fall back to the safe
+            # default rather than raising (which would crash the whole build for
+            # this repo) — mirrors spec_js's warn-and-fall-back behavior.
+            logger.warning(
+                "install_cmd contains shell metacharacters (injection risk): %r; "
+                "falling back to the safe default 'npm install'.", install_cmd,
             )
+            install_cmd = "npm install"
 
         steps = [
             f"git clone --depth 1 -o origin https://github.com/{shlex.quote(repo)} {shlex.quote(self.repo_directory)}",
@@ -132,9 +141,13 @@ class Commit0TsSpec(Spec):
 
         _SHELL_DANGER = set(";&|`$(){}!><\\\n\r")
         if any(c in _SHELL_DANGER for c in test_cmd):
-            raise ValueError(
-                f"test_cmd contains shell metacharacters (injection risk): {test_cmd!r}"
+            # NEVER execute a metachar-bearing test command; warn and fall back to
+            # the safe default instead of raising (mirrors spec_js).
+            logger.warning(
+                "test_cmd contains shell metacharacters (injection risk): %r; "
+                "falling back to the safe default %r.", test_cmd, default_test,
             )
+            test_cmd = default_test
 
         try:
             _tokens = shlex.split(test_cmd)

@@ -51,6 +51,21 @@ class TestRead:
 
 
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def _patch_resolver(self):
+        # main() now resolves the ids file via kaiju.paths.find_test_ids_file.
+        # Patch it as a PASS-THROUGH that returns the joined path so the
+        # existing path/read assertions (which inspect the argument passed to
+        # read()) still hold. find_test_ids_file is imported inside main() from
+        # kaiju.paths, so patch it at its definition site.
+        import os
+
+        def _passthrough(commit0_path, subdir, filename):
+            return os.path.join(commit0_path, "data", subdir, filename)
+
+        with patch("kaiju.paths.find_test_ids_file", side_effect=_passthrough):
+            yield
+
     @patch(f"{MODULE}.os.path.dirname", return_value="/fake/commit0")
     @patch(f"{MODULE}.read")
     def test_main_returns_single_list(

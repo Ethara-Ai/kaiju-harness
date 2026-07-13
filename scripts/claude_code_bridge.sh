@@ -52,8 +52,11 @@ PID_FILE="${REPO_ROOT}/.claude_code_bridge.pid"
 LOG_FILE="${KAIJU_CC_BRIDGE_LOG:-${REPO_ROOT}/logs/claude_code_bridge.log}"
 MONITOR_PID_FILE="${REPO_ROOT}/.claude_code_bridge_monitor.pid"
 MONITOR_LOG_FILE="${KAIJU_CC_BRIDGE_MONITOR_LOG:-${REPO_ROOT}/logs/claude_code_bridge_monitor.log}"
-MONITOR_POLL_SECONDS="${KAIJU_CC_MONITOR_POLL:-30}"
-MONITOR_FAIL_THRESHOLD="${KAIJU_CC_MONITOR_FAILS:-3}"
+# Faster restart than before (was 30s/3 -> ~90s): 10s poll x 2 fails -> a dead or
+# hung bridge is respawned in ~20s, shrinking the connection-refused window the
+# client rides out. Tunable via KAIJU_CC_MONITOR_POLL / KAIJU_CC_MONITOR_FAILS.
+MONITOR_POLL_SECONDS="${KAIJU_CC_MONITOR_POLL:-10}"
+MONITOR_FAIL_THRESHOLD="${KAIJU_CC_MONITOR_FAILS:-2}"
 
 # Absorb upstream mid-stream drops transparently: buffer the SSE stream and
 # re-issue on a drop so the client (aider) only ever sees a COMPLETE response.
@@ -95,9 +98,22 @@ _start_monitor_process() {
     return 0
   fi
   mkdir -p "$(dirname "$MONITOR_LOG_FILE")"
+  local _self="${BASH_SOURCE[0]}"
+  # Run the monitor under a RESPAWN SUPERVISOR so the watchdog itself self-heals:
+  # if the monitor loop ever exits (crash, set -e trip, OOM, stray kill) it is
+  # restarted while the pid file exists. The pid file doubles as the run-flag —
+  # create it BEFORE launching (so the supervisor's first `[[ -f ]]` check can't
+  # lose a race) then overwrite it with the supervisor's real pid. `stop` removes
+  # the file first (ending the loop) then kills the supervisor + inner monitor.
+  : > "$MONITOR_PID_FILE"
   # shellcheck disable=SC2024
-  nohup bash "${BASH_SOURCE[0]}" monitor \
-    >>"$MONITOR_LOG_FILE" 2>&1 &
+  nohup bash -c "
+    while [[ -f '$MONITOR_PID_FILE' ]]; do
+      bash '$_self' monitor >>'$MONITOR_LOG_FILE' 2>&1 || true
+      [[ -f '$MONITOR_PID_FILE' ]] || break
+      sleep 2
+    done
+  " >>"$MONITOR_LOG_FILE" 2>&1 &
   echo $! >"$MONITOR_PID_FILE"
 }
 
@@ -137,17 +153,29 @@ case "$action" in
     echo "export ANTHROPIC_API_BASE=http://${HOST}:${PORT}"
     echo "export ANTHROPIC_API_KEY=kaiju-cc-stub"
     ;;
+  ensure-monitor)
+    # Idempotently (re)arm the watchdog WITHOUT restarting the bridge. Used by the
+    # --reuse-bridge path so a reused bridge still gets a monitor (and re-arms one
+    # whose supervisor died). No-op if a live monitor is already registered.
+    if [[ "${KAIJU_CC_DISABLE_MONITOR:-0}" != "1" ]]; then
+      _start_monitor_process
+      echo "[bridge] monitor ensured (PID $(cat "$MONITOR_PID_FILE" 2>/dev/null))" >&2
+    fi
+    ;;
   stop)
-    # Stop monitor first so it doesn't restart the bridge mid-shutdown.
+    # Stop monitor first so it doesn't restart the bridge mid-shutdown. Remove the
+    # pid/run-flag FIRST so the supervisor loop won't respawn, then kill the
+    # supervisor and reap any inner monitor loop it spawned.
     if [[ -f "$MONITOR_PID_FILE" ]]; then
       mpid=$(cat "$MONITOR_PID_FILE")
-      if kill -0 "$mpid" 2>/dev/null; then
-        kill "$mpid" || true
-        sleep 0.3
-        kill -0 "$mpid" 2>/dev/null && kill -9 "$mpid" 2>/dev/null || true
-        echo "[bridge] monitor stopped PID $mpid" >&2
-      fi
       rm -f "$MONITOR_PID_FILE"
+      if [[ "$mpid" =~ ^[0-9]+$ ]] && kill -0 "$mpid" 2>/dev/null; then
+        kill "$mpid" 2>/dev/null || true
+        sleep 0.3
+        kill -9 "$mpid" 2>/dev/null || true
+      fi
+      pkill -f "$(basename "${BASH_SOURCE[0]}") monitor" 2>/dev/null || true
+      echo "[bridge] monitor stopped" >&2
     fi
     if [[ -f "$PID_FILE" ]]; then
       pid=$(cat "$PID_FILE")
@@ -209,7 +237,7 @@ case "$action" in
     done
     ;;
   *)
-    echo "usage: $0 {start|stop|check|status|monitor}" >&2
+    echo "usage: $0 {start|stop|check|status|monitor|ensure-monitor}" >&2
     exit 2
     ;;
 esac

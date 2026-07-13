@@ -59,7 +59,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="TS SYSTEM PROMPT")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_run_default_mode(self, mock_io_cls, mock_coder_cls, mock_prompt) -> None:
         coder = self._make_coder()
         mock_coder_cls.create.return_value = coder
@@ -82,7 +82,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_run_test_first_mode(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -106,7 +106,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_run_lint_first_mode(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -129,7 +129,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_lint_cmd_uses_typescript_key(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -151,7 +151,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_system_prompt_contains_stub_warning(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -159,6 +159,8 @@ class TestTsAiderAgentsRun:
         mock_coder_cls.create.return_value = coder
         agent = self._make_agent()
 
+        # Default (inject_test_files_readonly=True): test files are read-only
+        # reference material, so the prompt warns NEVER to edit them.
         with patch("builtins.open", mock_open()):
             agent.run(
                 message="msg",
@@ -168,13 +170,28 @@ class TestTsAiderAgentsRun:
                 log_dir=Path("/tmp/test_logs_ts"),
             )
 
-        system_prompt = coder.gpt_prompts.main_system
-        assert "NEVER edit test files" in system_prompt
-        assert 'throw new Error("STUB")' in system_prompt
+        assert "NEVER edit test files" in coder.gpt_prompts.main_system
+
+        # Spec-driven mode (inject_test_files_readonly=False): test files are
+        # UNAVAILABLE and the agent must implement unimplemented stubs. This is
+        # where the STUB anti-cheat guidance lives now.
+        coder2 = self._make_coder()
+        mock_coder_cls.create.return_value = coder2
+        with patch("builtins.open", mock_open()):
+            agent.run(
+                message="msg",
+                test_cmd="",
+                lint_cmd="",
+                fnames=[],
+                log_dir=Path("/tmp/test_logs_ts"),
+                inject_test_files_readonly=False,
+            )
+
+        assert 'throw new Error("STUB")' in coder2.gpt_prompts.main_system
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_proxy_params_extracted_from_extra_params(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -202,7 +219,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_no_proxy_params_when_empty(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -225,7 +242,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_test_first_no_errors_skips_coder_run(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -248,7 +265,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_max_input_tokens_skip(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -270,7 +287,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_test_summarizer_wraps_cmd_test(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -302,7 +319,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_thinking_capture_patches_applied(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -331,7 +348,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_thinking_capture_records_files(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -363,7 +380,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_thinking_capture_wraps_cmd_test(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -396,7 +413,7 @@ class TestTsAiderAgentsRun:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_return_has_test_summarizer_cost(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -514,7 +531,7 @@ class TestWrappedCmdTestSummarizer:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_long_output_triggers_summarizer(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -556,7 +573,7 @@ class TestWrappedCmdTestSummarizer:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_short_output_passes_through(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -586,7 +603,7 @@ class TestWrappedCmdTestSummarizer:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_none_output_passes_through(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -646,7 +663,7 @@ class TestCapturingCmdLint:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_lint_capture_records_user_and_assistant_turns(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -699,7 +716,7 @@ class TestCapturingCmdLint:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_lint_capture_no_assistant_turn_when_empty_result(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -771,7 +788,7 @@ class TestRunFinallyStdoutCloseOSError:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_stdout_close_oserror_caught(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -805,7 +822,7 @@ class TestRunFinallyStdoutCloseOSError:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_stderr_close_oserror_caught(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:
@@ -866,7 +883,7 @@ class TestRunThinkingCaptureSummarizerCostsAdd:
 
     @patch(f"{MODULE}._load_ts_system_prompt", return_value="")
     @patch(f"{MODULE}.Coder")
-    @patch(f"{MODULE}.InputOutput")
+    @patch(f"{MODULE}.GuardedInputOutput")
     def test_summarizer_costs_added_to_thinking_capture(
         self, mock_io_cls, mock_coder_cls, mock_prompt
     ) -> None:

@@ -48,8 +48,10 @@ class TestNodeVersions:
     def test_is_frozenset(self) -> None:
         assert isinstance(SUPPORTED_NODE_VERSIONS, frozenset)
 
-    def test_contains_20_and_22(self) -> None:
-        assert SUPPORTED_NODE_VERSIONS == frozenset({20, 22})
+    def test_supported_node_versions(self) -> None:
+        # 18 (older libs), 20/22 (active LTS), 24 (current); each has a
+        # matching Dockerfile.node<version>.
+        assert SUPPORTED_NODE_VERSIONS == frozenset({18, 20, 22, 24})
 
     def test_default_is_in_supported(self) -> None:
         assert DEFAULT_NODE_VERSION in SUPPORTED_NODE_VERSIONS
@@ -82,10 +84,10 @@ class TestTestFrameworks:
 
     def test_exact_set(self) -> None:
         assert SUPPORTED_TEST_FRAMEWORKS == frozenset(
-            {"jest", "mocha", "vitest", "node_test"}
+            {"jest", "mocha", "vitest", "node_test", "ava"}
         )
 
-    @pytest.mark.parametrize("fw", ["jest", "mocha", "vitest", "node_test"])
+    @pytest.mark.parametrize("fw", ["jest", "mocha", "vitest", "node_test", "ava"])
     def test_each_supported(self, fw: str) -> None:
         assert fw in SUPPORTED_TEST_FRAMEWORKS
 

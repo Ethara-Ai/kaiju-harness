@@ -181,7 +181,7 @@ class TestConstants:
             assert key in SPLIT, f"Missing key {key!r} in SPLIT"
 
     def test_eval_backends(self):
-        assert EVAL_BACKENDS == ["local", "modal", "e2b"]
+        assert EVAL_BACKENDS == ["local", "local_inplace", "modal", "e2b"]
 
     def test_base_branch(self):
         assert BASE_BRANCH == "commit0"

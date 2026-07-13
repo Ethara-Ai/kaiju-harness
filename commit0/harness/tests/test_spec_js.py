@@ -189,13 +189,18 @@ class TestRepoScriptList:
         text = "\n".join(spec.make_repo_script_list())
         assert f"git reset --hard {shlex.quote('c' * 40)}" in text
 
-    def test_checks_out_reference_commit_for_env_setup(self) -> None:
+    def test_checks_out_base_commit_which_has_the_lockfile(self) -> None:
+        # Setup checks out the BASE (stubbed) commit, not the reference: prepare
+        # commits the (possibly generated) lockfile into the base branch, and the
+        # original/reference commit may have none — `npm ci` needs the lockfile, so
+        # checking out reference would break the frozen install. Both commits are
+        # still fetched (reference is used by the eval stage).
         inst = _make_js_instance(
             base_commit="c" * 40, reference_commit="a" * 40
         )
         spec = _make_spec(inst)
         text = "\n".join(spec.make_repo_script_list())
-        assert f"git checkout {shlex.quote('a' * 40)}" in text
+        assert f"git checkout {shlex.quote('c' * 40)}" in text
         assert (
             f"git fetch --depth=1 origin {shlex.quote('a' * 40)} "
             f"{shlex.quote('c' * 40)}"
@@ -217,7 +222,9 @@ class TestRepoScriptList:
         inst = _make_js_instance(repo="evil;rm -rf /")
         spec = _make_spec(inst)
         text = "\n".join(spec.make_repo_script_list())
-        assert shlex.quote("evil;rm -rf /") in text
+        # `repo` is wrapped into a full GitHub clone URL, then shlex-quoted; the whole
+        # URL must be quoted so the metacharacters cannot inject into the shell.
+        assert shlex.quote("https://github.com/evil;rm -rf /") in text
 
     def test_base_commit_shlex_quoted(self) -> None:
         inst = _make_js_instance(base_commit="ab;injected")
@@ -245,8 +252,10 @@ class TestEvalScriptList:
     def test_contains_preventive_test_revert(self) -> None:
         spec = _make_spec()
         text = "\n".join(spec.make_eval_script_list())
-        assert "git checkout HEAD --" in text
-        for pat in ("**/*.test.js", "**/*.spec.js", "**/__tests__/**"):
+        # Anti-cheat: test files/configs are reverted to the BASE commit via
+        # revert_and_clean_lines -> `git checkout <base> -- <pathspec>`.
+        assert "git checkout" in text
+        for pat in ("**/*.test.js", "**/*.spec.js", "**/__tests__/"):
             assert pat in text
 
     def test_contains_jest_mocha_vitest_config_revert(self) -> None:
@@ -278,9 +287,9 @@ class TestEvalScriptList:
     def test_writes_exit_codes(self) -> None:
         spec = _make_spec()
         text = "\n".join(spec.make_eval_script_list())
-        assert "echo $? > /tmp/install_exit_code.txt" in text
-        assert "/tmp/syntax_exit_code.txt" in text
-        assert "echo $? > /tmp/test_exit_code.txt" in text
+        assert "echo $? > install_exit_code.txt" in text
+        assert "syntax_exit_code.txt" in text
+        assert "echo $? > test_exit_code.txt" in text
 
     def test_diff_path_shlex_quoted(self) -> None:
         spec = _make_spec()
@@ -298,7 +307,7 @@ class TestFrameworkDispatch:
     @pytest.mark.parametrize(
         ("framework", "fragment"),
         [
-            ("jest", "npx jest --json --outputFile=/tmp/test_results.json"),
+            ("jest", "npx jest --json --outputFile=test_results.json"),
             ("vitest", "npx vitest run --reporter=json"),
             ("mocha", "npx mocha --reporter json"),
             ("node_test", "node --test --test-reporter=tap"),
@@ -329,19 +338,19 @@ class TestDatasetTestCmdPrefix:
                 "pnpm",
                 "pnpm exec jest",
                 "jest",
-                "pnpm exec jest --json --outputFile=/tmp/test_results.json",
+                "pnpm exec jest --json --outputFile=test_results.json",
             ),
             (
                 "yarn",
                 "yarn jest",
                 "jest",
-                "yarn jest --json --outputFile=/tmp/test_results.json",
+                "yarn jest --json --outputFile=test_results.json",
             ),
             (
                 "bun",
                 "bunx jest",
                 "jest",
-                "bunx jest --json --outputFile=/tmp/test_results.json",
+                "bunx jest --json --outputFile=test_results.json",
             ),
             (
                 "pnpm",
@@ -385,7 +394,7 @@ class TestDatasetTestCmdPrefix:
         inst["test"]["test_cmd"] = ""
         spec = _make_spec(inst)
         text = "\n".join(spec.make_eval_script_list())
-        assert "pnpm exec jest --json --outputFile=/tmp/test_results.json" in text
+        assert "pnpm exec jest --json --outputFile=test_results.json" in text
 
     def test_dataset_test_cmd_framework_mismatch_falls_back(self) -> None:
         inst = _make_js_instance()

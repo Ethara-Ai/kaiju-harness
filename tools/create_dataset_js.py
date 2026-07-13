@@ -351,10 +351,14 @@ def main() -> None:
 
     hf_entries = create_js_hf_dataset_dict(valid)
 
-    if _consolidated and hf_entries and hf_entries[0].get("id"):
-        output_path = datasets_dir(hf_entries[0]["id"]) / "dataset.json"
-    elif args.output:
+    # An explicit --output ALWAYS wins (it's a documented, deliberate override);
+    # only fall back to the consolidated UUID path when the caller didn't ask for a
+    # specific file. The consolidated side-effects below (copy_inference_inputs) run
+    # regardless, so honoring --output here does not disturb the consolidated layout.
+    if args.output:
         output_path = Path(args.output)
+    elif _consolidated and hf_entries and hf_entries[0].get("id"):
+        output_path = datasets_dir(hf_entries[0]["id"]) / "dataset.json"
     elif hf_entries and hf_entries[0].get("id"):
         output_path = Path(f"{hf_entries[0]['id']}.json")
     else:

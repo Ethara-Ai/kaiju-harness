@@ -170,7 +170,11 @@ class TestLockfileRules:
         assert ok is False
         assert reasons == ["no package.json"]
 
-    def test_no_lockfile(self, tmp_path: Path) -> None:
+    def test_no_lockfile_but_generatable_is_accepted(self, tmp_path: Path) -> None:
+        # A repo with NO lockfile but a real test script is "generatable": prepare
+        # synthesizes a lockfile via a generating install and commits it into the
+        # stubbed branch. Such repos are ACCEPTED (not rejected) — this unblocks the
+        # many small JS libs that .gitignore their lockfile.
         _make_repo(
             tmp_path,
             package={
@@ -182,8 +186,19 @@ class TestLockfileRules:
             lockfile="",
         )
         ok, reasons = validate_js_candidate(tmp_path)
+        assert ok is True, reasons
+        assert not any("lockfile" in r for r in reasons)
+
+    def test_no_lockfile_and_not_generatable_is_rejected(self, tmp_path: Path) -> None:
+        # No lockfile AND no test script -> not generatable -> rejected.
+        _make_repo(
+            tmp_path,
+            package={"name": "x", "version": "1.0.0"},
+            lockfile="",
+        )
+        ok, reasons = validate_js_candidate(tmp_path)
         assert ok is False
-        assert any("lockfile" in r for r in reasons)
+        assert any("lockfile" in r or "generatable" in r for r in reasons)
 
     def test_multiple_lockfiles(self, tmp_path: Path) -> None:
         _make_repo(tmp_path)
@@ -197,7 +212,8 @@ class TestLockfileRules:
             "package-lock.json": "npm",
             "pnpm-lock.yaml": "pnpm",
             "yarn.lock": "yarn",
-            "bun.lockb": "bun",
+            "bun.lockb": "bun",  # bun <1.1 (binary)
+            "bun.lock": "bun",   # bun >=1.1 (text)
         }
 
 

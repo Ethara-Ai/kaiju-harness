@@ -69,11 +69,11 @@ class TestValidateJsEntry:
 
     def test_bad_node_version(self) -> None:
         entry = _valid_entry()
-        entry["setup"]["node_version"] = 18
+        entry["setup"]["node_version"] = 99  # unsupported (no Dockerfile.node99)
         issues = validate_js_entry(entry, 0)
-        assert any("18" in i for i in issues)
+        assert any("99" in i for i in issues)
 
-    @pytest.mark.parametrize("v", [20, 22])
+    @pytest.mark.parametrize("v", [18, 20, 22, 24])
     def test_valid_node_versions(self, v: int) -> None:
         entry = _valid_entry()
         entry["setup"]["node_version"] = v

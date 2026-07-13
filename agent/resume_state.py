@@ -137,7 +137,34 @@ def restore_prior_progress(
         return summary
 
     repo_root = Path(local_repo.working_tree_dir)
-    # Start from a pristine base so the cumulative (base..HEAD) module patches apply.
+
+    # UNIVERSAL branch-state check (language- and library-agnostic): if the branch
+    # is ALREADY ahead of base, it carries the prior run's committed cumulative
+    # work and IS the authoritative state — keep it. Do NOT reset to base and
+    # replay the per-module patches: those are each base-relative, so for any repo
+    # whose modules SHARE files (a single-file C/C++ library, a monolithic module,
+    # co-edited headers) they overlap and cannot be re-applied sequentially —
+    # replaying would spew "patch does not apply" and, worse, could DROP good
+    # changes. The host-persisted per-module patches are a backup for the case
+    # where the checkout is GONE (fresh clone, HEAD == base); only then rebuild.
+    try:
+        head_sha = local_repo.git.rev_parse("HEAD")
+    except Exception as e:  # noqa: BLE001
+        head_sha = ""
+        logger.warning("RESUME: could not resolve HEAD: %s", e)
+    if head_sha and head_sha != base_commit:
+        logger.info(
+            "RESUME: branch already ahead of base (HEAD=%s base=%s) — keeping its "
+            "cumulative state; skipping per-module patch replay. .done markers skip "
+            "finished modules; only unfinished module(s) re-run.",
+            head_sha[:12], base_commit[:12])
+        summary["branch_already_ahead"] = True
+        summary["modules"] = list(patches.keys())
+        return summary
+
+    # Fresh checkout (HEAD == base): rebuild by replaying each module's base-relative
+    # patch. Disjoint-file modules compose cleanly onto the pristine base; a
+    # shared-file module whose patch conflicts is simply left to re-run.
     try:
         local_repo.git.reset("--hard", base_commit)
     except Exception as e:  # noqa: BLE001
@@ -164,12 +191,10 @@ def restore_prior_progress(
             summary["modules_failed"] += 1
             logger.warning("RESUME: patch for module %s did not apply (%s) — it will re-run",
                            module, (e.stderr or b"").decode(errors="replace").strip()[:200])
-            # Revert any partial hunks for this module's files so the tree stays clean.
-            for f in files:
-                try:
-                    local_repo.git.checkout(base_commit, "--", f)
-                except Exception:  # noqa: BLE001
-                    pass
+            # `git apply` is ATOMIC: a failed apply leaves the tree exactly as it
+            # was (no partial hunks), so there is nothing to clean up. Do NOT revert
+            # this module's files to base — for shared-file repos that would DROP the
+            # changes an earlier module's patch already applied. Leave the tree as-is.
 
     if summary["modules_restored"]:
         try:

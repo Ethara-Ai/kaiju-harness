@@ -211,24 +211,65 @@ def get_target_edit_files_js(
     test_dir: str,
     branch: str,
     reference_commit: str,
+    base_commit: str | None = None,
 ) -> tuple[list[str], dict[str, list[str]]]:
-    """Find JS files with stubs that differ from the reference commit.
+    """Find the JS source files that were stubbed at ``base_commit``.
 
-    Mirrors the TS twin's return shape: no topological sort, so the
-    dependency dict is always empty.
+    Stubbed-set membership is a fixed dataset property of the base commit, NOT a
+    fact about the current working tree. This set is the agent's target-edit list
+    for EVERY stage (draft + refine): stages 2/3 resume on top of stage 1's
+    implementation without resetting, so the files must be identified from
+    ``base_commit`` (read each candidate's blob there) rather than the live tree.
+
+    Crucially we do NOT additionally require the working tree to differ from
+    ``reference_commit``. In a refine stage the working tree already holds stage
+    1's implementation, and for a file the model solved that content can match the
+    golden reference exactly — an extra "differs from reference" filter would then
+    drop the file, empty the set, and trip the caller's degenerate-0-work guard,
+    silently killing stages 2 and 3 (they crash with "No target-edit source
+    files" and do zero work). The reference diff is only used in the
+    ``base_commit``-unavailable fallback, where it is the sole stub signal.
     """
     target_dir = str(local_repo.working_dir)
     files = _find_js_files_to_edit(target_dir, src_dir, test_dir)
 
+    stubbed_at_base: set[str] = set()
+    if base_commit:
+        for file_path in files:
+            rel_path = os.path.relpath(file_path, target_dir)
+            try:
+                content = local_repo.git.show(f"{base_commit}:{rel_path}")
+            except Exception:  # noqa: BLE001
+                continue
+            if JS_STUB_MARKER in content:
+                stubbed_at_base.add(file_path)
+
     filtered_files: list[str] = []
-    for file_path in files:
-        if not has_js_stubs(file_path):
-            continue
-        rel_path = os.path.relpath(file_path, target_dir)
-        diff_output = local_repo.git.diff(reference_commit, "--", rel_path)
-        if not diff_output:
-            continue
-        filtered_files.append(file_path)
+    if base_commit:
+        # Canonical, branch-state-independent target set: every file stubbed at
+        # base_commit. No reference-diff filter — see the docstring.
+        filtered_files = [f for f in files if f in stubbed_at_base]
+    else:
+        # base_commit unavailable: fall back to a working-tree stub scan, using the
+        # reference diff as the only available "still needs work" signal.
+        for file_path in files:
+            if not has_js_stubs(file_path):
+                continue
+            rel_path = os.path.relpath(file_path, target_dir)
+            if local_repo.git.diff(reference_commit, "--", rel_path):
+                filtered_files.append(file_path)
+
+    # Last resort: base_commit stub scan found nothing (e.g. path skew between the
+    # recorded base and the working tree) but the tree still shows stubs — use them
+    # so a legitimately-stubbed repo isn't failed by the caller's guard.
+    if not filtered_files and base_commit:
+        wt_stubbed = [f for f in files if has_js_stubs(f)]
+        if wt_stubbed:
+            logger.warning(
+                "get_target_edit_files_js: base-commit stub scan returned 0, "
+                "falling back to working-tree scan (%d files)", len(wt_stubbed),
+            )
+            filtered_files = wt_stubbed
 
     result_files = [os.path.relpath(f, target_dir) for f in filtered_files]
     return result_files, {}

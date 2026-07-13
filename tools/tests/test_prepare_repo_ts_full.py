@@ -1,5 +1,5 @@
 """Comprehensive tests for tools.prepare_repo_ts — covers detect_ts_src_dir,
-detect_ts_test_dirs, _detect_spec_url, _collect_extra_scan_dirs, fork_repo_ts,
+detect_ts_test_dirs, _detect_spec_url, _collect_extra_scan_dirs, fork_repo,
 create_ts_stubbed_branch, and prepare_ts_repo.
 
 Complements test_prepare_repo_ts_additions.py which covers detect_package_manager,
@@ -8,6 +8,7 @@ detect_test_framework, and generate_setup_dict_ts.
 
 import json
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -279,7 +280,10 @@ class TestDetectSpecUrl:
 
         assert result == "https://my-lib-docs.io"
 
-    def test_npm_registry_blocked_falls_to_skypack(self, tmp_path: Path) -> None:
+    def test_npm_registry_blocked_returns_empty(self, tmp_path: Path) -> None:
+        # The npm registry homepage is itself a blocked domain (github.com), and
+        # there is no Skypack/CDN fallback anymore (those return SPA shells, not
+        # scrape-able docs). Current contract: return '' so the caller skips scrape.
         pkg = {"name": "my-lib", "homepage": "https://github.com/owner/repo"}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
@@ -296,9 +300,11 @@ class TestDetectSpecUrl:
 
             result = _detect_spec_url(tmp_path)
 
-        assert result == "https://www.skypack.dev/view/my-lib"
+        assert result == ""
 
-    def test_skypack_fallback_for_no_homepage(self, tmp_path: Path) -> None:
+    def test_no_homepage_network_fails_returns_empty(self, tmp_path: Path) -> None:
+        # No local homepage and the npm registry probe raises (network guarded):
+        # no Skypack fallback -> '' so the caller skips the scrape cleanly.
         pkg = {"name": "@scope/my-lib"}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
@@ -308,7 +314,7 @@ class TestDetectSpecUrl:
             mock_urlopen.side_effect = Exception("network error")
             result = _detect_spec_url(tmp_path)
 
-        assert result == "https://www.skypack.dev/view/@scope/my-lib"
+        assert result == ""
 
     def test_no_package_json(self, tmp_path: Path) -> None:
         from tools.prepare_repo_ts import _detect_spec_url
@@ -322,16 +328,28 @@ class TestDetectSpecUrl:
 
         assert _detect_spec_url(tmp_path) == ""
 
-    def test_empty_homepage(self, tmp_path: Path) -> None:
+    def test_empty_homepage_falls_to_npm_probe(self, tmp_path: Path) -> None:
+        # An empty local homepage is skipped; the npm registry probe supplies a
+        # usable docs URL. (Empty homepage must NOT be returned as-is.)
         pkg = {"name": "my-lib", "homepage": ""}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
+        npm_data = {"homepage": "https://my-lib-docs.io"}
+
         from tools.prepare_repo_ts import _detect_spec_url
 
-        result = _detect_spec_url(tmp_path)
-        assert result != ""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps(npm_data).encode()
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+            result = _detect_spec_url(tmp_path)
 
-    def test_scoped_package_skypack(self, tmp_path: Path) -> None:
+        assert result == "https://my-lib-docs.io"
+
+    def test_scoped_package_network_fails_returns_empty(self, tmp_path: Path) -> None:
+        # Scoped package, npm probe raises, no Skypack fallback -> ''.
         pkg = {"name": "@babel/core"}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
@@ -340,9 +358,11 @@ class TestDetectSpecUrl:
         with patch("urllib.request.urlopen", side_effect=Exception("fail")):
             result = _detect_spec_url(tmp_path)
 
-        assert result == "https://www.skypack.dev/view/@babel/core"
+        assert result == ""
 
-    def test_blocked_docs_field_falls_through(self, tmp_path: Path) -> None:
+    def test_blocked_docs_field_falls_through_to_empty(self, tmp_path: Path) -> None:
+        # Every local field points at a blocked domain and the npm probe raises;
+        # with no Skypack fallback the contract is '' (skip scrape).
         pkg = {
             "name": "my-lib",
             "homepage": "https://github.com/me/lib",
@@ -356,7 +376,7 @@ class TestDetectSpecUrl:
         with patch("urllib.request.urlopen", side_effect=Exception("fail")):
             result = _detect_spec_url(tmp_path)
 
-        assert result == "https://www.skypack.dev/view/my-lib"
+        assert result == ""
 
 
 # ---------------------------------------------------------------------------
@@ -454,102 +474,95 @@ class TestCollectExtraScanDirs:
 
 
 class TestForkRepoTs:
-    def test_fork_already_exists(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
+    """Forking is delegated to the shared ``tools._git_auth.fork_repo`` (the single
+    fork entry point all prepare_repo_*.py files use). ``fork_repo_ts`` was removed;
+    these tests exercise that shared entry point as re-exported into this module,
+    mocking the low-level ``_gh`` helper and the pre-flight scope/access checks.
+    """
 
-        with patch(f"{MODULE}.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = fork_repo_ts("owner/repo", "MyOrg")
+    @staticmethod
+    def _preflight_stack(stack) -> None:
+        """Enter pre-flight / self-account patches into *stack* (all non-network no-ops)."""
+        stack.enter_context(patch("tools._git_auth.setup_git_credentials"))
+        stack.enter_context(
+            patch("tools._git_auth.get_github_token", return_value="ghp_fake")
+        )
+        stack.enter_context(patch("tools._git_auth.verify_token_scopes"))
+        stack.enter_context(patch("tools._git_auth.verify_org_write_access"))
+        stack.enter_context(
+            patch("tools._git_auth._is_self_account", return_value=False)
+        )
+        stack.enter_context(patch("time.sleep"))
+
+    def test_fork_already_exists(self) -> None:
+        from tools.prepare_repo_ts import fork_repo
+
+        # `gh api repos/MyOrg/repo` succeeds -> fork already exists, no re-fork.
+        exists = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"parent": {"full_name": "owner/repo"}}),
+            stderr="",
+        )
+
+        with ExitStack() as stack:
+            self._preflight_stack(stack)
+            mock_gh = stack.enter_context(
+                patch("tools._git_auth._gh", return_value=exists)
+            )
+            result = fork_repo("owner/repo", "MyOrg", token="ghp_fake")
 
         assert result == "MyOrg/repo"
-        mock_run.assert_called_once()
+        mock_gh.assert_called_once()
 
     def test_fork_created_successfully(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
+        from tools.prepare_repo_ts import fork_repo
 
-        call_count = [0]
+        # 1st api check: fork missing (rc=1); fork command succeeds (rc=0);
+        # poll api check: fork now queryable (rc=0).
+        seq = [
+            MagicMock(returncode=1, stdout="", stderr="Not Found"),  # existence check
+            MagicMock(returncode=0, stdout="", stderr=""),  # repo fork
+            MagicMock(returncode=0, stdout="{}", stderr=""),  # poll: ready
+        ]
 
-        def mock_run_side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            result = MagicMock()
-            if "view" in cmd and call_count[0] == 1:
-                result.returncode = 1
-                return result
-            if "fork" in cmd:
-                result.returncode = 0
-                return result
-            result.returncode = 0
-            return result
-
-        with patch(f"{MODULE}.subprocess.run", side_effect=mock_run_side_effect):
-            with patch("time.sleep"):
-                result = fork_repo_ts("owner/repo", "MyOrg")
+        with ExitStack() as stack:
+            self._preflight_stack(stack)
+            stack.enter_context(patch("tools._git_auth._gh", side_effect=seq))
+            result = fork_repo("owner/repo", "MyOrg", token="ghp_fake")
 
         assert result == "MyOrg/repo"
 
-    def test_fork_user_account_fallback(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
+    def test_fork_name_collision_raises(self) -> None:
+        from tools.prepare_repo_ts import fork_repo
+        from tools._git_auth import ForkError
 
-        call_count = [0]
+        # Repo exists at MyOrg/repo but forked from an UNRELATED upstream -> refuse.
+        collision = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"parent": {"full_name": "someone-else/repo"}}),
+            stderr="",
+        )
 
-        def mock_run_side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            result = MagicMock()
-            if "view" in cmd and call_count[0] == 1:
-                result.returncode = 1
-                return result
-            if "fork" in cmd and "--org" in cmd:
-                result.returncode = 1
-                result.stderr = "login for a user account"
-                return result
-            if "fork" in cmd:
-                result.returncode = 0
-                return result
-            result.returncode = 0
-            return result
+        with ExitStack() as stack:
+            self._preflight_stack(stack)
+            stack.enter_context(patch("tools._git_auth._gh", return_value=collision))
+            with pytest.raises(ForkError, match="collision"):
+                fork_repo("owner/repo", "MyOrg", token="ghp_fake")
 
-        with patch(f"{MODULE}.subprocess.run", side_effect=mock_run_side_effect):
-            with patch("time.sleep"):
-                result = fork_repo_ts("owner/repo", "MyOrg")
+    def test_fork_nonretryable_error_raises(self) -> None:
+        from tools.prepare_repo_ts import fork_repo
+        from tools._git_auth import ForkError
 
-        assert result == "MyOrg/repo"
+        seq = [
+            MagicMock(returncode=1, stdout="", stderr="Not Found"),  # existence check
+            MagicMock(returncode=1, stdout="", stderr="permission denied"),  # fork fails
+        ]
 
-    def test_fork_timeout(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
-
-        call_count = [0]
-
-        def mock_run_side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            result = MagicMock()
-            if "fork" in cmd and "--org" in cmd and call_count[0] <= 2:
-                result.returncode = 0
-                return result
-            result.returncode = 1
-            return result
-
-        with patch(f"{MODULE}.subprocess.run", side_effect=mock_run_side_effect):
-            with patch("time.sleep"):
-                with pytest.raises(RuntimeError, match="not available after"):
-                    fork_repo_ts("owner/repo", "MyOrg")
-
-    def test_fork_other_error_raises(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
-
-        def mock_run_side_effect(cmd, **kwargs):
-            result = MagicMock()
-            if "view" in cmd:
-                result.returncode = 1
-                return result
-            result.returncode = 1
-            result.stderr = "some other error"
-            result.args = cmd
-            result.stdout = ""
-            return result
-
-        with patch(f"{MODULE}.subprocess.run", side_effect=mock_run_side_effect):
-            with pytest.raises(subprocess.CalledProcessError):
-                fork_repo_ts("owner/repo", "MyOrg")
+        with ExitStack() as stack:
+            self._preflight_stack(stack)
+            stack.enter_context(patch("tools._git_auth._gh", side_effect=seq))
+            with pytest.raises(ForkError, match="non-retryable"):
+                fork_repo("owner/repo", "MyOrg", token="ghp_fake")
 
 
 # ---------------------------------------------------------------------------
@@ -803,14 +816,14 @@ class TestPrepareTsRepo:
     def test_dry_run_skips_fork_and_push(self, tmp_path: Path) -> None:
         from tools.prepare_repo_ts import prepare_ts_repo
 
-        with patch(f"{MODULE}.fork_repo_ts") as mock_fork:
+        with patch(f"{MODULE}.fork_repo") as mock_fork:
             with patch(f"{MODULE}.full_clone", return_value=tmp_path):
                 with patch(f"{MODULE}.detect_ts_src_dir", return_value="src"):
                     with patch(
                         f"{MODULE}.generate_setup_dict_ts",
                         return_value=(
                             {
-                                "node": "20",
+                                "node_version": "20",
                                 "install": "npm install",
                                 "packages": [],
                                 "pre_install": [],
@@ -822,7 +835,7 @@ class TestPrepareTsRepo:
                     ):
                         with patch(
                             f"{MODULE}.create_ts_stubbed_branch",
-                            return_value=("base123", "ref456", 5),
+                            return_value=("base123", "ref456", 5, True),
                         ):
                             with patch(f"{MODULE}.push_to_fork"):
                                 result = prepare_ts_repo(
@@ -840,7 +853,7 @@ class TestPrepareTsRepo:
     def test_returns_none_on_no_src_dir(self, tmp_path: Path) -> None:
         from tools.prepare_repo_ts import prepare_ts_repo
 
-        with patch(f"{MODULE}.fork_repo_ts", return_value="Org/repo"):
+        with patch(f"{MODULE}.fork_repo", return_value="Org/repo"):
             with patch(f"{MODULE}.full_clone", return_value=tmp_path):
                 with patch(f"{MODULE}.detect_ts_src_dir", return_value=""):
                     result = prepare_ts_repo(
@@ -854,14 +867,14 @@ class TestPrepareTsRepo:
     def test_uses_src_dir_override(self, tmp_path: Path) -> None:
         from tools.prepare_repo_ts import prepare_ts_repo
 
-        with patch(f"{MODULE}.fork_repo_ts", return_value="Org/repo"):
+        with patch(f"{MODULE}.fork_repo", return_value="Org/repo"):
             with patch(f"{MODULE}.full_clone", return_value=tmp_path):
                 with patch(f"{MODULE}.detect_ts_src_dir") as mock_detect:
                     with patch(
                         f"{MODULE}.generate_setup_dict_ts",
                         return_value=(
                             {
-                                "node": "20",
+                                "node_version": "20",
                                 "install": "npm install",
                                 "packages": [],
                                 "pre_install": [],
@@ -873,7 +886,7 @@ class TestPrepareTsRepo:
                     ):
                         with patch(
                             f"{MODULE}.create_ts_stubbed_branch",
-                            return_value=("b", "r", 1),
+                            return_value=("b", "r", 1, True),
                         ):
                             with patch(f"{MODULE}.push_to_fork"):
                                 result = prepare_ts_repo(
@@ -898,14 +911,14 @@ class TestPrepareTsRepo:
     def test_output_entry_structure(self, tmp_path: Path) -> None:
         from tools.prepare_repo_ts import prepare_ts_repo
 
-        with patch(f"{MODULE}.fork_repo_ts", return_value="Org/repo"):
+        with patch(f"{MODULE}.fork_repo", return_value="Org/repo"):
             with patch(f"{MODULE}.full_clone", return_value=tmp_path):
                 with patch(f"{MODULE}.detect_ts_src_dir", return_value="src"):
                     with patch(
                         f"{MODULE}.generate_setup_dict_ts",
                         return_value=(
                             {
-                                "node": "20",
+                                "node_version": "20",
                                 "install": "npm install",
                                 "packages": ["jest"],
                                 "pre_install": [],
@@ -917,7 +930,7 @@ class TestPrepareTsRepo:
                     ):
                         with patch(
                             f"{MODULE}.create_ts_stubbed_branch",
-                            return_value=("base_abc", "ref_def", 7),
+                            return_value=("base_abc", "ref_def", 7, True),
                         ):
                             result = prepare_ts_repo(
                                 "owner/my-lib",

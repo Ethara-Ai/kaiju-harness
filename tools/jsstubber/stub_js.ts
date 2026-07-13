@@ -82,6 +82,12 @@ const TEST_FILE_PATTERNS: RegExp[] = [
   /[\\/]tests?[\\/]/,
   /[\\/]fixtures[\\/]/,
   /\.stories\.[mc]?jsx?$/i,
+  // AVA's default conventions: a bare `test.js` (at the repo root or any dir,
+  // e.g. `test.js`, `src/test.js`) and `test-*.js`. These have NO `.test.`/`.spec.`
+  // infix and live outside a `test/` dir, so the patterns above miss them — which
+  // for a single-dir AVA lib (src_dir=".") would wrongly STUB the test file itself.
+  /(^|[\\/])test\.[mc]?jsx?$/i,
+  /(^|[\\/])test-[^\\/]*\.[mc]?jsx?$/i,
 ];
 
 const BUILTINS_TO_IGNORE = new Set([
@@ -184,6 +190,11 @@ function isJsSource(filePath: string): boolean {
 }
 
 function isRefusedTs(filePath: string): boolean {
+  // `.d.ts` / `.d.mts` / `.d.cts` are TYPE DECLARATION files: type-only, no runtime
+  // code to stub, and routinely shipped by PURE-JS packages so TypeScript consumers
+  // get types (e.g. sindresorhus/slugify's index.d.ts). Ignore them rather than
+  // refusing the whole JS repo — they're also not JS source, so never get stubbed.
+  if (/\.d\.[mc]?ts$/i.test(filePath)) return false;
   const ext = path.extname(filePath).toLowerCase();
   return REFUSED_TS_EXTENSIONS.has(ext);
 }
@@ -376,6 +387,16 @@ function collectImportTimeNamesFromFile(ast: t.File, into: Set<string>): void {
     }
     if (t.isLabeledStatement(stmt)) {
       collectCallsIn(stmt.body, into);
+      continue;
+    }
+    if (t.isExportAllDeclaration(stmt)) {
+      // `export * from './x'` is a pure static re-export: it binds names from
+      // another module but executes/calls NOTHING at import time in THIS file, so
+      // it contributes no import-time names. This mirrors the handling of a named
+      // re-export WITH a source (`export { y } from './x'`), which is likewise
+      // skipped above (the `stmt.source == null` guard). The re-exported module is
+      // stubbed independently when the stubber visits it. Explicit for completeness
+      // so every export form is accounted for.
       continue;
     }
   }
@@ -596,6 +617,19 @@ function buildTargetsForFile(
         report.functions_skipped_other++;
         continue;
       }
+    }
+    // Accessors (get/set): stubbing these to `throw` means merely READING or
+    // ASSIGNING the property throws — frequently during import, construction, or
+    // test setup, BEFORE any assertion runs — which can zero a whole file's tests
+    // as "infra" and depress winnability. Skip accessors; leave their bodies intact.
+    if (
+      (t.isClassMethod(node) ||
+        t.isObjectMethod(node) ||
+        t.isClassPrivateMethod(node)) &&
+      (node.kind === "get" || node.kind === "set")
+    ) {
+      report.functions_skipped_other++;
+      continue;
     }
     if (
       (t.isClassMethod(node) || t.isClassPrivateMethod(node)) &&

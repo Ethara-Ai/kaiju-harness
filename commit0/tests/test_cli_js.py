@@ -128,6 +128,19 @@ class TestCheckValidJsHelper:
         with pytest.raises(typer.BadParameter):
             check_valid_js("typo", {"foo": ["a/b"]})
 
+    def test_custom_split_in_dataset_passes(self) -> None:
+        # A CUSTOM single-repo dataset's split is a repo name (e.g. 'slugify'), not a
+        # curated key. It must be accepted when it resolves against the dataset.
+        dataset = [{"repo": "org/slugify", "instance_id": "commit-0/slugify"}]
+        check_valid_js("slugify", {"foo": ["a/b"]}, dataset)  # must NOT raise
+
+    def test_typo_not_in_dataset_raises(self) -> None:
+        import typer
+
+        dataset = [{"repo": "org/slugify"}]
+        with pytest.raises(typer.BadParameter):
+            check_valid_js("nonexistent-repo", {"foo": ["a/b"]}, dataset)
+
 
 class TestSetupDoesNotValidateRepoSplit:
     def test_setup_does_not_call_check_valid_js(self) -> None:
@@ -146,7 +159,8 @@ class TestSetupDoesNotValidateRepoSplit:
     def test_check_valid_js_is_exported_helper(self) -> None:
         assert callable(check_valid_js)
         sig = inspect.signature(check_valid_js)
-        assert list(sig.parameters) == ["one", "total"]
+        # `dataset` (optional) makes the check dataset-aware so custom splits pass.
+        assert list(sig.parameters) == ["one", "total", "dataset"]
 
 
 class TestTestCommandPathNormalization:

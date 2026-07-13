@@ -28,14 +28,31 @@ def highlight(text: str, color: str) -> str:
     return f"{color}{text}{Colors.RESET}"
 
 
-def check_valid_ts(one: str, total: dict[str, list[str]]) -> None:
+def check_valid_ts(
+    one: str, total: dict[str, list[str]], dataset: "list | None" = None
+) -> None:
+    """Validate a repo_split (mirror of check_valid_js).
+
+    Accepts ``"all"``, a curated key, OR — when *dataset* is provided — any split
+    resolve_split maps to a repo in the dataset, so a CUSTOM single-repo dataset
+    (split = a repo name) is accepted. Currently unused in the TS eval/build path
+    (which defers to resolve_split), but kept dataset-aware so wiring it later can't
+    reintroduce the curated-only rejection bug that hit the JS eval.
+    """
+    if one == "all" or one in total:
+        return
+    if dataset is not None:
+        from commit0.harness.split_utils import resolve_split
+
+        if resolve_split(one, dataset, curated=total):
+            return
     keys = list(total.keys())
-    if one != "all" and one not in keys:
-        valid = ", ".join([highlight(key, Colors.ORANGE) for key in keys])
-        raise typer.BadParameter(
-            f"Invalid repo_split. Must be one of: all, {valid}",
-            param_hint="REPO_SPLIT",
-        )
+    valid = ", ".join(highlight(key, Colors.ORANGE) for key in keys) or "(none)"
+    raise typer.BadParameter(
+        f"Invalid repo_split {one!r}. Must be 'all', a curated split ({valid}), "
+        "or a repo/split present in the dataset.",
+        param_hint="REPO_SPLIT",
+    )
 
 
 def write_commit0_ts_config_file(dot_file_path: str, config: dict) -> None:

@@ -15,12 +15,17 @@ namespace cppstubber {
 
 /// Configuration controlling what gets stubbed.
 struct StubConfig {
-    /// Stub regular function bodies with: std::abort(); /* STUB: not implemented */
-    std::string stub_marker = "std::abort(); /* STUB: not implemented */";
+    /// Stub regular function bodies with: __builtin_trap() /* STUB: not implemented */;
+    /// __builtin_trap() (not std::abort()) needs no #include <cstdlib> — many C++
+    /// sources include <stdlib.h> (global abort) but not <cstdlib> (std::abort), so
+    /// std::abort() fails to compile. The Clang/GCC builtin is noreturn (satisfies
+    /// non-void returns). The `/* STUB: not implemented */` marker (before the ';')
+    /// MUST match CPP_STUB_MARKER in commit0/harness/constants_cpp.py for detection.
+    std::string stub_marker = "__builtin_trap() /* STUB: not implemented */;";
     /// Stub constexpr/consteval function bodies with: return {};
     std::string constexpr_marker = "return {};";
-    /// Stub noexcept function bodies with: std::abort();
-    std::string noexcept_marker = "abort();";
+    /// Stub noexcept function bodies with: __builtin_trap() /* STUB: not implemented */;
+    std::string noexcept_marker = "__builtin_trap() /* STUB: not implemented */;";
     /// If true, stub all functions including private methods
     bool stub_private = true;
     /// If true, operate in-place (overwrite source files)

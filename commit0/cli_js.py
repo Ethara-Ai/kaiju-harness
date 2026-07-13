@@ -64,14 +64,51 @@ def highlight(text: str, color: str) -> str:
     return f"{color}{text}{Colors.RESET}"
 
 
-def check_valid_js(one: str, total: dict[str, list[str]]) -> None:
+def check_valid_js(
+    one: str, total: dict[str, list[str]], dataset: "list | None" = None
+) -> None:
+    """Validate a repo_split.
+
+    Accepts ``"all"``, a curated split (a key of *total*), OR — when *dataset* is
+    provided — any split that :func:`resolve_split` maps to a repo IN THE DATASET
+    (repo basename / instance_id / fork path / fuzzy ``-``<->``_``). This is what
+    lets a CUSTOM single-repo dataset whose split is a repo name (e.g. ``slugify``,
+    ``JSON-java``) pass — the previous curated-only check rejected every custom
+    split even though the downstream build/eval filter (``resolve_split``) accepts
+    it. Raises ``typer.BadParameter`` ONLY for a genuine typo (not ``all``, not
+    curated, and not resolvable against the dataset).
+    """
+    if one == "all" or one in total:
+        return
+    if dataset is not None:
+        from commit0.harness.split_utils import resolve_split
+
+        if resolve_split(one, dataset, curated=total):
+            return
     keys = list(total.keys())
-    if one != "all" and one not in keys:
-        valid = ", ".join([highlight(key, Colors.ORANGE) for key in keys])
-        raise typer.BadParameter(
-            f"Invalid repo_split. Must be one of: all, {valid}",
-            param_hint="REPO_SPLIT",
+    valid = ", ".join(highlight(key, Colors.ORANGE) for key in keys) or "(none)"
+    raise typer.BadParameter(
+        f"Invalid repo_split {one!r}. Must be 'all', a curated split ({valid}), "
+        "or a repo/split present in the dataset.",
+        param_hint="REPO_SPLIT",
+    )
+
+
+def _dataset_for_split_check(config: dict) -> "list | None":
+    """Best-effort load of the dataset so check_valid_js can validate a custom split
+    against real repos. Returns None on any failure — a load problem must NOT block
+    the command (the downstream eval/build resolves + reports clearly)."""
+    try:
+        from commit0.harness.utils import load_dataset_from_config
+
+        return list(
+            load_dataset_from_config(
+                config["dataset_name"], split=config.get("dataset_split", "test")
+            )
         )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("repo_split validation: could not load dataset (%s)", e)
+        return None
 
 
 def write_commit0_js_config_file(dot_file_path: str, config: dict) -> None:
@@ -200,7 +237,7 @@ def build(
         typer.echo(f"Single-arch build: {highlight(arch, Colors.ORANGE)}")
 
     config = read_commit0_js_config_file(commit0_config_file)
-    check_valid_js(config["repo_split"], JS_SPLIT)
+    check_valid_js(config["repo_split"], JS_SPLIT, _dataset_for_split_check(config))
 
     import commit0.harness.build_js
 
@@ -294,7 +331,7 @@ def evaluate(
     """Evaluate JS repos."""
     check_commit0_js_path()
     config = read_commit0_js_config_file(commit0_config_file)
-    check_valid_js(config["repo_split"], JS_SPLIT)
+    check_valid_js(config["repo_split"], JS_SPLIT, _dataset_for_split_check(config))
     from commit0.harness.evaluate_js import main as evaluate_js_main
 
     if reference:
@@ -321,7 +358,14 @@ def evaluate(
 @commit0_js_app.command(name="lint")
 def lint(
     repo_or_repo_dir: str = typer.Argument(..., help="JS repo to lint"),
-    files: list[str] | None = typer.Option(None, help="Files to lint"),
+    files: list[str] | None = typer.Argument(
+        None,
+        help=(
+            "Files to lint (positional, variadic). aider appends edit-target file "
+            "paths here automatically — must be an Argument, not an Option, or the "
+            "lint_cmd fails with 'Got unexpected extra argument'."
+        ),
+    ),
     commit0_config_file: str = typer.Option(
         ".commit0.js.yaml", help="Path to JS commit0 config"
     ),

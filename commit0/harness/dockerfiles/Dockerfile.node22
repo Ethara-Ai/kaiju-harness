@@ -21,7 +21,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NODE_EXTRA_CA_CERTS=${CA_CERT_PATH} \
     NODE_ENV=test \
     CI=true \
-    npm_config_registry=https://registry.npmjs.org/
+    npm_config_registry=https://registry.npmjs.org/ \
+    npm_config_fetch_retries=5 \
+    npm_config_fetch_retry_factor=2 \
+    npm_config_fetch_retry_mintimeout=10000 \
+    npm_config_fetch_retry_maxtimeout=120000 \
+    npm_config_fetch_timeout=300000
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -36,6 +41,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g typescript@latest ts-node@latest
+
+# Package managers beyond npm. corepack (bundled with Node) provides pnpm/yarn
+# shims whose EXACT version is resolved per-repo from the `packageManager` field
+# at install time, so a Berry repo gets Berry and a classic repo gets classic.
+# Pre-warm pnpm best-effort so the common case is baked in; bun is not
+# corepack-managed, install it globally.
+RUN corepack enable && (corepack prepare pnpm@latest --activate || true)
+RUN npm install -g bun@latest || true
 
 # Cross-distro SSL cert symlinks for libraries that look in RHEL/Fedora paths
 RUN mkdir -p /etc/pki/tls/certs /etc/pki/tls /etc/pki/ca-trust/extracted/pem /etc/ssl/certs && \

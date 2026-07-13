@@ -44,9 +44,10 @@ class TestBaseImageKey:
     def test_base_dockerfile_loads_text(self):
         spec = make_c_spec(_instance())
         df = spec.base_dockerfile
-        assert "FROM ubuntu:24.04" in df
-        assert "clang-18" in df
-        assert "gcc-13" in df
+        # Base image is the gcc:13-bookworm toolchain image (provides gcc-13),
+        # with clang and the cmocka test framework installed via apt.
+        assert "FROM gcc:13-bookworm" in df
+        assert "clang" in df
         assert "libcmocka-dev" in df
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-from agent.agent_utils import SPEC_INFO_HEADER, get_message
+from agent.agent_utils import MODULE_SCOPE_NOTE, SPEC_INFO_HEADER, get_message
 
 
 def _make_agent_config(**overrides: object) -> MagicMock:
@@ -98,7 +98,11 @@ class TestReadmeFallback:
 
         spec_start = message.find(SPEC_INFO_HEADER)
         assert spec_start != -1
+        # The injected region is: SPEC_INFO_HEADER + " " + readme_text, then the
+        # message ends with MODULE_SCOPE_NOTE. Measure only the README region.
         readme_content = message[spec_start + len(SPEC_INFO_HEADER) + 1 :]
+        assert readme_content.endswith(MODULE_SCOPE_NOTE)
+        readme_content = readme_content[: -len(MODULE_SCOPE_NOTE)]
         assert len(readme_content) <= 500
 
     def test_decompress_fails_falls_to_readme(self, tmp_path: Path) -> None:

@@ -8,6 +8,9 @@ applied-edit list must NOT be overridden by a false-positive text parse)."""
 
 from __future__ import annotations
 
+import importlib.util
+
+import pytest
 
 from agent import edit_capture
 from agent.edit_capture import (
@@ -17,6 +20,30 @@ from agent.edit_capture import (
     _make_wrapped_apply_edits,
 )
 from agent.thinking_capture import ThinkingCapture, Turn
+
+
+def _real_aider_coders_available() -> bool:
+    """True only when the REAL aider EditBlockCoder / WholeFileCoder submodules are
+    importable. In the base test env the optional ``[agent]`` extras aren't installed
+    and conftest installs ``sys.modules`` stubs that DO NOT provide the concrete coder
+    submodules (only ``aider.coders.base_coder``). Integration tests below exercise
+    real aider coder behaviour (SEARCH/REPLACE matching, real file writes, raising on
+    mismatch, io.write_text hooking) and cannot be meaningfully unit-tested against the
+    stub, so they are skipped unless real aider is present."""
+    try:
+        return (
+            importlib.util.find_spec("aider.coders.editblock_coder") is not None
+            and importlib.util.find_spec("aider.coders.wholefile_coder") is not None
+        )
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+_requires_real_aider = pytest.mark.skipif(
+    not _real_aider_coders_available(),
+    reason="requires real aider coders (optional [agent] extras not installed; "
+    "conftest stubs don't provide editblock/wholefile coder behaviour)",
+)
 
 
 # --------------------------------------------------------------------------
@@ -169,6 +196,7 @@ class TestApplyEditsWrapper:
         assert Cls.apply_edits is first
         assert getattr(Cls.apply_edits, "_kaiju_original", None) is not None
 
+    @_requires_real_aider
     def test_installs_on_both_real_coders(self):
         # Must patch BOTH the diff coder and the whole-file coder — the rust
         # pipeline runs WholeFileCoder because claude-opus-4-8 is newer than
@@ -239,6 +267,7 @@ class TestFormatterUsesGroundTruth:
         assert self._edits_in(t) == ["src/y.rs"]
 
 
+@_requires_real_aider
 class TestRealEditBlockCoderIntegration:
     """End-to-end against a real aider EditBlockCoder writing a real file."""
 
@@ -276,6 +305,7 @@ class TestRealEditBlockCoderIntegration:
         ]
 
 
+@_requires_real_aider
 class TestRealWholeFileCoderIntegration:
     """End-to-end against a real aider WholeFileCoder — the coder the rust pipeline
     actually runs (claude-opus-4-8 -> default 'whole' edit_format). This is the case
@@ -311,6 +341,7 @@ class TestRealWholeFileCoderIntegration:
         ]
 
 
+@_requires_real_aider
 class TestPartialFailureCapture:
     """The bug the live little-raft run exposed: aider's apply_edits RAISES when a
     SEARCH block doesn't match, and recording input edits after the call missed
@@ -374,6 +405,7 @@ class TestPartialFailureCapture:
         assert sorted(e["path"] for e in tc.turns[-1].applied_edits) == ["a.rs", "b.rs"]
 
 
+@_requires_real_aider
 class TestFullRustWiringIntegration:
     """Definitive end-to-end: the SAME wiring the rust pipeline uses
     (capture_module_calls installs the hook; _apply_thinking_capture_patches sets
@@ -463,6 +495,7 @@ class TestEarlyReturnNoPhantom:
         assert turn.applied_edits is None
         assert self._paths(turn) == ["little_raft/src/replica.rs"]  # parser extracts
 
+    @_requires_real_aider
     def test_active_capture_with_real_apply_records_and_shows_it(self, tmp_path):
         # Active capture + apply_edits fires -> [] gets extended with the real edit.
         install_edit_capture()
@@ -479,10 +512,12 @@ class TestEarlyReturnNoPhantom:
         c.apply_edits([("a.rs", "fn a() { OLD }", "fn a() { NEW }")], dry_run=False)
         assert [e["path"] for e in turn.applied_edits] == ["a.rs"]  # [] extended
 
+    @_requires_real_aider
     def test_full_wiring_early_return_end_to_end(self, tmp_path):
         # The definitive end-to-end: capture_module_calls sets the flag, a turn is
         # captured with a SEARCH block, apply_edits NEVER fires -> output.json has
-        # zero edit events (no phantom).
+        # zero edit events (no phantom). Requires real aider so that
+        # capture_module_calls actually flips edit_capture_active True.
         import json
         from agent.llm_cost_capture import capture_module_calls
         from agent.openhands_formatter import write_module_output_json
@@ -556,6 +591,7 @@ class TestWrittenSafetyNet:
         assert tc.turns[-1].applied_edits == [{"path": "a.rs", "old_str": "o", "new_str": "n"}]
 
 
+@_requires_real_aider
 class TestNoIoLeak:
     """The write_text hook must be fully removed after every apply_edits call —
     including when it raises — leaving the io object byte-for-byte as before."""
@@ -680,6 +716,7 @@ class TestReflectionCapture:
         tc.module_llm_calls["m"] = log
         assert tc.get_module_metrics("m")["num_agent_turns"] == 0    # clamped
 
+    @_requires_real_aider
     def test_install_idempotent_on_real_coder(self):
         from agent.edit_capture import install_reflection_capture
         assert install_reflection_capture() is True

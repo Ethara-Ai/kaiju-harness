@@ -70,7 +70,7 @@ def test_generate_setup_dict_ts(tmp_path: Path) -> None:
     setup_dict, test_dict, test_framework = generate_setup_dict_ts(tmp_path)
 
     assert test_framework == "vitest"
-    assert setup_dict["node"] == "20"
+    assert setup_dict["node_version"] == "20"
     assert setup_dict["install"] == "yarn install"
     assert "@vitest/coverage-v8" in setup_dict["packages"]
     assert "vitest" in setup_dict["packages"]
@@ -80,6 +80,7 @@ def test_generate_setup_dict_ts(tmp_path: Path) -> None:
 
 
 import os
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 MODULE = "tools.prepare_repo_ts"
@@ -143,7 +144,9 @@ class TestDetectSpecUrlEdgeCases:
 
         assert result == "https://my-lib-docs.io"
 
-    def test_npm_registry_exception_falls_to_skypack(self, tmp_path: Path) -> None:
+    def test_npm_registry_exception_returns_empty(self, tmp_path: Path) -> None:
+        # Local homepage is blocked (github.com) and the npm registry probe raises.
+        # No Skypack fallback anymore -> '' (caller skips the scrape cleanly).
         pkg = {"name": "my-lib", "homepage": "https://github.com/o/r"}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
@@ -152,7 +155,7 @@ class TestDetectSpecUrlEdgeCases:
         with patch("urllib.request.urlopen", side_effect=Exception("timeout")):
             result = _detect_spec_url(tmp_path)
 
-        assert result == "https://www.skypack.dev/view/my-lib"
+        assert result == ""
 
     def test_no_name_no_homepage_returns_empty(self, tmp_path: Path) -> None:
         pkg = {"version": "1.0.0"}
@@ -162,9 +165,10 @@ class TestDetectSpecUrlEdgeCases:
 
         assert _detect_spec_url(tmp_path) == ""
 
-    def test_npm_registry_blocked_homepage_falls_to_skypack(
+    def test_npm_registry_blocked_homepage_returns_empty(
         self, tmp_path: Path
     ) -> None:
+        # npm registry homepage is itself blocked (github.com); no CDN fallback -> ''.
         pkg = {"name": "my-lib", "homepage": "https://github.com/o/r"}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
@@ -180,9 +184,10 @@ class TestDetectSpecUrlEdgeCases:
             mock_urlopen.return_value = mock_resp
             result = _detect_spec_url(tmp_path)
 
-        assert result == "https://www.skypack.dev/view/my-lib"
+        assert result == ""
 
-    def test_npm_registry_no_homepage_falls_to_skypack(self, tmp_path: Path) -> None:
+    def test_npm_registry_no_homepage_returns_empty(self, tmp_path: Path) -> None:
+        # npm registry metadata has no homepage at all; no CDN fallback -> ''.
         pkg = {"name": "my-lib", "homepage": "https://github.com/o/r"}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
@@ -198,7 +203,7 @@ class TestDetectSpecUrlEdgeCases:
             mock_urlopen.return_value = mock_resp
             result = _detect_spec_url(tmp_path)
 
-        assert result == "https://www.skypack.dev/view/my-lib"
+        assert result == ""
 
 
 class TestGenerateSetupDictTsEdgeCases:
@@ -256,67 +261,80 @@ class TestGenerateSetupDictTsEdgeCases:
 
 
 class TestForkRepoTsEdgeCases:
-    def test_fork_view_check_raises_exception(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
+    """``fork_repo_ts`` was removed; forking is delegated to the shared
+    ``tools._git_auth.fork_repo`` (re-exported into prepare_repo_ts). These
+    exercise its post-fork poll loop against the ``_gh`` helper, with the
+    pre-flight scope/access checks stubbed out.
+    """
 
-        call_count = [0]
+    @staticmethod
+    def _enter_preflight(stack) -> None:
+        stack.enter_context(patch("tools._git_auth.setup_git_credentials"))
+        stack.enter_context(
+            patch("tools._git_auth.get_github_token", return_value="ghp_fake")
+        )
+        stack.enter_context(patch("tools._git_auth.verify_token_scopes"))
+        stack.enter_context(patch("tools._git_auth.verify_org_write_access"))
+        stack.enter_context(
+            patch("tools._git_auth._is_self_account", return_value=False)
+        )
+        stack.enter_context(patch("time.sleep"))
 
-        def side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            if "view" in cmd and call_count[0] == 1:
-                raise OSError("connection refused")
-            if "fork" in cmd and "--org" in cmd:
-                return MagicMock(returncode=0)
-            if "view" in cmd:
-                return MagicMock(returncode=0)
-            return MagicMock(returncode=0)
+    def test_fork_poll_becomes_ready_after_lag(self) -> None:
+        # Fork missing -> fork ok -> first poll not yet visible -> second poll ready.
+        from tools.prepare_repo_ts import fork_repo
 
-        with patch(f"{MODULE}.subprocess.run", side_effect=side_effect):
-            with patch("time.sleep"):
-                result = fork_repo_ts("owner/repo", "MyOrg")
+        seq = [
+            MagicMock(returncode=1, stdout="", stderr="Not Found"),  # existence check
+            MagicMock(returncode=0, stdout="", stderr=""),  # repo fork
+            MagicMock(returncode=1, stdout="", stderr="Not Found"),  # poll: lagging
+            MagicMock(returncode=0, stdout="{}", stderr=""),  # poll: ready
+        ]
 
-        assert result == "MyOrg/repo"
-
-    def test_fork_poll_loop_exception_retries(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
-
-        call_count = [0]
-
-        def side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            if "view" in cmd and call_count[0] == 1:
-                return MagicMock(returncode=1)
-            if "fork" in cmd:
-                return MagicMock(returncode=0)
-            if "view" in cmd and call_count[0] <= 4:
-                raise OSError("poll failure")
-            return MagicMock(returncode=0)
-
-        with patch(f"{MODULE}.subprocess.run", side_effect=side_effect):
-            with patch("time.sleep"):
-                result = fork_repo_ts("owner/repo", "MyOrg")
+        with ExitStack() as stack:
+            self._enter_preflight(stack)
+            stack.enter_context(patch("tools._git_auth._gh", side_effect=seq))
+            result = fork_repo("owner/repo", "MyOrg", token="ghp_fake")
 
         assert result == "MyOrg/repo"
 
-    def test_fork_poll_all_exceptions_raises_runtime_error(self) -> None:
-        from tools.prepare_repo_ts import fork_repo_ts
+    def test_fork_transient_then_success_retries(self) -> None:
+        # Fork missing -> transient fork failure (rate limit) -> retry succeeds -> poll ready.
+        from tools.prepare_repo_ts import fork_repo
 
-        call_count = [0]
+        seq = [
+            MagicMock(returncode=1, stdout="", stderr="Not Found"),  # existence check
+            MagicMock(returncode=1, stdout="", stderr="API rate limit exceeded"),  # transient
+            MagicMock(returncode=0, stdout="", stderr=""),  # retry fork ok
+            MagicMock(returncode=0, stdout="{}", stderr=""),  # poll ready
+        ]
 
-        def side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            if "view" in cmd and call_count[0] == 1:
-                return MagicMock(returncode=1)
-            if "fork" in cmd:
-                return MagicMock(returncode=0)
-            if "view" in cmd:
-                raise OSError("always fails")
-            return MagicMock(returncode=0)
+        with ExitStack() as stack:
+            self._enter_preflight(stack)
+            stack.enter_context(patch("tools._git_auth._gh", side_effect=seq))
+            result = fork_repo("owner/repo", "MyOrg", token="ghp_fake")
 
-        with patch(f"{MODULE}.subprocess.run", side_effect=side_effect):
-            with patch("time.sleep"):
-                with pytest.raises(RuntimeError, match="not available after"):
-                    fork_repo_ts("owner/repo", "MyOrg")
+        assert result == "MyOrg/repo"
+
+    def test_fork_never_queryable_raises(self) -> None:
+        # Fork created but the poll never sees it before the deadline -> ForkError.
+        from tools.prepare_repo_ts import fork_repo
+        from tools._git_auth import ForkError
+
+        def side_effect(args, **kwargs):
+            joined = " ".join(args)
+            if "repos/MyOrg/repo" in joined:
+                return MagicMock(returncode=1, stdout="", stderr="Not Found")
+            if args[:2] == ["repo", "fork"]:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=1, stdout="", stderr="Not Found")
+
+        with ExitStack() as stack:
+            self._enter_preflight(stack)
+            stack.enter_context(patch("tools._git_auth._gh", side_effect=side_effect))
+            # wait_seconds=0 makes the poll deadline expire immediately.
+            with pytest.raises(ForkError, match="not queryable"):
+                fork_repo("owner/repo", "MyOrg", token="ghp_fake", wait_seconds=0)
 
 
 class TestCreateTsStubBranchEdgeCases:
@@ -588,14 +606,14 @@ class TestPrepareTsRepoEdgeCases:
         from tools.prepare_repo_ts import prepare_ts_repo
 
         with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fake"}):
-            with patch(f"{MODULE}.fork_repo_ts", return_value="Org/repo") as mock_fork:
+            with patch(f"{MODULE}.fork_repo", return_value="Org/repo") as mock_fork:
                 with patch(f"{MODULE}.full_clone", return_value=tmp_path):
                     with patch(f"{MODULE}.detect_ts_src_dir", return_value="src"):
                         with patch(
                             f"{MODULE}.generate_setup_dict_ts",
                             return_value=(
                                 {
-                                    "node": "20",
+                                    "node_version": "20",
                                     "install": "npm install",
                                     "packages": [],
                                     "pre_install": [],
@@ -607,7 +625,7 @@ class TestPrepareTsRepoEdgeCases:
                         ):
                             with patch(
                                 f"{MODULE}.create_ts_stubbed_branch",
-                                return_value=("base", "ref", 1),
+                                return_value=("base", "ref", 1, True),
                             ):
                                 with patch(f"{MODULE}.git"):
                                     with patch(f"{MODULE}.push_to_fork") as mock_push:
@@ -630,7 +648,7 @@ class TestPrepareTsRepoEdgeCases:
                     f"{MODULE}.generate_setup_dict_ts",
                     return_value=(
                         {
-                            "node": "20",
+                            "node_version": "20",
                             "install": "npm install",
                             "packages": [],
                             "pre_install": [],
@@ -642,7 +660,7 @@ class TestPrepareTsRepoEdgeCases:
                 ):
                     with patch(
                         f"{MODULE}.create_ts_stubbed_branch",
-                        return_value=("base", "ref", 1),
+                        return_value=("base", "ref", 1, True),
                     ):
                         result = prepare_ts_repo(
                             "owner/repo",
@@ -798,6 +816,7 @@ class TestMainEntryPoint:
             src_dir_override="lib",
             release_tag="v2.0.0",
             dry_run=True,
+            specs_dir="./specs",
         )
 
 

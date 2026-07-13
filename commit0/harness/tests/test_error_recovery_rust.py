@@ -44,25 +44,51 @@ class TestDockerBuildErrorRecovery:
 AGENTS_MODULE = "agent.agents"
 
 
+def _install_agents_import_stubs():
+    """Install lightweight stubs for agent.agents' optional module-load deps.
+
+    agent.agents pulls in aider (+ submodules) and import_deps at import time;
+    these are optional deps absent from the test env. Stubs are installed
+    directly (setdefault) rather than via patch.dict on sys.modules, because
+    restoring sys.modules after importing the heavy agent.agents/litellm graph
+    segfaults under CPython 3.13's mock _clear_dict teardown. Leaving these
+    resident is harmless — they only satisfy import-time `from X import Y`.
+    """
+    import sys
+
+    for _name in (
+        "aider",
+        "aider.coders",
+        "aider.coders.base_coder",
+        "aider.models",
+        "aider.io",
+        "import_deps",
+    ):
+        sys.modules.setdefault(_name, MagicMock())
+
+
 class TestAgentsPricingRecovery:
     def test_boto3_failure_falls_back_to_static_map(self):
         """When boto3 resolution fails, static map is used."""
-        mock_boto3 = MagicMock()
-        mock_boto3.client.side_effect = Exception("No credentials")
+        _install_agents_import_stubs()
+        from agent.agents import register_bedrock_arn_pricing
 
-        with patch.dict("sys.modules", {"boto3": mock_boto3}):
-            from agent.agents import register_bedrock_arn_pricing
-
-            # Should not raise
+        # Simulate a boto3 resolution failure. boto3 is imported inside the
+        # function and used as boto3.client(...); patch that directly rather
+        # than swapping the whole module via patch.dict on sys.modules (whose
+        # teardown segfaults under CPython 3.13 mock after this heavy import).
+        with patch("boto3.client", side_effect=Exception("No credentials")):
+            # Should not raise — falls back to the static ARN->base-model map.
             register_bedrock_arn_pricing(
                 "arn:aws:bedrock:us-east-1:123456:inference-profile/us.anthropic.claude-sonnet-4-20250514-v1:0"
             )
 
     def test_no_arn_returns_early(self):
         """Non-ARN model names should return without any boto3 calls."""
+        _install_agents_import_stubs()
         from agent.agents import register_bedrock_arn_pricing
 
-        # Should be a no-op
+        # Should be a no-op (non-ARN name returns before any boto3/litellm use)
         register_bedrock_arn_pricing("gpt-4")
 
 

@@ -159,6 +159,30 @@ class TestInlinedHelpers:
         (tmp_path / ".done").touch()
         assert run_agent_js_module._is_module_done(tmp_path) is True
 
+
+class TestDiscoverJsTestFiles:
+    def test_finds_ava_root_test_js(self, tmp_path: Path) -> None:
+        # ava convention: a bare test.js at the repo ROOT. This is exactly the
+        # slugify case that made stage 3 do zero work (canonical ids are bare
+        # case-names -> no file -> all skipped). Discovery must find it.
+        (tmp_path / "test.js").write_text("test('x', t => t.pass())")
+        (tmp_path / "index.js").write_text("export default 1")
+        found = run_agent_js_module._discover_js_test_files(str(tmp_path), ".")
+        assert found == ["test.js"]
+
+    def test_finds_jest_pattern_and_test_dir(self, tmp_path: Path) -> None:
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "foo.test.js").write_text("x")
+        (tmp_path / "test").mkdir()
+        (tmp_path / "test" / "bar.js").write_text("x")
+        found = set(run_agent_js_module._discover_js_test_files(str(tmp_path), "."))
+        assert os.path.join("src", "foo.test.js") in found
+        assert os.path.join("test", "bar.js") in found
+
+    def test_empty_when_no_tests(self, tmp_path: Path) -> None:
+        (tmp_path / "index.js").write_text("export default 1")
+        assert run_agent_js_module._discover_js_test_files(str(tmp_path), ".") == []
+
     def test_mark_module_done_creates_done_file(self, tmp_path: Path) -> None:
         target = tmp_path / "nested" / "mod"
         run_agent_js_module._mark_module_done(target)
@@ -191,17 +215,25 @@ class TestByteEquivalenceDriftGuard:
 
 
 class TestModuleSlug:
-    def test_strips_js_ext(self) -> None:
-        assert run_agent_js_module._js_module_slug("src/foo.js") == "src__foo"
+    # The slug RETAINS the extension (folded into the name) so dual-package files
+    # differing only by extension don't collide into one log dir. See _js_module_slug.
+    def test_retains_js_ext(self) -> None:
+        assert run_agent_js_module._js_module_slug("src/foo.js") == "src__foo_js"
 
-    def test_strips_jsx_ext(self) -> None:
-        assert run_agent_js_module._js_module_slug("a/b.jsx") == "a__b"
+    def test_retains_jsx_ext(self) -> None:
+        assert run_agent_js_module._js_module_slug("a/b.jsx") == "a__b_jsx"
 
-    def test_strips_mjs_ext(self) -> None:
-        assert run_agent_js_module._js_module_slug("c.mjs") == "c"
+    def test_retains_mjs_ext(self) -> None:
+        assert run_agent_js_module._js_module_slug("c.mjs") == "c_mjs"
 
     def test_replaces_dots(self) -> None:
-        assert run_agent_js_module._js_module_slug("a.b.c.js") == "a_b_c"
+        assert run_agent_js_module._js_module_slug("a.b.c.js") == "a_b_c_js"
+
+    def test_extension_variants_do_not_collide(self) -> None:
+        slug = run_agent_js_module._js_module_slug
+        assert slug("src/foo.js") != slug("src/foo.mjs")
+        assert slug("src/foo.js") != slug("src/foo.cjs")
+        assert len({slug(f"src/foo{e}") for e in (".js", ".mjs", ".cjs", ".jsx")}) == 4
 
 
 class TestDockerMockedAtBoundary:

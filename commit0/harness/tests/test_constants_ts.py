@@ -119,9 +119,14 @@ class TestConstants:
         assert "*.spec.ts" in TS_TEST_FILE_PATTERNS
 
     def test_node_versions(self):
+        # Support spans old-to-new libs: Node 18 (older pins) through 24. The
+        # default stays on an LTS (20); the set is intentionally wide so batch
+        # runs over diverse libraries never fail image selection on version.
         assert "20" in SUPPORTED_NODE_VERSIONS
         assert "22" in SUPPORTED_NODE_VERSIONS
-        assert "18" not in SUPPORTED_NODE_VERSIONS
+        assert "18" in SUPPORTED_NODE_VERSIONS
+        assert "24" in SUPPORTED_NODE_VERSIONS
+        assert DEFAULT_NODE_VERSION in SUPPORTED_NODE_VERSIONS
 
     def test_gitignore_entries(self):
         assert "node_modules/" in TS_GITIGNORE_ENTRIES

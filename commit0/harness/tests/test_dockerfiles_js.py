@@ -59,13 +59,13 @@ class TestExtractAptPackages:
 
 
 class TestGetDockerfileBase:
-    @pytest.mark.parametrize("v", [20, 22])
+    @pytest.mark.parametrize("v", [18, 20, 22, 24])
     def test_supported_versions(self, v: int) -> None:
         out = get_dockerfile_base(v)
         assert isinstance(out, str)
         assert len(out) > 0
 
-    @pytest.mark.parametrize("v", [16, 18, 19, 21, 23, 99, 0, -1])
+    @pytest.mark.parametrize("v", [16, 17, 19, 21, 23, 25, 99, 0, -1])
     def test_unsupported_versions_raise(self, v: int) -> None:
         with pytest.raises(ValueError, match="Unsupported Node version"):
             get_dockerfile_base(v)

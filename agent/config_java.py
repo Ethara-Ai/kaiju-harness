@@ -23,6 +23,11 @@ class JavaAgentConfig:
     )
     compile_check: bool = True
     run_tests: bool = True
+    # Stage 2 (lint) selector — mirrors python/go/rust/c/js. When True the agent
+    # runs the compile/lint command FIRST and drives fixes from its errors
+    # (lint_first) instead of re-sending the draft "implement stubs" prompt. Stage 1
+    # (draft) and stage 3 (tests) leave this False.
+    run_entire_dir_lint: bool = False
     build_system: Optional[str] = None
     java_version: str = "17"
     cache_prompts: bool = True

@@ -62,13 +62,18 @@ def _strip_log_unsafe_chars(text: str) -> str:
 def _inject_test_ids(eval_script: str, test_ids: str, framework: str) -> str:
     if not test_ids:
         return eval_script
-    if framework == _NODE_TEST_FRAMEWORK:
-        raise ValueError(
-            "Per-test ID selection is not supported for the node:test runner. "
-            "node:test treats positional arguments as file paths, not test "
-            "names. Use --test-name-pattern at the runner level instead, or "
-            "drop the test_ids argument for this repo."
+    if framework in (_NODE_TEST_FRAMEWORK, "ava"):
+        # node:test and AVA select tests by pattern (`--test-name-pattern` / AVA
+        # `--match`), NOT positional args (positionals are file paths/globs). Per-
+        # test-ID injection is therefore unsupported — run the WHOLE suite and let
+        # the TAP parser + canonical inventory supply the denominator. Running the
+        # full suite is correct (just less selective); raising here would crash the
+        # entire eval for any such repo that happens to have a frozen inventory.
+        _module_logger.warning(
+            "Per-test-ID selection unsupported for %s; running the full suite.",
+            framework,
         )
+        return eval_script
 
     sanitized = test_ids.replace("\n", " ").replace("\r", " ").replace("\x00", "")
     sanitized = _strip_log_unsafe_chars(sanitized)

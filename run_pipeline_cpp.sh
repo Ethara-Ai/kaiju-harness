@@ -1045,7 +1045,10 @@ run_evaluate() {
     # cli_cpp always reads .commit0.cpp.yaml — copy the pipeline config there
     cp "$COMMIT0_CONFIG" "${BASE_DIR}/.commit0.cpp.yaml"
 
+    local eval_artifacts_dir="${LOG_BASE}/${stage_label}_eval_artifacts"
+    mkdir -p "$eval_artifacts_dir"
     local cmd=(
+        env COMMIT0_CPP_LOG_DIR="$eval_artifacts_dir"
         "$VENV_PYTHON" -m commit0.cli_cpp evaluate
         --branch "$branch"
         --timeout "$EVAL_TIMEOUT"
