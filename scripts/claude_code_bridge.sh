@@ -55,6 +55,16 @@ MONITOR_LOG_FILE="${KAIJU_CC_BRIDGE_MONITOR_LOG:-${REPO_ROOT}/logs/claude_code_b
 MONITOR_POLL_SECONDS="${KAIJU_CC_MONITOR_POLL:-30}"
 MONITOR_FAIL_THRESHOLD="${KAIJU_CC_MONITOR_FAILS:-3}"
 
+# Absorb upstream mid-stream drops transparently: buffer the SSE stream and
+# re-issue on a drop so the client (aider) only ever sees a COMPLETE response.
+# A large module (rust src/lib.rs, src/io.rs) that drops mid-generation then
+# completes in ONE turn instead of failing -> .needs_retry -> incomplete run.
+# The client<->bridge connection stays alive via SSE keepalive pings (every 15s)
+# and the pipeline watchdog is connection-aware (won't kill a live-but-idle
+# stream), so the original false-kill concern no longer applies. Default ON;
+# override with KAIJU_CC_BUFFER_AND_RETRY=0 (and KAIJU_CC_STREAM_BUFFER_RETRIES).
+export KAIJU_CC_BUFFER_AND_RETRY="${KAIJU_CC_BUFFER_AND_RETRY:-1}"
+
 _start_bridge_process() {
   mkdir -p "$(dirname "$LOG_FILE")"
   # shellcheck disable=SC2024
