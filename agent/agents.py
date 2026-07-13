@@ -29,8 +29,9 @@ _LLM_TRANSIENT_SIGNALS = (
     "midstreamfallbackerror", "apiconnectionerror", "apitimeouterror",
     "timed out", "read timeout", "connection aborted", "connection reset",
     "server disconnected", "remoteprotocolerror", "incomplete chunked read",
-    "internalservererror", "service unavailable", "bad gateway",
-    "502 ", "503 ", "504 ", "overloaded",
+    "internalservererror", "internal server error",
+    "service unavailable", "bad gateway",
+    "502 ", "503 ", "504 ", "529 ", "overloaded",
     # Bridge/daemon briefly down or restarting (monitor respawns it): the raw
     # socket error can surface WITHOUT the litellm exception name, so match the
     # connection-refused forms directly. Provider-agnostic (both bridges).

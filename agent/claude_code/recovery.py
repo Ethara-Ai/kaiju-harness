@@ -131,8 +131,19 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
             return True
     msg = str(exc).lower()
     if ("rate_limit_error" in msg
-            or "subscription_cap" in msg
-            or "ratelimiterror" in msg):
+            or "ratelimiterror" in msg
+            # Anthropic frequently returns a rate limit wrapped in a 429/500/529
+            # whose TYPE is InternalServerError/MidStreamFallbackError but whose
+            # MESSAGE is "Rate limited" (a SPACE, not the rate_limit_error slug).
+            # Match the human message forms too, else such an error slips off the
+            # rate-limit track AND (bare, unwrapped) off the transient track ->
+            # run_with_recovery re-raises it -> module crashes with NO retry and
+            # NO output.json. These all pause-and-resume on quota reset / failover.
+            or "rate limit" in msg
+            or "rate limited" in msg
+            or "too many requests" in msg
+            or "resource_exhausted" in msg
+            or "subscription_cap" in msg):
         return True
     # Bridge "all accounts exhausted" signal: when every account in a
     # multi-account pool is capped, the bridge short-circuits with a 401
@@ -215,7 +226,21 @@ def _is_transient_network_error(exc: BaseException) -> bool:
         if cls.__name__ in _TRANSIENT_EXC_NAMES:
             return True
     msg = str(exc).lower()
-    return any(sig in msg for sig in _TRANSIENT_MSG_SIGNALS)
+    if any(sig in msg for sig in _TRANSIENT_MSG_SIGNALS):
+        return True
+    # Stay in lock-step with the backstop's comprehensive signal list (agents.py
+    # raise_if_transient_llm_error). Historically the two drifted: agents.py knew
+    # 'internalservererror'/'overloaded'/'service unavailable'/'502-504'/
+    # 'connection refused' but recovery.py did not, so a RAISED form of those
+    # (as opposed to one aider swallowed) was NOT retried -> the module crashed
+    # with no retry. Reuse the SAME list here so a raised error is always retried
+    # whenever a swallowed one would be. Lazy import avoids the agents<->recovery
+    # import cycle. (Rate limits are handled above on their own track first.)
+    try:
+        from agent.agents import _LLM_TRANSIENT_SIGNALS
+        return any(sig in msg for sig in _LLM_TRANSIENT_SIGNALS)
+    except Exception:  # noqa: BLE001 - never let a diagnostic import break recovery
+        return False
 
 
 def _extract_retry_after_from_error(exc: BaseException) -> Optional[int]:
