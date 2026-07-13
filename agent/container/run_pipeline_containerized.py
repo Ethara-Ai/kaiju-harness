@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import platform as _kaiju_platform
 import shlex
 import shutil
 import signal
@@ -38,6 +39,21 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                     format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("pipeline_container")
+
+
+def _detect_host_arch() -> str:
+    override = os.environ.get("KAIJU_PREFLIGHT_ARCH", "").strip()
+    if override:
+        return override
+    m = _kaiju_platform.machine().lower()
+    if m in ("aarch64", "arm64"):
+        return "arm64"
+    if m in ("x86_64", "amd64"):
+        return "amd64"
+    return "amd64"
+
+
+_HOST_ARCH = _detect_host_arch()
 
 DEFAULT_BRIDGE_URL = "http://host.docker.internal:8765"          # Anthropic/Claude Code
 DEFAULT_CODEX_BRIDGE_URL = "http://host.docker.internal:8788"    # OpenAI Codex
@@ -370,6 +386,7 @@ def main(argv=None) -> int:
             try:
                 client.containers.run(
                     "alpine:latest",
+                    platform=f"linux/{_HOST_ARCH}",
                     command=["sh", "-c", f"wget -q --timeout=5 -O- {_bridge_url_container}/healthz || exit 1"],
                     remove=True,
                     extra_hosts=_extra_hosts(),
