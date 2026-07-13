@@ -134,6 +134,7 @@ gcp-*.json
 .venv
 node_modules
 env/
+creds/
 venv/
 ENV/
 env.bak/
