@@ -30,7 +30,7 @@ class JavaRepoInstance(RepoInstance):
 
 # Version support
 JAVA_VERSION_DEFAULT = "17"
-SUPPORTED_JAVA_VERSIONS = {"11", "17", "21"}
+SUPPORTED_JAVA_VERSIONS = {"8", "11", "17", "21"}
 
 # File conventions
 JAVA_SOURCE_EXT = ".java"

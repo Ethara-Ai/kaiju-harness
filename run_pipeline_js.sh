@@ -35,6 +35,10 @@ REPO_BASE_JS="${BASE_DIR}/repos_js"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
+# S11: env-var contract with agent config (which now writes `language: js`
+# under S1). Go/Rust/C++ pipelines export LANGUAGE too; downstream tooling
+# may read either the exported var or the yaml field.
+export LANGUAGE="javascript"
 
 # ============================================================
 # Argument Parsing
@@ -265,8 +269,10 @@ DATASET_SHORT=""
 DATASET_SPLIT="train"
 resolve_dataset_js "$DATASET_ARG"
 
-DATASET_UUID=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[0].get('id','') if d else '')" "$DATASET_FILE" 2>/dev/null || true)
-DATASET_N=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$DATASET_FILE" 2>/dev/null || echo 1)
+# S15: use $VENV_PYTHON for consistency with the rest of the pipeline; a stale
+# system python3 could have a different json parser semantics or be missing.
+DATASET_UUID=$("$VENV_PYTHON" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[0].get('id','') if d else '')" "$DATASET_FILE" 2>/dev/null || true)
+DATASET_N=$("$VENV_PYTHON" -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$DATASET_FILE" 2>/dev/null || echo 1)
 if [[ "$DATASET_N" -gt 1 ]]; then
     echo "[WARNING] dataset has $DATASET_N entries; using entries[0].id ($DATASET_UUID) as folder key. Dataset-level UUIDs deferred (§11 Q1)."
 fi
@@ -342,18 +348,178 @@ verify_inventory_js() {
 }
 
 # ============================================================
+# B3: Spec docs provisioning + verification (mirrors run_pipeline_ts.sh:662-814).
+# Without these functions, USE_SPEC_INFO=true on JS was silently a no-op because
+# the agent never received spec.pdf(.bz2) files in each repo, degrading model
+# performance without any error signal. Now: mirror TS behaviour exactly.
+# ============================================================
+ensure_spec_docs_js() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        log "  Spec docs disabled — skipping."
+        return 0
+    fi
+    log "Ensuring spec docs are available for all JS repos..."
+    "$VENV_PYTHON" - "$DATASET_FILE" "$REPO_BASE_JS" "." <<'PYEOF'
+import json, os, sys, shutil
+
+dataset_file = sys.argv[1]
+repo_base    = sys.argv[2]
+base_dir     = sys.argv[3]
+
+if dataset_file.endswith(".json") or os.path.isfile(dataset_file):
+    with open(dataset_file) as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "data" in data:
+        entries = data["data"]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        entries = []
+else:
+    entries = []
+
+if not entries:
+    print("  No dataset entries found — skipping spec provisioning.")
+    sys.exit(0)
+
+specs_dir = os.path.join(base_dir, "specs")
+os.makedirs(specs_dir, exist_ok=True)
+
+for entry in entries:
+    repo = entry.get("repo", "")
+    repo_name = repo.split("/")[-1]
+    repo_dir = os.path.join(repo_base, repo_name)
+    if not os.path.isdir(repo_dir):
+        print(f"  SKIP {repo_name}: repo dir not found at {repo_dir}")
+        continue
+    bz2_in_repo = os.path.join(repo_dir, "spec.pdf.bz2")
+    pdf_in_repo = os.path.join(repo_dir, "spec.pdf")
+    if os.path.exists(bz2_in_repo) or os.path.exists(pdf_in_repo):
+        print(f"  OK   {repo_name}: spec already present")
+        continue
+    spec_url = None
+    setup = entry.get("setup", {})
+    if isinstance(setup, dict):
+        spec_url = setup.get("specification")
+    if not spec_url:
+        print(f"  SKIP {repo_name}: no specification URL in dataset entry")
+        continue
+    cached_bz2 = os.path.join(specs_dir, f"{repo_name}.pdf.bz2")
+    cached_pdf = os.path.join(specs_dir, f"{repo_name}.pdf")
+    if os.path.exists(cached_bz2):
+        shutil.copy2(cached_bz2, bz2_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_bz2}")
+        continue
+    if os.path.exists(cached_pdf):
+        shutil.copy2(cached_pdf, pdf_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_pdf}")
+        continue
+    print(f"  SCRAPE {repo_name}: {spec_url}")
+    try:
+        from tools.scrape_pdf import scrape_spec
+        result = scrape_spec(base_url=spec_url, name=repo_name, output_dir=specs_dir, compress=True)
+        if result and os.path.exists(result):
+            shutil.copy2(result, bz2_in_repo)
+            print(f"  OK   {repo_name}: scraped and placed spec.pdf.bz2")
+        else:
+            print(f"  WARN {repo_name}: scrape returned no output")
+    except Exception as e:
+        print(f"  WARN {repo_name}: scrape failed: {e}")
+PYEOF
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log "  WARNING: Spec doc provisioning had errors (rc=$rc) — continuing anyway."
+    fi
+}
+
+verify_spec_docs_js() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        return 0
+    fi
+    log "Verifying all JS repos have spec docs..."
+    local missing=0
+    local missing_repos=""
+    local repo_list
+    repo_list=$(_PIPELINE_DATASET_FILE="$DATASET_FILE" "$VENV_PYTHON" -c "
+import json, os
+with open(os.environ['_PIPELINE_DATASET_FILE']) as f:
+    data = json.load(f)
+if isinstance(data, dict) and 'data' in data:
+    data = data['data']
+for item in data:
+    print(item['repo'].split('/')[-1])
+" 2>/dev/null || true)
+    if [[ -z "$repo_list" ]]; then
+        log "  WARNING: Could not enumerate repos for spec verification."
+        return 0
+    fi
+    while IFS= read -r repo; do
+        [[ -z "$repo" ]] && continue
+        local repo_dir="${REPO_BASE_JS}/${repo}"
+        if [[ ! -d "$repo_dir" ]]; then
+            continue
+        fi
+        if [[ ! -f "${repo_dir}/spec.pdf" ]] && [[ ! -f "${repo_dir}/spec.pdf.bz2" ]]; then
+            log "  MISSING spec: ${repo}"
+            missing=$((missing + 1))
+            missing_repos="${missing_repos}  - ${repo}\n"
+        else
+            log "  OK spec: ${repo}"
+        fi
+    done <<< "$repo_list"
+    if [[ "$missing" -gt 0 ]]; then
+        log ""
+        log "======================================================================"
+        log "FATAL: ${missing} JS repo(s) missing spec docs (use_spec_info=true)."
+        log "  Options:"
+        log "    1. Place spec.pdf or spec.pdf.bz2 in each repo directory"
+        log "    2. Add 'specification' URLs to the dataset JSON and re-run"
+        log "    3. Use --no-spec-info to run without spec context"
+        log "======================================================================"
+        return 1
+    fi
+    log "  All JS repos have spec docs."
+}
+
+# ============================================================
 # Preflight Checks
 # ============================================================
 
 preflight() {
     local errors=0
 
-    for cmd in jq bc timeout; do
+    # S6: macOS Docker Desktop ships the CLI at a non-PATH location. Auto-add
+    # it so `command -v docker` succeeds without user intervention (matches
+    # run_pipeline_go.sh / run_pipeline_rust.sh).
+    if [[ "$(uname -s)" == "Darwin" ]] && ! command -v docker &>/dev/null; then
+        for _p in "/Applications/Docker.app/Contents/Resources/bin" "/usr/local/bin" "/opt/homebrew/bin"; do
+            if [[ -x "$_p/docker" ]]; then
+                export PATH="$_p:$PATH"
+                echo "Info: added Docker CLI at $_p to PATH"
+                break
+            fi
+        done
+    fi
+
+    for cmd in jq bc timeout docker node npm; do
+        # S4: node/npm are required for build/test/eval; probing them here
+        # surfaces missing toolchain BEFORE we spend LLM budget on the agent run.
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: Required command '$cmd' not found"
             errors=$((errors + 1))
         fi
     done
+
+    # S5: docker CLI present but daemon unreachable is a common failure mode
+    # (Docker Desktop not started on macOS, service down on Linux). Fail fast
+    # so the pipeline doesn't crash mid-eval after the LLM budget is spent.
+    if command -v docker &>/dev/null; then
+        if ! docker info &>/dev/null; then
+            echo "Error: docker CLI is present but docker daemon is not reachable"
+            echo "       (start Docker Desktop or the docker service and retry)"
+            errors=$((errors + 1))
+        fi
+    fi
 
     if [[ ! -x "$VENV_PYTHON" ]]; then
         echo "Error: Python venv not found at $VENV_PYTHON"
@@ -659,6 +825,7 @@ blind_lint: ${BLIND_LINT}
 blind_tests: ${BLIND_TESTS}
 names_only_tests: ${NAMES_ONLY_TESTS}
 strip_non_stubs: ${STRIP_NON_STUBS}
+language: js
 EOF
     log "  Wrote JS agent config: ${AGENT_CONFIG}"
 }
@@ -680,11 +847,33 @@ AGENT_RC=0
 # (_mark_module_done), so the count converges to 0 unless GENUINELY persistent.
 # Args: <log_dir> <agent_log> -- <base agent command...>  (command WITHOUT
 # --override-previous-changes, which would reset the branch and discard progress).
+# Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
+# .needs_retry means the agent was killed mid-post-processing (typically by the
+# inactivity watchdog after aider finished a turn but before _mark_module_done
+# ran). Auto-resume detection uses `.needs_retry` files, so limbo modules would
+# be silently skipped without this sweep. Convert them so auto-resume re-runs them.
+_sweep_limbo_modules() {
+    local _ld="$1"
+    [[ -d "$_ld" ]] || return 0
+    local _swept=0 _aider _moddir
+    while IFS= read -r _aider; do
+        _moddir=$(dirname "$_aider")
+        if [[ ! -f "$_moddir/.done" && ! -f "$_moddir/.needs_retry" ]]; then
+            echo "limbo (agent killed mid-postprocessing, no .done marker)" > "$_moddir/.needs_retry"
+            _swept=$((_swept + 1))
+        fi
+    done < <(find "$_ld" -type f -name aider.log 2>/dev/null)
+    if [[ "$_swept" -gt 0 ]]; then
+        log "  SWEEP: converted ${_swept} limbo module(s) to .needs_retry (had aider.log but neither .done nor .needs_retry)"
+    fi
+}
+
 _auto_resume_agent() {
     local _ld="$1" _alog="$2"; shift 2
     [[ "${1:-}" == "--" ]] && shift
     local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
-    _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
     while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
         _auto=$((_auto + 1))
         log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
@@ -703,7 +892,8 @@ _auto_resume_agent() {
         set -e
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
-        _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
@@ -758,7 +948,7 @@ run_agent_js() {
         log "  Agent killed by watchdog after ${AGENT_ELAPSED}s"
     elif [[ $AGENT_RC -ne 0 ]]; then
         log "  Agent FAILED (rc=${AGENT_RC}) in ${AGENT_ELAPSED}s — last 20 lines:"
-        tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
+        tail -20 "$agent_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
     else
         log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
     fi
@@ -784,7 +974,11 @@ run_evaluate_js() {
         "$VENV_PYTHON" -m commit0.cli_js evaluate
         --branch "$branch"
         --backend "$BACKEND"
-        --timeout 300
+        # S7: env-configurable inner eval timeout (was hardcoded 300s). Some
+        # JS/TS repos have slow npm install + long test suites; the operator
+        # can raise this to avoid spurious TEST_SUITE_TIMEOUT scoring. Default
+        # 600s (higher than Go's due to npm install overhead).
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-600}"
         --num-cpus 1
         --num-workers 1
         --commit0-config-file "$COMMIT0_JS_CONFIG"
@@ -817,7 +1011,7 @@ run_evaluate_js() {
 
     if [[ $eval_rc -ne 0 ]]; then
         log "  Evaluation FAILED — last 10 lines:"
-        tail -10 "$eval_log" | while IFS= read -r line; do log "    | $line"; done
+        tail -10 "$eval_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
     fi
 }
 
@@ -1433,6 +1627,12 @@ run_single_sample() {
 
     if [[ "$sample_idx" -eq 1 ]]; then
         preflight
+        # B3: spec docs must be provisioned (best-effort) and verified (fatal if
+        # USE_SPEC_INFO=true) BEFORE inventory verification, matching TS driver.
+        ensure_spec_docs_js
+        if ! verify_spec_docs_js; then
+            return 1
+        fi
         if ! verify_inventory_js; then
             return 1
         fi

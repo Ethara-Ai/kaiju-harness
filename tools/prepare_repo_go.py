@@ -118,7 +118,10 @@ def full_clone(
             git(repo_dir, "fetch", "--unshallow", check=False, timeout=300)
         if tag:
             git(repo_dir, "fetch", "--tags", timeout=120)
-            git(repo_dir, "checkout", tag, check=False)
+            # check=True: a tag that can't be resolved (deleted/renamed) must
+            # FAIL, not silently leave HEAD on the default-branch tip — otherwise
+            # reference_commit/base_commit are pinned to the WRONG commit.
+            git(repo_dir, "checkout", tag, check=True)
         else:
             # Reused non-tag clone: reset to pristine default so create_stubbed_branch
             # records the ORIGINAL code as reference_commit (a prior prep may have left
@@ -147,7 +150,10 @@ def full_clone(
         cmd = ["git", "clone", url, str(repo_dir)]
         subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=True)
         if tag:
-            git(repo_dir, "checkout", tag, check=False)
+            # check=True: a tag that can't be resolved (deleted/renamed) must
+            # FAIL, not silently leave HEAD on the default-branch tip — otherwise
+            # reference_commit/base_commit are pinned to the WRONG commit.
+            git(repo_dir, "checkout", tag, check=True)
 
     return repo_dir
 
@@ -246,6 +252,7 @@ def create_stubbed_branch(
             " ..." if len(_cgo_files) > 5 else "",
         )
     stubbed_count = 0
+    stub_failures: list[str] = []
     for go_file in repo_dir.rglob("*.go"):
         rel = go_file.relative_to(repo_dir)
         # N2: `internal` skipped for parity with tools/stub_go.SKIP_DIRS and
@@ -256,15 +263,37 @@ def create_stubbed_branch(
             continue
         if go_file.name.endswith("_test.go") or go_file.name == "doc.go":
             continue
-        result = subprocess.run(
-            [str(gostubber_bin), str(go_file)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        # A file gostubber cannot process (parse error, timeout, unsupported
+        # construct) is NOT harmless: skipping it leaves its FULL reference
+        # implementation in the "stubbed" base, leaking the answer to the agent.
+        # Track every failure and fail loud below rather than silently ship it.
+        try:
+            result = subprocess.run(
+                [str(gostubber_bin), str(go_file)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            stub_failures.append(f"{rel} (timeout >30s)")
+            logger.error("  gostubber TIMEOUT on %s (>30s) — impl left unstubbed", rel)
+            continue
         if result.returncode == 0:
             stubbed_count += 1
+        else:
+            stub_failures.append(str(rel))
+            logger.error(
+                "  gostubber FAILED on %s (rc=%d): %s",
+                rel, result.returncode, (result.stderr or "").strip()[:300],
+            )
     logger.info("  Stubbed %d Go files", stubbed_count)
+    if stub_failures:
+        raise RuntimeError(
+            f"gostubber failed on {len(stub_failures)} file(s) in {full_name}: "
+            f"{stub_failures[:10]}"
+            f"{' ...' if len(stub_failures) > 10 else ''} — refusing to ship a task "
+            f"that would leak these implementations. Fix the stubber or exclude the repo."
+        )
 
     logger.info("  Running goimports to clean unused imports...")
     goimports_bin = _find_goimports()
@@ -305,13 +334,20 @@ def create_stubbed_branch(
         logger.info(
             "  Diff stats — lines added: %d, lines removed: %d", additions, deletions
         )
-        # Only fail when NOTHING changed. A one-sided diff (e.g. additions==0 for a
-        # removal-heavy stub) is legitimate; requiring both >0 false-failed those.
-        if additions == 0 and deletions == 0:
+        # Gate on EVIDENCE that function bodies were actually replaced (stub
+        # markers present in the diff), NOT on raw line deltas. gostubber strips
+        # doc comments even when it stubs zero bodies, so a comment-only diff
+        # (additions/deletions > 0) could otherwise pass a base that is
+        # functionally identical to reference — a trivial auto-pass task. The
+        # marker is the gostubber sentinel `"STUB: not implemented"`.
+        stub_markers = diff_patch.count("STUB: not implemented")
+        if stub_markers == 0:
             raise RuntimeError(
-                f"Stubbing verification failed for {full_name}: "
-                f"additions={additions}, deletions={deletions} (no change at all)."
+                f"Stubbing verification failed for {full_name}: no stub markers in "
+                f"the diff (additions={additions}, deletions={deletions}) — no function "
+                f"body was replaced, so the base is functionally identical to reference."
             )
+        logger.info("  Stub markers placed: %d", stub_markers)
 
         git(repo_dir, "commit", "-m", "Commit 0")
         base_commit = get_head_sha(repo_dir)
@@ -559,7 +595,15 @@ def prepare_single_repo(
         go_info = detect_go_module(repo_dir)
 
         if not go_info.get("module_path"):
-            logger.warning("  No go.mod found — skipping %s", full_name)
+            # B4: GOPATH-era Go repos (pre-Go 1.11, no go.mod) are unsupported.
+            # Previously logged 'warning' and silently returned None, so entire
+            # batches could quietly drop repos without any error signal. Now:
+            # log at ERROR level so the batch driver surfaces it explicitly.
+            logger.error(
+                "  UNSUPPORTED_LAYOUT: %s has no go.mod (GOPATH-era repo)."
+                " commit0 requires Go modules. Skipping.",
+                full_name,
+            )
             return None
 
         base_commit, reference_commit = create_stubbed_branch(repo_dir, full_name)
@@ -583,10 +627,14 @@ def prepare_single_repo(
         # Capture the canonical test inventory (`go test -list ./...`) on the
         # stubbed base (repo is on commit0_all here) and save it as
         # commit0/data/test_ids/<repo>.bz2 — the AUTHORITATIVE denominator
-        # evaluate_go scores against. Keyed by the repo basename, matching what
-        # get_go_test_ids looks up. Best-effort: never aborts prep.
+        # evaluate_go scores against. Key by the FORK basename, because that is
+        # exactly what the eval looks up (`evaluate_go` derives repo_name from the
+        # dataset entry's `repo` field == forked_name). Keying by the original
+        # basename silently mismatched whenever GitHub suffixed the fork on an
+        # org-name collision (`name` -> `name-1`), leaving eval to fall back to
+        # the observed count (Issue 1). Best-effort: never aborts prep.
         _capture_go_test_ids(
-            repo_dir, build_test_dict(repo_dir)["test_cmd"], full_name.split("/")[-1]
+            repo_dir, build_test_dict(repo_dir)["test_cmd"], forked_name.split("/")[-1]
         )
 
         if not dry_run:
@@ -794,6 +842,15 @@ def main() -> None:
     _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     setup_git_credentials(dry_run=args.dry_run)
+
+    # Host-side prep runs `go build`/`go test -list` on the HOST toolchain, which
+    # can differ from the eval container's Go (constants_go.GO_VERSION). Force
+    # GOTOOLCHAIN=auto so Go self-selects the toolchain each repo's go.mod
+    # requires — same selection the container makes — instead of silently failing
+    # the base-compile / inventory capture on a host that is too old (which then
+    # feeds the empty-inventory 0/N path). setdefault: respect an explicit
+    # operator override.
+    os.environ.setdefault("GOTOOLCHAIN", "auto")
 
     args.clone_dir.mkdir(parents=True, exist_ok=True)
 

@@ -711,7 +711,11 @@ class TestCreateTsStubBranchPkgManager:
         assert install_call[0][0][0] == "pnpm"
         assert "install" in install_call[0][0]
 
-    def test_bun_install_no_ignore_scripts(self, tmp_path: Path) -> None:
+    def test_bun_install_uses_ignore_scripts(self, tmp_path: Path) -> None:
+        # H2: with bun.lockb present, TS now uses the frozen install variant
+        # which mirrors JS: `bun install --frozen-lockfile --ignore-scripts`.
+        # Previously the test locked in the old generating-only behaviour that
+        # excluded --ignore-scripts for bun. Post-parity, it's included.
         src = tmp_path / "src"
         src.mkdir()
         (src / "main.ts").write_text("")
@@ -749,7 +753,8 @@ class TestCreateTsStubBranchPkgManager:
 
         install_cmd = mock_subproc.call_args[0][0]
         assert install_cmd[0] == "bun"
-        assert "--ignore-scripts" not in install_cmd
+        assert "--ignore-scripts" in install_cmd
+        assert "--frozen-lockfile" in install_cmd
 
 
 # ---------------------------------------------------------------------------

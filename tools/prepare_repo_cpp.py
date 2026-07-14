@@ -79,6 +79,67 @@ _CPP_EXTENSIONS = {".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++",
 _SKIP_DIRS = {"build", "cmake-build-debug", "cmake-build-release", "builddir",
               ".cache", "_deps", "third_party", "vendor", "extern", "bundled", ".git"}
 
+CPPSTUBBER_SRC = TOOLS_DIR / "cppstubber"
+CPPSTUBBER_BUILD_DIR = CPPSTUBBER_SRC / "build"
+
+
+def _ensure_cppstubber_fresh() -> None:
+    """H6: Rebuild cppstubber if the binary is missing or STALE vs source.
+
+    Same class of bug as [[agent_image_stale_code]] and the ruststubber
+    freshness check at tools/prepare_repo_rust.py:68. Previously the cpp
+    prep silently ran with whatever binary happened to be on disk — a fix
+    that lived in .cpp/.h/.hpp source but wasn't compiled into the artifact
+    would leave the agent working against buggy stubs while the run looked
+    normal."""
+    src_root = CPPSTUBBER_SRC
+    if not src_root.is_dir():
+        return  # nothing to build; downstream will fall back to tree-sitter
+    newest_src = 0.0
+    _WATCH_EXT = (".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".txt", ".cmake")
+    for f in src_root.rglob("*"):
+        if not f.is_file():
+            continue
+        if "build" in f.parts:
+            continue
+        if f.suffix.lower() not in _WATCH_EXT and f.name != "CMakeLists.txt":
+            continue
+        try:
+            newest_src = max(newest_src, f.stat().st_mtime)
+        except OSError:
+            continue
+    bin_mtime = CPPSTUBBER.stat().st_mtime if CPPSTUBBER.exists() else -1.0
+    if CPPSTUBBER.exists() and bin_mtime >= newest_src:
+        return  # up to date
+    reason = "missing" if not CPPSTUBBER.exists() else "stale (source newer than binary)"
+    logger.info("cppstubber binary %s — rebuilding via cmake…", reason)
+    CPPSTUBBER_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        cfg = subprocess.run(
+            ["cmake", "-S", str(src_root), "-B", str(CPPSTUBBER_BUILD_DIR), "-DCMAKE_BUILD_TYPE=Release"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if cfg.returncode != 0:
+            logger.warning(
+                "cppstubber cmake configure failed (rc=%s); downstream will fall back to tree-sitter.\nstderr: %s",
+                cfg.returncode, cfg.stderr[-2000:],
+            )
+            return
+        bld = subprocess.run(
+            ["cmake", "--build", str(CPPSTUBBER_BUILD_DIR), "--config", "Release", "-j"],
+            capture_output=True, text=True, timeout=900,
+        )
+        if bld.returncode != 0 or not CPPSTUBBER.exists():
+            logger.warning(
+                "cppstubber build failed (rc=%s, binary=%s); downstream will fall back to tree-sitter.\nstderr: %s",
+                bld.returncode, CPPSTUBBER.exists(), bld.stderr[-2000:],
+            )
+            return
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("cppstubber rebuild raised %s; downstream will fall back to tree-sitter.", e)
+        return
+    logger.info("cppstubber rebuilt: %s", CPPSTUBBER)
+
 
 
 
@@ -423,27 +484,38 @@ def generate_compile_commands(
             shutil.copy2(str(cc_json), str(repo_dir / "compile_commands.json"))
             return True
 
-    elif build_system == "autotools":
-        for step in [["autoreconf", "-fi"], ["./configure"]]:
-            result = subprocess.run(
-                step, cwd=repo_dir, capture_output=True, text=True, timeout=300,
+    elif build_system in ("autotools", "make"):
+        # M7: `bear` is used to wrap make and capture compile_commands.json.
+        # Previously the code called `bear -- make -j4` unconditionally; if
+        # bear was missing (which is common on stock ubuntu/mac images), the
+        # subprocess.run raised FileNotFoundError deep in the pipeline with a
+        # cryptic error and no actionable message. Now: probe once, fall back
+        # to plain `make` (loses compile_commands.json but keeps the build).
+        _bear = shutil.which("bear")
+        if _bear is None:
+            logger.warning(
+                "  `bear` is not installed — falling back to plain `make -j4`."
+                " compile_commands.json will NOT be generated for %s repos,"
+                " so the stubber will fall back to tree-sitter parsing.",
+                build_system,
             )
-            if result.returncode != 0:
-                logger.warning("%s failed: %s", step[0], result.stderr[:300])
-        result = subprocess.run(
-            ["bear", "--", "make", "-j4"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=600,
-        )
-        if result.returncode != 0:
-            logger.warning("bear -- make failed: %s", result.stderr[:500])
+            _make_prefix: list[str] = []
+        else:
+            _make_prefix = [_bear, "--"]
 
-    elif build_system == "make":
+        if build_system == "autotools":
+            for step in [["autoreconf", "-fi"], ["./configure"]]:
+                result = subprocess.run(
+                    step, cwd=repo_dir, capture_output=True, text=True, timeout=300,
+                )
+                if result.returncode != 0:
+                    logger.warning("%s failed: %s", step[0], result.stderr[:300])
         result = subprocess.run(
-            ["bear", "--", "make", "-j4"],
+            _make_prefix + ["make", "-j4"],
             cwd=repo_dir, capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:
-            logger.warning("bear -- make failed: %s", result.stderr[:500])
+            logger.warning("%s make failed: %s", ("bear --" if _make_prefix else "plain"), result.stderr[:500])
 
     return (repo_dir / "compile_commands.json").exists()
 
@@ -482,6 +554,8 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
     if not src_dir.is_dir():
         logger.error("Source directory not found: %s", src_dir)
         return 0, 0
+    # H6: rebuild cppstubber if stale before checking CPPSTUBBER.exists().
+    _ensure_cppstubber_fresh()
 
     has_compdb = (repo_dir / "compile_commands.json").exists()
 
@@ -1017,8 +1091,16 @@ def create_dataset_entry(
     has_submodules: bool = False,
     base_compiles: "bool | None" = None,
 ) -> dict:
+    # M6: test_dir derivation — previously only stripped a trailing "/src", so
+    # repos where the source root is "include", "lib", or a nested path without
+    # "src" always fell back to ".". Now check a wider set of markers.
     primary_src = src_dirs[0] if src_dirs else "."
-    test_dir = primary_src.rsplit("/src", 1)[0] if "/src" in primary_src else "."
+    _resolved = "."
+    for _marker in ("/src", "/include", "/lib", "/source", "/sources"):
+        if _marker in primary_src:
+            _resolved = primary_src.rsplit(_marker, 1)[0]
+            break
+    test_dir = _resolved or "."
 
     cmake_opts_str = (" " + " ".join(cmake_options)) if cmake_options else ""
     install_cmake = (

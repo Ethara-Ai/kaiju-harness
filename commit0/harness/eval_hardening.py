@@ -25,8 +25,16 @@ Callers pass the language-specific ``revert_targets`` (dirs/files/globs) and
 
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Sequence
+
+# P8: defense-in-depth validator. Callers are contractually required to pass a
+# validated bare git SHA (via _require_commitish), but this function
+# interpolates base_commit directly into the eval bash script. If a future call
+# site forgets to validate, a poisoned dataset entry containing spaces or shell
+# metachars would inject arbitrary commands into the container. Enforce here.
+_SHA_HEX_RE = re.compile(r"^[0-9a-f]{7,64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +65,13 @@ import sys, subprocess, pathlib, shutil
 MODE = sys.argv[1]
 BASE = sys.argv[2] if len(sys.argv) > 2 else ""
 SNAP = pathlib.Path(".kaiju_snap")
+# P2 fix: `.py`/`.pyi` added — previously excluded, defeating the heal guard
+# for the DEFAULT language. A sed rewrite that corrupts a Python file (orphan
+# brace inside a string, unbalanced paren in a decorator) would silently pass
+# the balance check because no file with a .py extension was ever inspected.
 EXT = {".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hpp", ".hh", ".hxx",
-       ".go", ".rs", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".java"}
+       ".go", ".rs", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".java",
+       ".py", ".pyi"}
 
 def balanced(src):
     # Blank comments/strings/char/template/raw-string literals to spaces, then
@@ -96,22 +109,26 @@ def balanced(src):
             and s.count('[') == s.count(']'))
 
 def changed():
+    # P13/H1: previously bare `except Exception: return []` silently hid git
+    # failures. Emit a stderr breadcrumb so the operator can see when the heal
+    # guard is running blind (missing git, corrupted repo, permission drop).
     try:
         o = subprocess.run(["git", "diff", "--name-only", "-z", BASE, "--", "."],
                            capture_output=True, text=True).stdout
-    except Exception:
+    except (subprocess.SubprocessError, OSError) as e:
+        sys.stderr.write("HARNESS_GUARD_CHANGED_FAILED " + str(e) + "\n")
         return []
     return [f for f in o.split("\0") if f]
 
 if MODE == "snapshot":
     try: shutil.rmtree(SNAP, ignore_errors=True); SNAP.mkdir(exist_ok=True)
-    except Exception: sys.exit(0)
+    except OSError: sys.exit(0)
     man = []
     for f in changed():
         p = pathlib.Path(f)
         if p.suffix not in EXT or not p.is_file(): continue
         try: src = p.read_text(encoding="utf-8", errors="surrogateescape")
-        except Exception: continue
+        except OSError: continue
         key = str(len(man))
         try: (SNAP / (key + ".body")).write_text(src, encoding="utf-8", errors="surrogateescape")
         except Exception: continue
@@ -186,6 +203,10 @@ def revert_and_clean_lines(
     forms (e.g. git ``:(glob)`` magic pathspecs), so magic prefixes aren't
     mangled by a ``**/`` prefix.
     """
+    if not _SHA_HEX_RE.fullmatch(base_commit):
+        raise ValueError(
+            f"base_commit must be a bare hex git SHA (7-64 chars); got {base_commit!r}"
+        )
     lines: list[str] = []
     # (1) Independent per-pathspec revert, so a pathspec that matches zero
     # tracked files can't abort the reverts for the others (git checkout is

@@ -192,7 +192,7 @@ class Commit0Spec(Spec):
             f"git apply --allow-empty -v {diff_path}",
             *revert_lines,
             "git status",
-            f"{shlex.quote(self.instance['test']['test_cmd'])} --json-report --json-report-file=report.json --continue-on-collection-errors{{coverage}} {{test_ids}} > test_output.txt 2>&1",
+            'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" ' + f"{shlex.quote(self.instance['test']['test_cmd'])} --json-report --json-report-file=report.json --continue-on-collection-errors{{coverage}} {{test_ids}} > test_output.txt 2>&1",
             "echo $? > pytest_exit_code.txt",
         ]
         return eval_script_list
@@ -280,7 +280,7 @@ class SWEBenchSpec(Spec):
             + results
             + [
                 "git status",
-                f"{shlex.quote(self.instance['test']['test_cmd'])} --json-report --json-report-file=report.json --continue-on-collection-errors{{coverage}} {{test_ids}} > test_output.txt 2>&1",
+                'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" ' + f"{shlex.quote(self.instance['test']['test_cmd'])} --json-report --json-report-file=report.json --continue-on-collection-errors{{coverage}} {{test_ids}} > test_output.txt 2>&1",
                 "echo $? > pytest_exit_code.txt",
             ]
         )

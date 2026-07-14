@@ -111,23 +111,53 @@ def full_clone(full_name: str, clone_dir: Path, tag: str) -> Path:
 
 
 def find_java_source_dirs(repo_dir: Path) -> list[Path]:
-    """Locate Java source directories, handling both standard and monorepo layouts."""
+    """Locate Java source directories, handling standard (Maven/Gradle), monorepo,
+    and legacy (Ant / sources-at-src / sources-at-root) layouts."""
+    # 1. Standard Maven / Gradle layout.
     standard = repo_dir / "src" / "main" / "java"
     if standard.exists():
         return [standard]
 
+    # 2. Nested Maven modules (multi-module maven).
     candidates = list(repo_dir.rglob("src/main/java"))
     if candidates:
         return [c for c in candidates if "test" not in str(c).lower()]
 
-    # Monorepo layout (e.g. guava): <submodule>/src/ with .java files
-    monorepo_dirs = []
+    # 3. Guava-style monorepo: <submodule>/src/ with .java files.
+    monorepo_dirs: list[Path] = []
     for child in sorted(repo_dir.iterdir()):
         if child.is_dir() and (child / "src").is_dir():
             java_files = list((child / "src").rglob("*.java"))
             if java_files:
                 monorepo_dirs.append(child / "src")
-    return monorepo_dirs
+    if monorepo_dirs:
+        return monorepo_dirs
+
+    # H9: 4. Ant / legacy: sources live directly in src/ at the repo root.
+    src_root = repo_dir / "src"
+    if src_root.is_dir():
+        _root_java = [p for p in src_root.rglob("*.java") if "test" not in str(p).lower()]
+        if _root_java:
+            return [src_root]
+
+    # H9: 5. Java files at the repo root (very old / hand-rolled layouts).
+    _direct_java = [
+        p for p in repo_dir.rglob("*.java")
+        if "test" not in str(p).lower()
+        and "target" not in p.parts
+        and "build" not in p.parts
+        and ".git" not in p.parts
+    ]
+    if _direct_java:
+        # Return the common ancestor (deepest shared prefix) so the stubber
+        # scans the actual source tree, not the whole repo.
+        _rels = [p.relative_to(repo_dir).parts[:1] for p in _direct_java if p.relative_to(repo_dir).parts]
+        _top = {r[0] for r in _rels if r}
+        if len(_top) == 1:
+            return [repo_dir / next(iter(_top))]
+        # Multiple top-level dirs contain .java — return each.
+        return sorted({repo_dir / t for t in _top})
+    return []
 
 
 # ─── Stub-Output Validation (A11) ────────────────────────────────────────────
@@ -791,7 +821,9 @@ def main() -> None:
             entries = raw
         else:
             parser.error("Unrecognized dataset format")
-        return
+        # B1: removed the `return` that used to sit here — it prematurely
+        # exited main() after loading the dataset, so prepare_java_repos()
+        # never ran and the batch silently no-op'd. Fall through to prep now.
 
     clone_dir = Path(args.clone_dir)
     clone_dir.mkdir(parents=True, exist_ok=True)

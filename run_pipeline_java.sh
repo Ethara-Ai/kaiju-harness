@@ -32,6 +32,7 @@ REPO_BASE="${BASE_DIR}/repos/java"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 COMMIT0_JAVA="${BASE_DIR}/.venv/bin/commit0-java"
 MAX_ITERATION=3
+export LANGUAGE="java"  # H8: parity with other drivers so child processes can rely on $LANGUAGE
 
 # ============================================================
 # Argument Parsing
@@ -507,6 +508,42 @@ get_newest_aider_log() {
 # Verify Spec Docs (Java — specs are in repo dirs)
 # ============================================================
 
+# H7: Provision spec docs from a shared cache into repo dirs before the verify
+# step runs. Without ensure, verify_spec_docs_java would FATAL on the first
+# repo without a spec.pdf even if a cached copy sits in specs/<repo>.pdf(.bz2).
+# Mirrors ensure_spec_docs_{js,ts,rust,c,cpp,go} — verification-without-
+# provisioning was the last driver-level asymmetry.
+ensure_spec_docs_java() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        log "  Spec docs disabled — skipping."
+        return 0
+    fi
+    local specs_dir="${SPECS_DIR:-specs}"
+    if [[ ! -d "$specs_dir" ]]; then
+        log "  No shared specs dir at $specs_dir — skipping provisioning (verify may still succeed if repos ship their own spec)."
+        return 0
+    fi
+    log "Ensuring spec docs are available for all Java repos (source: $specs_dir)..."
+    local provisioned=0
+    while IFS= read -r repo; do
+        [[ -z "$repo" ]] && continue
+        local repo_short="${repo##*/}"
+        local repo_dir="${REPO_BASE}/${repo_short}"
+        [[ ! -d "$repo_dir" ]] && continue
+        # Skip if the repo already has a spec.
+        if [[ -f "${repo_dir}/spec.pdf" ]] || [[ -f "${repo_dir}/spec.pdf.bz2" ]]; then
+            continue
+        fi
+        # Try cached copies from the shared specs dir.
+        if [[ -f "${specs_dir}/${repo_short}.pdf.bz2" ]]; then
+            cp "${specs_dir}/${repo_short}.pdf.bz2" "${repo_dir}/spec.pdf.bz2" 2>/dev/null && provisioned=$((provisioned + 1))
+        elif [[ -f "${specs_dir}/${repo_short}.pdf" ]]; then
+            cp "${specs_dir}/${repo_short}.pdf" "${repo_dir}/spec.pdf" 2>/dev/null && provisioned=$((provisioned + 1))
+        fi
+    done <<< "$REPOS"
+    log "  Provisioned $provisioned spec doc(s) from $specs_dir."
+}
+
 verify_spec_docs_java() {
     if [[ "$USE_SPEC_INFO" != "true" ]]; then
         return 0
@@ -799,6 +836,27 @@ run_java_agent_loop() {
 
 # run_agent_java: wraps run_java_agent_loop with watchdog
 # Args: run_tests use_unit_tests_info use_spec_info compile_check override log_dir [run_entire_dir_lint]
+# Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
+# .needs_retry means the agent was killed mid-post-processing (typically by the
+# inactivity watchdog after aider finished a turn but before _mark_module_done
+# ran). Auto-resume detection uses `.needs_retry` files, so limbo modules would
+# be silently skipped without this sweep. Convert them so auto-resume re-runs them.
+_sweep_limbo_modules() {
+    local _ld="$1"
+    [[ -d "$_ld" ]] || return 0
+    local _swept=0 _aider _moddir
+    while IFS= read -r _aider; do
+        _moddir=$(dirname "$_aider")
+        if [[ ! -f "$_moddir/.done" && ! -f "$_moddir/.needs_retry" ]]; then
+            echo "limbo (agent killed mid-postprocessing, no .done marker)" > "$_moddir/.needs_retry"
+            _swept=$((_swept + 1))
+        fi
+    done < <(find "$_ld" -type f -name aider.log 2>/dev/null)
+    if [[ "$_swept" -gt 0 ]]; then
+        log "  SWEEP: converted ${_swept} limbo module(s) to .needs_retry (had aider.log but neither .done nor .needs_retry)"
+    fi
+}
+
 run_agent_java() {
     local run_tests="$1"
     local use_unit_tests_info="$2"
@@ -846,6 +904,7 @@ run_agent_java() {
     # rebuilds the branch from per-module patches and .done modules are skipped, so
     # only the failed ones re-run and (on success) clear .needs_retry + gain .done.
     local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
+    _sweep_limbo_modules "$log_dir"
     _nr=$(find "$log_dir" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
     while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
         _auto=$((_auto + 1))
@@ -863,7 +922,8 @@ run_agent_java() {
         set -e
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
-        _nr=$(find "$log_dir" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        _sweep_limbo_modules "$log_dir"
+    _nr=$(find "$log_dir" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
@@ -1507,6 +1567,7 @@ run_single_sample() {
     if [[ "$sample_idx" -eq 1 ]]; then
         load_repos
         preflight
+        ensure_spec_docs_java
         if ! verify_spec_docs_java; then
             return 1
         fi

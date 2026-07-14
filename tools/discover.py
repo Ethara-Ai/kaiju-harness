@@ -393,9 +393,13 @@ def enrich_candidates(
             repo["languages"] = languages
             repo["python_pct"] = round(python_pct, 1)
         except Exception as e:
+            # T13: distinguish API errors from real "no python" so downstream
+            # curation can retry the transient failures instead of permanently
+            # filtering the repo. Store the reason in repo["languages_error"].
             logger.warning("Failed to get languages for %s: %s", full_name, e)
             repo["languages"] = {}
             repo["python_pct"] = 0.0
+            repo["languages_error"] = str(e)[:200]
 
         # Filter by Python percentage
         if repo["python_pct"] < min_python_pct:
@@ -414,9 +418,11 @@ def enrich_candidates(
                     full_name, repo.get("default_branch", "main"), token=token
                 )
                 repo["has_pytest"] = has_pytest
-            except Exception:
-                logger.debug("Failed to check pytest for %s", full_name)
+            except Exception as e:
+                # T13: same treatment for pytest detection API errors.
+                logger.debug("Failed to check pytest for %s: %s", full_name, e)
                 repo["has_pytest"] = False
+                repo["has_pytest_error"] = str(e)[:200]
 
             if not has_pytest:
                 logger.info("  Skipping %s: no pytest found", full_name)

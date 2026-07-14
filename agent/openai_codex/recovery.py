@@ -21,7 +21,7 @@ _TRANSIENT_SIGNALS = (
     "peer closed connection", "incomplete chunked read", "connection reset",
     "connection aborted", "server disconnected", "read timeout", "timed out",
     "temporarily unavailable", "502 bad gateway", "503 service", "504 gateway",
-    "overloaded", "internal server error", "remoteprotocolerror", "econnreset",
+    "remoteprotocolerror", "econnreset",
     "rate limit", "429",
     # aider-swallowed transient LLM errors surfaced by
     # agent.agents.raise_if_transient_llm_error (TransientLLMError) and the raw
@@ -44,9 +44,32 @@ def _backoff_schedule() -> tuple[float, ...]:
     return _DEFAULT_BACKOFF
 
 
+import re
+
+_TIGHT_INTERNAL_ERR_RE = re.compile(
+    r"(?:"
+    r"\.internalservererror\b|"
+    r"500\s*[:\s]\s*internal\s+server\s+error\b|"
+    r"\berror\s+(?:type|class|code)[:\s]+(?:internalservererror|internal\s+server\s+error)\b|"
+    r"\.internal_server_error\b"
+    r")",
+    re.IGNORECASE,
+)
+_TIGHT_OVERLOAD_RE = re.compile(
+    r'(?:"overloaded_error"|error\s+type[:\s]+overloaded|anthropic\s+api\s+overloaded)',
+    re.IGNORECASE,
+)
+
+
 def is_transient(exc: BaseException) -> bool:
     msg = str(exc).lower()
-    return any(sig in msg for sig in _TRANSIENT_SIGNALS)
+    if any(sig in msg for sig in _TRANSIENT_SIGNALS):
+        return True
+    if _TIGHT_INTERNAL_ERR_RE.search(msg):
+        return True
+    if _TIGHT_OVERLOAD_RE.search(msg):
+        return True
+    return False
 
 
 def run_with_recovery(fn: Callable[..., _T], *args: Any,

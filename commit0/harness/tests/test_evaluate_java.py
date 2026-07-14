@@ -15,8 +15,8 @@ def _instance(repo: str = "org/myrepo") -> dict:
     return {
         "repo": repo,
         "instance_id": repo,
-        "base_commit": "aaa",
-        "reference_commit": "bbb",
+        "base_commit": "aaa" + "0" * 37,
+        "reference_commit": "bbb" + "0" * 37,
         "setup": {},
         "test": {},
         "src_dir": "src",

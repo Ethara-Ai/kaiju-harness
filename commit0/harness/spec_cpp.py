@@ -32,7 +32,15 @@ BUILD_CMD_MAP = {
 }
 
 CONFIGURE_CMD_MAP = {
-    "cmake": "cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    # `-S .` makes the configure explicit (tests assert configure-before-build);
+    # CMAKE_COMPILE_WARNING_AS_ERROR=OFF stops a stub's unused-parameter warning
+    # from becoming a hard build error -> a false COMPILE_FAILED 0/N; BUILD_TESTING
+    # ON so the test binaries are configured; Debug for readable assertions.
+    "cmake": (
+        "cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "
+        "-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DBUILD_TESTING=ON "
+        "-DCMAKE_BUILD_TYPE=Debug"
+    ),
     "meson": "meson setup builddir",
     "autotools": "./configure",
     "make": "",
@@ -77,7 +85,7 @@ class CppSpec(Spec):
             f"git clone --depth 1 -o origin https://github.com/{repo} {self.repo_directory}",
             f"chmod -R 777 {self.repo_directory}",
             f"cd {self.repo_directory}",
-            f"git fetch --depth 1 origin {env_setup_commit} {base_commit}",
+            f"git fetch --depth 1 origin {env_setup_commit} {base_commit} || git fetch --unshallow",  # M4: unshallow fallback for commits older than initial --depth 1
             f"git reset --hard {env_setup_commit}",
             "git submodule update --init --recursive 2>/dev/null || true",
             "git remote remove origin",
@@ -99,6 +107,7 @@ class CppSpec(Spec):
                 test_cmd = test_info["test_cmd"]
 
         build_system = self._get_build_system()
+        configure_cmd = CONFIGURE_CMD_MAP.get(build_system, "")
         build_cmd = BUILD_CMD_MAP.get(build_system, "make -j$(nproc)")
         base_commit = self.instance["base_commit"]
         # Per-pathspec revert + delete model-added build/test files. C++ counts
@@ -125,7 +134,7 @@ class CppSpec(Spec):
             ],
         )
 
-        return [
+        eval_lines = [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
             # Try exact apply, then --recount (tolerates off-by-N hunk headers). A
@@ -144,9 +153,42 @@ class CppSpec(Spec):
             *revert_lines,
             "git status",
             *guard_heal_lines(),
-            f"{{ {build_cmd}; {test_cmd} {{test_ids}}; }} > test_output.txt 2>&1",
+        ]
+
+        # CONFIGURE (separate from build): a fresh `git reset --hard base` may not
+        # carry a usable build/ dir, so `cmake --build build` without a configure
+        # fails spuriously. Capture stdout and, on failure, emit a DISTINCT
+        # BUILD_CONFIGURE_FAILED sentinel (an infra/config problem, not the model's
+        # compile) so evaluate_cpp doesn't misattribute it as a model 0/N.
+        if configure_cmd:
+            eval_lines += [
+                f"{configure_cmd} > configure_stdout.txt 2>&1",
+                "CONFIGURE_RC=$?",
+                'if [ "$CONFIGURE_RC" -ne 0 ]; then '
+                "{ echo BUILD_CONFIGURE_FAILED; tail -c 8192 configure_stdout.txt; } "
+                '> test_output.txt; echo "$CONFIGURE_RC" > test_exit_code.txt; exit 0; fi',
+                # Belt-and-suspenders: strip any -Werror the config still injected so
+                # a stub's unused-parameter warning can't become a hard error (false
+                # COMPILE_FAILED). Tolerant: no-op for build systems without these.
+                r"find build \( -name '*.ninja' -o -name Makefile -o -name '*.make' \) "
+                r"-exec sed -i 's/-Werror[^ ]*//g' {} + 2>/dev/null || true",
+            ]
+
+        # BUILD: capture stderr to compile_errors.txt and, on failure, emit the
+        # COMPILE_FAILED sentinel with the errors so evaluate_cpp scores/attributes
+        # it correctly (and the agent's refine stage can see the actual errors).
+        eval_lines += [
+            f"{build_cmd} 2> compile_errors.txt",
+            "BUILD_RC=$?",
+            'if [ "$BUILD_RC" -ne 0 ]; then '
+            "{ echo COMPILE_FAILED; tail -c 8192 compile_errors.txt; } "
+            '> test_output.txt; echo "$BUILD_RC" > test_exit_code.txt; exit 0; fi',
+            # TEST: build succeeded — run the suite under the outer timeout.
+            '{ timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" '
+            + f"{test_cmd} {{test_ids}}; }} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",
         ]
+        return eval_lines
 
 
 def make_cpp_spec(

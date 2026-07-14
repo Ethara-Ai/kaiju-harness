@@ -81,7 +81,7 @@ class TestGetDockerfileBaseTs:
 
     def test_invalid_version_raises_valueerror(self) -> None:
         with pytest.raises(ValueError, match="Unsupported Node version"):
-            get_dockerfile_base_ts("16")
+            get_dockerfile_base_ts("17")
 
     def test_empty_string_raises(self) -> None:
         with pytest.raises(ValueError, match="Unsupported Node version"):

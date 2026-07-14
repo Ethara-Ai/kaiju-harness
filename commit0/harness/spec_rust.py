@@ -73,7 +73,7 @@ class RustSpec(Spec):
             f"git clone --depth 1 -o origin https://github.com/{repo} {self.repo_directory}",
             f"chmod -R 777 {self.repo_directory}",
             f"cd {self.repo_directory}",
-            f"git fetch --depth 1 origin {env_setup_commit} {base_commit}",
+            f"git fetch --depth 1 origin {env_setup_commit} {base_commit} || git fetch --unshallow",  # M4: unshallow fallback for commits older than initial --depth 1
             f"git reset --hard {env_setup_commit}",
             "git submodule update --init --recursive 2>/dev/null || true",
             "git remote remove origin",

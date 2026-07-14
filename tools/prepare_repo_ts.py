@@ -36,6 +36,17 @@ from tools.prepare_repo import (
 from tools._git_auth import setup_git_credentials, fork_repo
 from tools.stub_ts_runner import run_stub_ts
 
+# H2, H3, H4, H11: reuse the hardened npm/pnpm/yarn helpers from the JS
+# preparer instead of duplicating (all TS logic already mirrors JS one-to-one).
+from tools.prepare_repo_js import (  # noqa: E402
+    _neutralize_npmrc_lockfile_disable,
+    _validate_generated_lockfile,
+    _is_real_stub_marker,
+    _lockfile_candidates,
+    _has_committed_lockfile,
+    _LOCKFILE_BY_PM,
+)
+
 # Lazy import for spec scraping (optional dependency) -- mirrors prepare_repo_go.py
 _scrape_spec_sync = None
 
@@ -787,11 +798,17 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
         except ValueError:
             test_dir = test_dirs[0].name
     else:
-        raise RuntimeError(
-            f"Could not detect a test directory for {repo_dir.name}. "
-            "Inspect package.json (jest/vitest/mocha), jest.config.*, vitest.config.*, "
-            ".mocharc.*, or the filesystem layout and set test_dir manually in the entries JSON."
+        # B5: mirror JS behaviour (prepare_repo_js.py:711-716) — default
+        # test_dir='.' with warning so the framework self-discovers. A
+        # genuinely test-less repo then surfaces downstream as 0 collected
+        # (infra flag), instead of aborting a valid repo family here.
+        logger.warning(
+            "  Could not detect a test directory for %s via filesystem;"
+            " defaulting test_dir='.' (framework self-discovers from"
+            " package.json / jest.config.* / vitest.config.* / .mocharc.*).",
+            repo_dir.name,
         )
+        test_dir = "."
 
     spec_url = _detect_spec_url(repo_dir)
 
@@ -951,17 +968,50 @@ def create_ts_stubbed_branch(
         pkg_manager = detect_package_manager(repo_dir)
         logger.info("  Installing dependencies via %s...", pkg_manager)
         _ensure_pkg_manager(pkg_manager)
-        install_cmd = [pkg_manager, "install"]
-        if pkg_manager != "bun":
-            install_cmd.append("--ignore-scripts")
-        subprocess.run(
-            install_cmd,
-            cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
-        )
+        # H2: prefer frozen install when a lockfile is committed (mirrors JS).
+        # Falling back to plain `install` is a GENERATING install that can
+        # silently resolve to different versions than what the repo shipped.
+        _frozen_by_pm = {
+            "npm":  ["npm", "ci", "--ignore-scripts"],
+            "pnpm": ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+            "yarn": ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"],
+            "bun":  ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
+        }
+        _has_lock = _has_committed_lockfile(repo_dir)
+        if _has_lock:
+            install_cmd = _frozen_by_pm.get(pkg_manager, [pkg_manager, "install"])
+        else:
+            install_cmd = [pkg_manager, "install"]
+            if pkg_manager != "bun":
+                install_cmd.append("--ignore-scripts")
+        # H3: neutralise .npmrc `package-lock=false` / `lockfile=false` for the
+        # generating install, then restore verbatim (try/finally). Without this,
+        # repos that ship such .npmrc suppress lockfile generation and downstream
+        # frozen installs fail with a cryptic "no lockfile" error.
+        _orig_npmrc = None if _has_lock else _neutralize_npmrc_lockfile_disable(repo_dir)
+        try:
+            subprocess.run(
+                install_cmd,
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+        finally:
+            if _orig_npmrc is not None:
+                (repo_dir / ".npmrc").write_text(_orig_npmrc)
+        # H11: if we ran a generating install, validate the produced lockfile so
+        # a partial/broken lockfile doesn't get committed onto the stubbed branch.
+        if not _has_lock:
+            for _cand in _lockfile_candidates(pkg_manager):
+                _lp = repo_dir / _cand
+                if _lp.exists() and _lp.stat().st_size > 0:
+                    try:
+                        _validate_generated_lockfile(_lp, pkg_manager)
+                    except RuntimeError as _e:
+                        logger.warning("  lockfile %s failed validation: %s", _cand, _e)
+                    break
 
     logger.info("  Stubbing TypeScript source in: %s", src_dir)
     report = run_stub_ts(
@@ -1002,12 +1052,15 @@ def create_ts_stubbed_branch(
         )
 
     diff_ts = git(repo_dir, "diff", "--cached", "--unified=0", "--", "*.ts", "*.tsx")
+    # H4: use the JS marker filter (skips comments/strings) so a file
+    # containing `throw new Error("STUB")` in a JSDoc example doesn't count
+    # as a real stub. Matches prepare_repo_js after the J5 fix.
     stub_marker_count = sum(
         1
         for line in diff_ts.splitlines()
         if line.startswith("+")
         and not line.startswith("+++")
-        and 'throw new Error("STUB")' in line
+        and _is_real_stub_marker(line)
     )
     logger.info(
         "  Stub verification -- .ts/.tsx STUB markers added: %d (expected >= 1)",
@@ -1064,6 +1117,40 @@ def _run_post_stub_tsc_check(repo_dir: Path) -> "bool | None":
     if not tsconfig.exists():
         logger.debug("  Skipping tsc check: no tsconfig.json")
         return None
+    # H5: previously `npx --no-install tsc ...` silently returned None if tsc
+    # wasn't in node_modules, making base compilability unknowable without
+    # any signal to the operator. Now: explicitly probe for tsc first and
+    # WARN clearly if missing, so the None result is documented instead of
+    # invisible. We check both the local bin and dependencies/devDependencies
+    # for typescript so a repo that lists it but hasn't installed yet gets a
+    # distinct message.
+    _tsc_local = repo_dir / "node_modules" / ".bin" / "tsc"
+    if not _tsc_local.exists():
+        _pkg = repo_dir / "package.json"
+        _has_ts_dep = False
+        try:
+            import json as _json
+            _pj = _json.loads(_pkg.read_text(encoding="utf-8"))
+            _has_ts_dep = (
+                "typescript" in (_pj.get("dependencies") or {})
+                or "typescript" in (_pj.get("devDependencies") or {})
+            )
+        except (OSError, ValueError):
+            pass
+        if _has_ts_dep:
+            logger.warning(
+                "  tsc check SKIPPED for %s: typescript is declared in"
+                " package.json but not installed in node_modules/.bin."
+                " Install ran but did not add tsc; base compilability is unknown.",
+                repo_dir.name,
+            )
+        else:
+            logger.warning(
+                "  tsc check SKIPPED for %s: no local tsc and typescript is"
+                " not declared as a dependency. Base compilability is unknown.",
+                repo_dir.name,
+            )
+        return None
     try:
         result = subprocess.run(
             ["npx", "--no-install", "tsc", "--noEmit", "--skipLibCheck"],
@@ -1074,7 +1161,7 @@ def _run_post_stub_tsc_check(repo_dir: Path) -> "bool | None":
             check=False,
         )
     except FileNotFoundError:
-        logger.warning("  Skipping tsc check: npx not available")
+        logger.warning("  Skipping tsc check: npx not available on PATH")
         return None
     except subprocess.TimeoutExpired:
         logger.warning("  tsc --noEmit timed out after 600s (non-fatal)")

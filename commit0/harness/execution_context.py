@@ -116,6 +116,19 @@ class Docker(ExecutionContext):
         logger.debug("Connecting to Docker daemon")
         self.client = docker.from_env()
         proxy_env = get_proxy_env() or None
+        # Forward the eval test-timeout knobs into the container so a raised
+        # --timeout (which run_go_tests derives into these) — or an explicit
+        # operator override — actually reaches eval.sh's `${EVAL_TEST_TIMEOUT:-…}`
+        # / `${GO_TEST_TIMEOUT:-…}` bounds instead of always using the in-script
+        # default. Only added when set, so the default create_container call is
+        # unchanged otherwise. (Issue 7)
+        _timeout_env = {
+            k: os.environ[k]
+            for k in ("EVAL_TEST_TIMEOUT", "GO_TEST_TIMEOUT")
+            if os.environ.get(k)
+        }
+        if _timeout_env:
+            proxy_env = {**(proxy_env or {}), **_timeout_env}
         # Only forward hardening kwargs when opt-in is enabled, so the default
         # create_container call is byte-for-byte unchanged.
         hardening = sandbox_hardening_kwargs()

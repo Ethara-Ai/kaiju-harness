@@ -144,6 +144,9 @@ def _aggregate_go_results(
             else:
                 tstatus = "FAILED"
             status_counter[tstatus] += 1
+            # SKIPPED is tracked separately and NOT counted as passed — a
+            # deliberate policy matching evaluate_rust (num_passed = passes only).
+            # (Issue 15 is therefore an intentional design choice, not a bug.)
             if tstatus == "PASSED":
                 num_passed += 1
             dur = durations.get(tid, 0.0)
@@ -170,7 +173,12 @@ def _aggregate_go_results(
     if test_ids_flat:
         num_tests = len(test_ids_flat)
     else:
+        # Fallback: no canonical inventory (missing/empty .bz2). Score against ALL
+        # observed tests so a fully-passing repo is NOT falsely reported 0/N — the
+        # `for tid in test_ids_flat` loop above never ran, so num_passed is still
+        # 0 and MUST be recomputed from the observed results here.
         num_tests = len(results)
+        num_passed = sum(1 for r in results.values() if r.value == "PASSED")
     num_passed = min(num_passed, num_tests)
 
     # Classify the run so a compile/patch/timeout failure is not reported as a

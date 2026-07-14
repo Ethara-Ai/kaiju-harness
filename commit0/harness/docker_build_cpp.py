@@ -71,7 +71,16 @@ def build_base_images_cpp(
 
     import os
 
-    platform = os.environ.get("COMMIT0_BUILD_PLATFORMS", "linux/amd64,linux/arm64")
+    # Default to NATIVE architecture only (single-arch). Multi-arch (buildx + QEMU)
+    # is opt-in via COMMIT0_BUILD_PLATFORMS env var. Multi-arch requires host-side
+    # buildx + qemu-user-static; on a single-arch machine (macOS ARM, Linux amd64,
+    # etc.) the multi-arch build fails without those. Native single-arch is what
+    # 99% of users want. Set COMMIT0_BUILD_PLATFORMS=linux/amd64,linux/arm64 for
+    # registry pushes.
+    import platform as _platform
+    _machine = _platform.machine().lower()
+    _default_platform = "linux/" + ("arm64" if _machine in ("arm64", "aarch64") else "amd64")
+    platform = os.environ.get("COMMIT0_BUILD_PLATFORMS", _default_platform)
 
     _multiarch_builder_args()
 

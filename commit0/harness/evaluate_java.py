@@ -114,6 +114,15 @@ def evaluate_java_repo(
         # Docker.__exit__ closes eval_logger and cleans up the container.
 
         exit_code_file = log_path / "test_exit_code.txt"
+        test_output_file = log_path / "test_output.txt"
+        # Detect PATCH_APPLY_FAILED sentinel (eval.sh writes this when git apply
+        # fails) BEFORE checking COMPILATION_FAILED so a patch-apply failure is
+        # attributed correctly instead of being surfaced as a spurious compile fail.
+        # HEAD+TAIL 8KB search handles both small failures and huge noisy outputs.
+        from commit0.harness._eval_common import detect_patch_apply_failed
+        if detect_patch_apply_failed([test_output_file, exit_code_file]):
+            logger.error(f"Patch apply failed for {repo_name}")
+            return {"PATCH_APPLY": TestStatus.FAILED}
         if exit_code_file.exists():
             exit_content = exit_code_file.read_text().strip()
             if "COMPILATION_FAILED" in exit_content:

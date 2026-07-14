@@ -99,14 +99,19 @@ class Commit0CSpec(Spec):
             else:
                 setup_commands.append(pre_install)
 
-        # MVP: CMake only. Generates compile_commands.json for the stubber.
+        # M2: CMake configure/build wraps its own cleanup so a partial
+        # CMakeCache.txt cannot survive a failed step to bleed into eval.
+        # Under `set -e`, a raw `cmake ... && cmake --build ...` failure would
+        # abort the script before the trailing `rm -rf build` ran, leaving a
+        # half-configured build/ dir. The `|| { ...; exit 1; }` guard also
+        # ensures the cleanup path runs even without set -e.
         setup_commands.append(
-            "cmake -S . -B build -G Ninja -DBUILD_TESTING=ON "
+            "( cmake -S . -B build -G Ninja -DBUILD_TESTING=ON "
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON "
-            f"-DCMAKE_BUILD_TYPE=Debug {quoted_cmake_flags} && cmake --build build -j"
+            f"-DCMAKE_BUILD_TYPE=Debug {quoted_cmake_flags} "
+            "&& cmake --build build -j ) "
+            "|| { rm -rf build; echo \"CMAKE_SETUP_FAILED\" >&2; exit 1; }"
         )
-        # Clean build artifacts before resetting to base_commit so a stale
-        # CMakeCache.txt from reference_commit cannot bleed into eval.
         setup_commands.append(f"git reset --hard {base_commit}")
         setup_commands.append("rm -rf build")
         return setup_commands
@@ -179,7 +184,7 @@ class Commit0CSpec(Spec):
             "  echo 0 > test_exit_code.txt",
             "  exit 0",
             "fi",
-            f"{test_cmd} > test_output.txt 2>&1",
+            'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" ' + f"{test_cmd} > test_output.txt 2>&1",
             "echo $? > test_exit_code.txt",
         ]
 

@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm
+FROM golang:__GO_VERSION__-bookworm
 
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive

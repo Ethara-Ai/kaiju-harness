@@ -19,16 +19,22 @@ import uuid as _uuid_mod
 
 logger = logging.getLogger(__name__)
 
+# H10: hoist required-field lists to module-level constants for parity with
+# create_dataset_{go,rust,js,ts,py}.py so schema drift is grep-visible.
+REQUIRED_FIELDS: List[str] = ["instance_id", "repo", "base_commit", "reference_commit"]
+REQUIRED_SETUP_FIELDS: List[str] = ["build_system"]
+REQUIRED_TEST_FIELDS: List[str] = ["test_cmd"]
+SUPPORTED_BUILD_SYSTEMS: tuple[str, ...] = ("cmake", "meson", "autotools", "make")
+
 
 def validate_cpp_entry(entry: dict) -> List[str]:
     """Validate a single C++ dataset entry.
 
     Returns a list of issues (empty if valid).
     """
-    required_fields = ["instance_id", "repo", "base_commit", "reference_commit"]
     issues: list[str] = []
 
-    for field in required_fields:
+    for field in REQUIRED_FIELDS:
         if field not in entry:
             issues.append(f"Missing required field: {field}")
 
@@ -37,17 +43,13 @@ def validate_cpp_entry(entry: dict) -> List[str]:
     if not isinstance(setup, dict):
         issues.append("'setup' must be a dict")
     else:
-        if not setup.get("build_system"):
-            issues.append("setup.build_system is required")
-        if setup.get("build_system") and setup["build_system"] not in (
-            "cmake",
-            "meson",
-            "autotools",
-            "make",
-        ):
+        for _f in REQUIRED_SETUP_FIELDS:
+            if not setup.get(_f):
+                issues.append(f"setup.{_f} is required")
+        if setup.get("build_system") and setup["build_system"] not in SUPPORTED_BUILD_SYSTEMS:
             issues.append(
                 f"Unknown build_system: {setup['build_system']}. "
-                "Expected: cmake, meson, autotools, make"
+                f"Expected one of: {', '.join(SUPPORTED_BUILD_SYSTEMS)}"
             )
 
     test = entry.get("test", {})
@@ -221,19 +223,34 @@ def main() -> None:
             output = "cpp_dataset.json"
         create_cpp_dataset(annotated, output)
 
-        # Mount the captured cpp test-id inventory into the consolidated layout
-        # (outputs/<uuid>/datasets/) so the containerized eval finds it via
-        # KAIJU_TEST_IDS_DIR — commit0/data/ is pruned from the agent image.
+        # Consolidated layout: outputs/<uuid>/datasets/ must carry three files
+        # for the containerized eval + agent to find them (commit0/data/ is
+        # pruned from the agent image):
+        #   1. <split>_test_ids.bz2 - frozen inventory (via copy_inference_inputs)
+        #   2. <split>_spec.pdf.bz2  - scraped spec  (via copy_inference_inputs;
+        #      ensure_spec_docs_cpp in run_pipeline_cpp.sh writes it to
+        #      ${REPO_BASE}/{name}/spec.pdf.bz2 where REPO_BASE=${BASE_DIR}/repos)
+        #   3. entries.json          - dataset entries for the run
+        # Historical gap: entries.json was never emitted from create_dataset_cpp,
+        # so tools reading outputs/<uuid>/datasets/entries.json (mirrors java/js)
+        # saw an empty folder even on successful prep.
         if _consolidated and annotated and annotated[0].get("id"):
+            _run_uuid = annotated[0]["id"]
             try:
-                from kaiju.paths import copy_inference_inputs
+                from kaiju.paths import copy_inference_inputs, datasets_dir
                 for e in annotated:
                     copy_inference_inputs(
-                        annotated[0]["id"], e["repo"].split("/")[-1],
+                        _run_uuid, e["repo"].split("/")[-1],
                         test_ids_subdir="cpp_test_ids", repo_base="repos",
                     )
+                _entries_path = datasets_dir(_run_uuid) / "entries.json"
+                _entries_path.write_text(json.dumps(annotated, indent=2))
+                logger.info(
+                    "Wrote %d entries to %s (consolidated)",
+                    len(annotated), _entries_path,
+                )
             except Exception as _e:  # noqa: BLE001
-                logger.warning("copy_inference_inputs failed: %s", _e)
+                logger.warning("consolidated staging failed: %s", _e)
 
     elif args.command == "validate":
         raw = Path(args.dataset).read_text()

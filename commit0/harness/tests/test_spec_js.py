@@ -296,11 +296,20 @@ class TestEvalScriptList:
         text = "\n".join(spec.make_eval_script_list())
         assert shlex.quote("/patch.diff") in text
 
-    def test_base_sha_shlex_quoted_in_eval(self) -> None:
+    def test_hostile_base_sha_rejected_in_eval(self) -> None:
+        # eval_hardening now REJECTS any base_commit that is not a bare hex SHA,
+        # so an injection payload can never reach the eval shell (stronger than
+        # relying on shlex quoting alone).
         inst = _make_js_instance(base_commit="ev;il")
         spec = _make_spec(inst)
+        with pytest.raises(ValueError, match="bare hex git SHA"):
+            _ = "\n".join(spec.make_eval_script_list())
+
+    def test_valid_base_sha_shlex_quoted_in_eval(self) -> None:
+        inst = _make_js_instance(base_commit="c" * 40)
+        spec = _make_spec(inst)
         text = "\n".join(spec.make_eval_script_list())
-        assert shlex.quote("ev;il") in text
+        assert shlex.quote("c" * 40) in text
 
 
 class TestFrameworkDispatch:

@@ -175,6 +175,45 @@ _CREDENTIALS_CONFIGURED = False
 _ASKPASS_PATH: Path | None = None
 
 
+def _ensure_commit_identity() -> None:
+    """Guarantee ``git commit`` has an author/committer identity.
+
+    ``git commit`` aborts with *"Please tell me who you are"* when neither
+    ``user.name``/``user.email`` nor the ``GIT_*_NAME``/``GIT_*_EMAIL`` env vars
+    are set — which silently drops EVERY prepared repo on a host with no git
+    identity (the exception is swallowed by prepare's broad ``except``). Set a
+    process-local fallback via env vars ONLY when nothing is configured, so a
+    real configured identity is never clobbered (env vars take precedence over
+    config) and the user's global ``~/.gitconfig`` is left untouched.
+    """
+    if os.environ.get("GIT_AUTHOR_NAME") and os.environ.get("GIT_AUTHOR_EMAIL"):
+        return
+
+    def _configured(key: str) -> bool:
+        try:
+            r = subprocess.run(
+                ["git", "config", "--get", key],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return r.returncode == 0 and bool(r.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    if _configured("user.name") and _configured("user.email"):
+        return
+
+    os.environ.setdefault("GIT_AUTHOR_NAME", "kaiju-bot")
+    os.environ.setdefault("GIT_AUTHOR_EMAIL", "kaiju-bot@ethara.ai")
+    os.environ.setdefault("GIT_COMMITTER_NAME", "kaiju-bot")
+    os.environ.setdefault("GIT_COMMITTER_EMAIL", "kaiju-bot@ethara.ai")
+    logger.info(
+        "No git identity configured — using process-local kaiju-bot fallback so "
+        "prepare commits don't fail with 'Please tell me who you are'."
+    )
+
+
 def setup_git_credentials(
     token: str | None = None,
     dry_run: bool = False,
@@ -209,6 +248,7 @@ def setup_git_credentials(
         token = get_github_token(required=not dry_run)
 
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
+    _ensure_commit_identity()
 
     if not token:
         _CREDENTIALS_CONFIGURED = True

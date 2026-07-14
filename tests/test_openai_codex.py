@@ -388,7 +388,10 @@ class TestAsyncStreamTranslation:
                 out.append(c)
             return b"".join(out).decode()
 
-        joined = asyncio.get_event_loop().run_until_complete(_run())
+        # asyncio.run() (not get_event_loop().run_until_complete()) so this is
+        # immune to a prior test having closed/replaced the default event loop —
+        # the other async tests in this file already use asyncio.run().
+        joined = asyncio.run(_run())
         assert '"role": "assistant"' in joined
         assert '"content": "AB"' in joined and '"content": "CD"' in joined
         assert '"finish_reason": "stop"' in joined and joined.rstrip().endswith("[DONE]")

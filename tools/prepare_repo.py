@@ -47,6 +47,29 @@ logger = logging.getLogger(__name__)
 # GitHub org to fork repos into
 DEFAULT_ORG = "Zahgon"
 
+# T6: GitHub repo-name shape guard. Enforces owner/repo format with GitHub's
+# character policy (alnum + `_.-`, no leading `-` or `.`). Prevents path
+# traversal via `..`, backslashes, or absolute paths ending up in
+# `clone_dir / full_name.replace('/','__')`. If a poisoned dataset row set
+# full_name to '../../etc/passwd', the path join would escape clone_dir.
+_GITHUB_REPO_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}/[A-Za-z0-9_.-]{1,100}$"
+)
+
+
+def _validate_github_full_name(full_name: str) -> None:
+    """Raise ValueError if full_name isn't a well-formed owner/repo string."""
+    if not isinstance(full_name, str) or not _GITHUB_REPO_RE.match(full_name):
+        raise ValueError(
+            f"invalid GitHub repo name {full_name!r}: expected owner/repo with"
+            " allowed chars [A-Za-z0-9_.-]"
+        )
+    if ".." in full_name or full_name.startswith(".") or full_name.startswith("-"):
+        raise ValueError(
+            f"unsafe GitHub repo name {full_name!r}: leading dot/dash or '..'"
+            " segment not allowed (path-traversal guard)"
+        )
+
 # Import stub module
 TOOLS_DIR = Path(__file__).parent
 sys.path.insert(0, str(TOOLS_DIR.parent))
@@ -125,6 +148,7 @@ def full_clone(
     full_name: str, clone_dir: Path, branch: str | None = None, tag: str | None = None
 ) -> Path:
     """Full clone (not shallow) of a repo. Returns repo dir."""
+    _validate_github_full_name(full_name)  # T6: path-traversal guard
     repo_dir = clone_dir / full_name.replace("/", "__")
     if repo_dir.exists():
         shallow_file = repo_dir / ".git" / "shallow"
@@ -384,7 +408,12 @@ def create_stubbed_branch(
                     continue
                 py_file.write_text(result, encoding="utf-8")
                 stubbed_count += 1
-        except Exception as e:
+        # T12/T19: previously `except Exception as e` swallowed everything and
+        # incremented a silent error counter. Narrow to the exceptions the
+        # stubber legitimately raises (I/O, AST/parse, type/attr errors from
+        # visitor mismatches). A truly unexpected exception should bubble up
+        # so the batch fails loudly instead of committing an incomplete stub.
+        except (OSError, SyntaxError, ValueError, TypeError, AttributeError) as e:
             logger.warning("  Error stubbing %s: %s", rel, e)
             errors += 1
 
@@ -1144,9 +1173,15 @@ def prepare_repos(
                 logger.info("  Auto-detected src_dir: %s", src_dir)
 
         if not src_dir:
+            # T16: this used to log "FATAL" but call continue — which the batch
+            # driver reads as a soft skip. The FATAL label made it look like a
+            # hard stop and hid the real state (candidate rejected, batch
+            # continues). Reword so log-scanners see it correctly, and record
+            # the rejection reason on the entry so downstream tools can report.
             logger.error(
-                "  FATAL: src_dir is empty for %s. "
-                "Cannot determine source directory. Use --src-dir to specify manually.",
+                "  SKIP: src_dir is empty for %s. Cannot determine source"
+                " directory. Use --src-dir to specify manually. Candidate is"
+                " excluded from this batch; other repos will still be processed.",
                 full_name,
             )
             continue
@@ -1340,6 +1375,11 @@ def _run_detect_only(
     rows: list[dict] = []
     for c in candidates:
         full_name = c.get("full_name") or c.get("repo", "")
+        try:
+            _validate_github_full_name(full_name)  # T6: path-traversal guard
+        except ValueError as _exc:
+            rows.append({"repo": full_name, "version": None, "source": f"invalid-name: {_exc}"})
+            continue
         repo_dir = clone_dir / full_name.replace("/", "__")
         if not repo_dir.is_dir():
             rows.append(
@@ -1549,7 +1589,12 @@ def main() -> None:
             }
         ]
     elif args.validated_file:
-        candidates = json.loads(Path(args.validated_file).read_text(encoding="utf-8"))
+        # T3 fix: guard against malformed validated file.
+        try:
+            candidates = json.loads(Path(args.validated_file).read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            parser.error(f"Validated JSON at {args.validated_file} is malformed: {e}")
+            return
     else:
         parser.error("Provide either validated_file or --repo")
         return

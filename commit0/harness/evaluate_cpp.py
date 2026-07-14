@@ -171,12 +171,19 @@ def evaluate_single_repo(
         return results
 
 
-def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
+def _aggregate_cpp_results(
+    log_dir: str, name: str, out: list, base_compiles: bool = False
+) -> None:
     """Parse C++ test results from *log_dir* and append a summary dict to *out*.
 
     Looks for ``test_output.txt`` and ``test_exit_code.txt`` in the log
     directory.  Auto-detects the test framework (GTest, Catch2, doctest,
     Boost.Test, CTest) and delegates to the appropriate parser.
+
+    ``base_compiles`` is the prep-time A11 result for this repo. When it is True,
+    a build failure here is the MODEL's fault (the stubbed base compiled and the
+    patch applied) — a genuine 0/N failure that must count in the denominator,
+    NOT an infra 0/0 that silently drops out of the micro-averaged pass rate.
     """
     test_output_file = os.path.join(log_dir, "test_output.txt")
     exit_code_file = os.path.join(log_dir, "test_exit_code.txt")
@@ -204,6 +211,28 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
         except (ValueError, OSError):
             pass
 
+    # Timeout detection: exit codes 124/137/143 come from the `timeout` wrapper
+    # in spec_cpp's eval.sh. Emit TEST_SUITE_TIMEOUT before parsing tests so the
+    # kill-signaled run is scored as infra, not a legitimate 0%.
+    from commit0.harness._eval_common import (
+        detect_patch_apply_failed as _dpaf,
+        detect_timeout as _dto,
+    )
+    if _dto(exit_code):
+        logger.warning("%s: test suite timed out (exit %s)", name, exit_code)
+        out.append(
+            {
+                "name": name,
+                "sum": 0,
+                "passed": 0,
+                "num_passed": 0,
+                "num_tests": 0,
+                "status": "TEST_SUITE_TIMEOUT",
+                "timed_out": True,
+            }
+        )
+        return
+
     try:
         with open(test_output_file, "r") as f:
             content = f.read()
@@ -221,9 +250,11 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
         )
         return
 
-    # eval.sh writes this sentinel (and nothing else) when `git apply` of the
-    # model patch fails — so the 0/N is an infra/patch failure, not a real score.
-    if content.strip() == "PATCH_APPLY_FAILED":
+    # PATCH_APPLY_FAILED detection via HEAD+TAIL shared helper (was brittle
+    # `content.strip() == "PATCH_APPLY_FAILED"` which broke on any surrounding
+    # noise). The sentinel is written by eval.sh when `git apply` of the model
+    # patch fails — the 0/N is infra, not a real score.
+    if _dpaf([Path(test_output_file), Path(exit_code_file)]):
         logger.warning("%s: patch failed to apply (PATCH_APPLY_FAILED)", name)
         out.append(
             {
@@ -233,8 +264,67 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
                 "num_passed": 0,
                 "num_tests": 0,
                 "status": "PATCH_APPLY_FAILED",
+                "patch_apply_failed": True,
             }
         )
+        return
+
+    # Fix for silent-zero-when-configure-fails (regression fixture at
+    # outputs/.../stage2_eval_artifacts/fmt/aider-cpp-gpt-5.5-dataset/
+    # cdb4ee2aea69cc6a83331b/test_output.txt): if the eval script's configure
+    # step failed, `cmake --build build` errored with 'is not a directory'
+    # and 0 tests were parsed — downstream scored as 0/N legit. spec_cpp now
+    # emits BUILD_CONFIGURE_FAILED as the first line of test_output on that
+    # branch so we can distinguish and exclude from the score.
+    _content_head = content.lstrip()
+    if _content_head.startswith("BUILD_CONFIGURE_FAILED"):
+        logger.warning("%s: configure step failed (BUILD_CONFIGURE_FAILED)", name)
+        out.append(
+            {
+                "name": name,
+                "sum": 0,
+                "passed": 0,
+                "num_passed": 0,
+                "num_tests": 0,
+                "status": "BUILD_CONFIGURE_FAILED",
+            }
+        )
+        return
+
+    # spec_cpp now writes a COMPILE_FAILED sentinel when the build step exits
+    # non-zero (matches C's posture). Detect it explicitly at the start of the
+    # file before falling through to the heuristic parser that infers it from
+    # per-binary build attribution.
+    if _content_head.startswith("COMPILE_FAILED"):
+        logger.warning("%s: build step failed (COMPILE_FAILED sentinel)", name)
+        _expected = _expected_test_count(name)
+        if base_compiles and _expected > 0:
+            # The stubbed base compiled (A11) and the patch already applied (we
+            # reached the build), so this build failure is the MODEL's broken
+            # code, NOT infra. Score it 0/N (N = canonical count) so it counts as
+            # a real 0% in the micro-averaged pass rate instead of a 0/0 that
+            # drops out of the denominator and silently inflates the benchmark.
+            logger.warning(
+                "%s: base_compiles=True -> model-caused compile failure; scoring "
+                "0/%d (COMPILE_FAILED_MODEL), not excluded", name, _expected,
+            )
+            out.append(
+                {
+                    "name": name, "sum": 0, "passed": 0,
+                    "num_passed": 0, "num_tests": _expected,
+                    "status": "COMPILE_FAILED_MODEL",
+                }
+            )
+        else:
+            # base_compiles is False/unknown (or no canonical inventory): the base
+            # itself may be broken -> infra failure, keep 0/0 (excluded).
+            out.append(
+                {
+                    "name": name, "sum": 0, "passed": 0,
+                    "num_passed": 0, "num_tests": 0,
+                    "status": "COMPILE_FAILED",
+                }
+            )
         return
 
     report = parse_cpp_test_output(content, exit_code)
@@ -268,11 +358,24 @@ def _aggregate_cpp_results(log_dir: str, name: str, out: list) -> None:
     # tests never ran; a 0/N here is a build failure, not a 0% model score. Mirror
     # go/rust/c's COMPILE_FAILED so the pipeline can exclude it from the score.
     if total_test_binaries > 0 and len(tests_built) == 0:
-        status = "COMPILE_FAILED"
-        logger.warning(
-            "%s: COMPILE_FAILED — all %d test binary/binaries failed to build",
-            name, total_test_binaries,
-        )
+        if base_compiles and expected > 0:
+            # Base compiled + patch applied but the model's code fails to build the
+            # test binaries -> a genuine MODEL 0/N failure (scored), not infra.
+            status = "COMPILE_FAILED_MODEL"
+            num_tests = max(num_tests, expected)
+            num_passed = 0
+            logger.warning(
+                "%s: COMPILE_FAILED_MODEL — base compiles but all %d test "
+                "binary/binaries failed to build; scoring 0/%d",
+                name, total_test_binaries, num_tests,
+            )
+        else:
+            status = "COMPILE_FAILED"
+            num_tests = 0  # infra: drop from the denominator
+            logger.warning(
+                "%s: COMPILE_FAILED — all %d test binary/binaries failed to build",
+                name, total_test_binaries,
+            )
     # C++ counts from RAW STDOUT (GTest `[ OK ]`, ...), so a model can print fake
     # pass lines. The build+test process exits 0 IFF every test passed, so a claim
     # of all-pass with a non-zero exit is impossible for a genuine run -> forged.
@@ -435,12 +538,22 @@ def main(
                         "C++ evaluation failed for %s: %s", repo_name, e, exc_info=True
                     )
 
+    # A11 base-compile result per repo basename — lets a build failure be scored
+    # as a MODEL 0/N (base compiled) vs excluded as infra (base broken).
+    base_compiles_by_name = {
+        ex["repo"].split("/")[-1]: bool(ex.get("base_compiles"))
+        for ex in dataset_list
+    }
+
     out = []
     for log_path in tqdm(log_dirs):
         log_name = os.path.basename(os.path.dirname(os.path.dirname(log_path)))
         if not log_name:
             log_name = log_path.split("/")[2] if len(log_path.split("/")) > 2 else "unknown"
-        _aggregate_cpp_results(log_path, log_name, out)
+        _aggregate_cpp_results(
+            log_path, log_name, out,
+            base_compiles=base_compiles_by_name.get(log_name, False),
+        )
 
     # 4th column = per-repo outcome so the shell pipeline can tell a genuine 0%
     # model score from a build/patch/infra failure (mirrors go/rust/c). Default

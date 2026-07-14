@@ -96,10 +96,20 @@ def clone_repo(slug: str, dest: Path) -> Path:
         ["git", "clone", "--depth", "1", f"https://github.com/{slug}.git", str(target)],
         check=True,
     )
-    # Unshallow so we can checkout history-tracking branches.
-    subprocess.run(
-        ["git", "-C", str(target), "fetch", "--unshallow"], check=False
+    # H1: Unshallow so we can checkout history-tracking branches. Silent
+    # unshallow failure previously left the clone shallow with no signal;
+    # downstream `git fetch origin <commit>` then failed with a cryptic
+    # "not our ref". Log the stderr breadcrumb so operators can spot it.
+    _un = subprocess.run(
+        ["git", "-C", str(target), "fetch", "--unshallow"],
+        check=False, capture_output=True, text=True,
     )
+    if _un.returncode != 0:
+        logger.warning(
+            "  git fetch --unshallow failed for %s (rc=%s stderr=%s);"
+            " clone stays shallow — history-tracking checkouts may fail",
+            slug, _un.returncode, (_un.stderr or "").strip()[:200],
+        )
     return target
 
 
@@ -551,6 +561,12 @@ def _c_pristine_error_count(
     return _c_parse_error_signature(tree.root_node)
 
 
+# M3: 30% stub-ratio threshold was hardcoded, so macro-heavy legacy C repos
+# where cstubber legitimately stubs less than a third of the visible function
+# declarations were silently rejected. Now: default stays 0.30, but callers
+# (main() reads --min-stub-ratio) can override.
+DEFAULT_MIN_STUB_RATIO = 0.30
+
 def prepare_one(
     slug: str,
     clone_dir: Path,
@@ -561,6 +577,7 @@ def prepare_one(
     skip_spec: bool = False,
     spec_url: str = "",
     specs_dir: Path = Path("specs"),
+    min_stub_ratio: float = DEFAULT_MIN_STUB_RATIO,
 ) -> dict | None:
     """Prepare a single C repo. Returns a dataset entry or None if rejected."""
     repo_path = clone_repo(slug, clone_dir)
@@ -603,14 +620,16 @@ def prepare_one(
 
     if (
         report.function_decl_count > 0
-        and report.functions_stubbed / report.function_decl_count < 0.30
+        and report.functions_stubbed / report.function_decl_count < min_stub_ratio
     ):
         logger.warning(
-            "%s: stubbed only %d / %d functions (<30%%) — likely macro-heavy. "
-            "Skipping.",
+            "%s: stubbed only %d / %d functions (<%.0f%%) — likely macro-heavy."
+            " Skipping. Override with --min-stub-ratio (default %.2f).",
             slug,
             report.functions_stubbed,
             report.function_decl_count,
+            min_stub_ratio * 100,
+            DEFAULT_MIN_STUB_RATIO,
         )
         return None
 
@@ -807,6 +826,16 @@ def main() -> None:
         help="Root for consolidated outputs (overrides $KAIJU_OUTPUTS_ROOT; default: ./outputs)",
     )
     parser.add_argument(
+        "--min-stub-ratio",
+        type=float,
+        default=DEFAULT_MIN_STUB_RATIO,
+        help=(
+            "M3: minimum ratio of stubbed / total functions before we accept a"
+            f" candidate. Default {DEFAULT_MIN_STUB_RATIO}. Lower for macro-heavy"
+            " legacy C repos where cstubber legitimately stubs less than 30%."
+        ),
+    )
+    parser.add_argument(
         "--layout",
         choices=["flat", "consolidated"],
         default=None,
@@ -855,6 +884,7 @@ def main() -> None:
                 skip_spec=args.skip_spec,
                 spec_url=args.spec_url,
                 specs_dir=args.specs_dir,
+                min_stub_ratio=args.min_stub_ratio,
             )
         except Exception:
             logger.exception("Failed to prepare %s", slug)

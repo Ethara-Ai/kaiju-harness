@@ -10,6 +10,14 @@ from commit0.harness.constants import (
     TestStatus,
 )
 
+# Ubuntu base image version for the CPP toolchain. Selected to match the
+# default GCC version bundled with each Ubuntu release:
+#   ubuntu:20.04 -> GCC 9  (legacy repos, C++03/11 exact behavior)
+    #   ubuntu:22.04 -> GCC 11 (default; supports C++98..C++20)
+    #   ubuntu:24.04 -> GCC 13 (modern; supports C++20/23)
+    # Override via CPP_UBUNTU_VERSION env var for repos needing a specific GCC.
+CPP_UBUNTU_VERSION = os.environ.get("CPP_UBUNTU_VERSION", "22.04")
+
 __all__ = [
     "CppRepoInstance",
     "CPP_STUB_MARKER",

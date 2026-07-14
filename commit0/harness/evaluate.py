@@ -11,6 +11,7 @@ from tqdm import tqdm
 from typing import Iterator, Union
 
 from commit0.harness.run_pytest_ids import main as run_tests
+from commit0.harness._eval_common import detect_patch_apply_failed, detect_timeout
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RepoInstance, SPLIT, RUN_PYTEST_LOG_DIR
 from commit0.harness.split_utils import resolve_split
@@ -93,18 +94,11 @@ def main(
         dataset_split,
         repo_split,
     )
-    if "swe" in dataset_name.lower():
-        all_instance_ids = [ex["instance_id"] for ex in dataset_list]
-        if repo_split == "all":
-            pass
-        else:
-            [iid for iid in all_instance_ids if repo_split in iid]
-    else:
-        (
-            SPLIT[repo_split]
-            if repo_split in SPLIT
-            else [ex["repo"].split("/")[-1] for ex in dataset_list]
-        )
+    # P12: previous dead-code block computed all_instance_ids and two filtered
+    # views but discarded the results. The real filtering happens inline in the
+    # `for example in dataset_list` loop below (via `allowed_repos` for non-swe
+    # and instance_id substring check for swe). Removed to avoid the confusion
+    # that spawned the original critique.
     triples = []
     log_dirs = []
     allowed_repos: set[str] = set()
@@ -213,12 +207,34 @@ def main(
     for name in tqdm(log_dirs):
         report_file = os.path.join(name, "report.json")
         name = name.split("/")[2]
+        # P7: get_tests returns List[List[str]] (fail_to_pass + pass_to_pass)
+        # per commit0.harness.get_pytest_ids.main signature — this flattens the
+        # two sublists into a single list of test node ids. Do NOT change to a
+        # single-level comprehension: if tests_ids were flat strings, iterating
+        # 'for xx in x' would expose characters.
         test_ids = get_tests(name, verbose=0)
         test_ids = [xx for x in test_ids for xx in x if xx]
         if not os.path.exists(report_file):
             log_parent = os.path.dirname(report_file)
             test_output_file = os.path.join(log_parent, "test_output.txt")
-            if os.path.exists(test_output_file):
+            pytest_exit_file = os.path.join(log_parent, "pytest_exit_code.txt")
+            # Detect patch-apply failure (eval.sh wrote PATCH_APPLY_FAILED sentinel)
+            # and timeout kill (exit 124/137/143 from `timeout` wrapper). Both are
+            # infra failures that must be flagged so run_pipeline.sh can distinguish
+            # them from a legitimate 0% score.
+            from pathlib import Path as _Path
+            _patch_failed = detect_patch_apply_failed([_Path(test_output_file)])
+            _pytest_exit = None
+            try:
+                _pytest_exit = int(_Path(pytest_exit_file).read_text().strip())
+            except (FileNotFoundError, ValueError, OSError):
+                pass
+            _timed_out = detect_timeout(_pytest_exit)
+            if _patch_failed:
+                reason = "patch_apply_failed"
+            elif _timed_out:
+                reason = "test_suite_timeout"
+            elif os.path.exists(test_output_file):
                 reason = "pytest_crash_or_collection_error"
             else:
                 reason = "container_or_infra_failure"
@@ -238,6 +254,8 @@ def main(
                     "num_passed": 0,
                     "num_tests": len(test_ids),
                     "error": reason,
+                    "patch_apply_failed": _patch_failed,
+                    "timed_out": _timed_out,
                 }
             )
             continue
@@ -288,6 +306,20 @@ def main(
                 "commit0/data/<subdir>/%s.bz2; run_trajectory step 3b).",
                 name, len(test_ids), len(tests), _report_passed, name,
             )
+            # P1 fix: DO NOT record a bogus score alongside the marker.
+            # Previously we fell through to append(...) with a 0/N score that
+            # downstream consumers could mistake for a legitimate result. Emit
+            # the marker as an entry with sentinel status so callers see BOTH
+            # signals coherently.
+            out.append({
+                "name": name,
+                "sum": 0,
+                "passed": None,  # sentinel: not scored
+                "num_passed": 0,
+                "num_tests": len(test_ids),
+                "status": "INVENTORY_MISMATCH",
+            })
+            continue
         status = Counter(status)
         if no_runs == 0:
             total = 0

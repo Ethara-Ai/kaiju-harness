@@ -24,6 +24,7 @@ import os
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
 from kaiju.paths import datasets_dir
 import uuid as _uuid_mod
@@ -66,6 +67,13 @@ OPTIONAL_SETUP_FIELDS = {
 SETUP_FIELDS = REQUIRED_SETUP_FIELDS | OPTIONAL_SETUP_FIELDS
 TEST_FIELDS = {"test_cmd", "test_dir"}
 
+# T8: git commit SHAs are lowercase hex, 7-64 chars (SHA-1 to SHA-256).
+# Previously validation only checked length (>=7), so 'not_a_sha' or
+# 'zzzzzzz' would pass and later fail deep in the pipeline with an
+# opaque git error. Enforce hex-only shape here so bad dataset rows
+# are rejected at the dataset-boundary.
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
+
 
 def validate_entry(entry: dict, index: int) -> list[str]:
     """Validate a single dataset entry. Returns list of issues."""
@@ -89,15 +97,17 @@ def validate_entry(entry: dict, index: int) -> list[str]:
         if missing_test:
             issues.append(f"[{index}] test missing fields: {missing_test}")
 
-    if "base_commit" in entry and len(entry.get("base_commit", "")) < 7:
-        issues.append(
-            f"[{index}] base_commit too short: {entry.get('base_commit', '')}"
-        )
-
-    if "reference_commit" in entry and len(entry.get("reference_commit", "")) < 7:
-        issues.append(
-            f"[{index}] reference_commit too short: {entry.get('reference_commit', '')}"
-        )
+    for _sha_field in ("base_commit", "reference_commit"):
+        _val = entry.get(_sha_field, "")
+        if _sha_field in entry:
+            if len(_val) < 7:
+                issues.append(
+                    f"[{index}] {_sha_field} too short: {_val!r}"
+                )
+            elif not _COMMIT_SHA_RE.match(_val):
+                issues.append(
+                    f"[{index}] {_sha_field} is not a valid hex git SHA: {_val!r}"
+                )
 
     if "setup" in entry and isinstance(entry["setup"], dict):
         py_version = entry["setup"].get("python")
@@ -305,7 +315,15 @@ def main() -> None:
     _consolidated = os.environ.get("KAIJU_LOG_LAYOUT", "consolidated").lower() == "consolidated"
 
     # Load entries
-    entries = json.loads(Path(args.entries_file).read_text(encoding="utf-8"))
+    # T3 fix: guard against malformed entries file with a clean error.
+    try:
+        entries = json.loads(Path(args.entries_file).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        parser.error(f"Entries file not found: {args.entries_file}")
+        return
+    except json.JSONDecodeError as e:
+        parser.error(f"Entries JSON at {args.entries_file} is malformed: {e}")
+        return
     logger.info("Loaded %d entries from %s", len(entries), args.entries_file)
 
     # Validate

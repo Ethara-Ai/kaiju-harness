@@ -39,7 +39,7 @@ REPO_BASE="${BASE_DIR}/repos"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
-LANGUAGE="go"  # LOW: parity with rust driver (LANGUAGE="rust") for one env-var contract.
+export LANGUAGE="go"  # LOW: parity with rust driver (LANGUAGE="rust") for one env-var contract.
 
 MODEL_ARG=""
 USE_CLAUDE_CODE="false"
@@ -146,6 +146,13 @@ if [[ "$NUM_SAMPLES" -gt 1 ]] && [[ -n "$SKIP_TO_STAGE" ]]; then
     echo "Error: --skip-to-stage and --num-samples > 1 cannot be used together."
     exit 1
 fi
+
+# Preserve the EXPLICIT --skip-to-stage value (usually empty). SKIP_TO_STAGE is a
+# global that --resume RE-COMPUTES per sample; without resetting it to this
+# baseline at the top of each sample, sample 1's computed value (e.g. "3") leaks
+# into sample 2 and either aborts ("no prior results") or evaluates wrong stages.
+# (Issue 10)
+_SKIP_TO_STAGE_CLI="$SKIP_TO_STAGE"
 
 # ============================================================
 # Model resolution and preflight (shared across all pipelines)
@@ -604,6 +611,13 @@ _pgroup_has_live_conn() {
 bc_json() {
     local _out
     _out=$(echo "$1" | bc) || return 1
+    # bc exits 0 even on a SYNTAX error (writing the diagnostic to stderr and
+    # nothing / a partial value to stdout), so the caller's `|| return 1` guard
+    # never fires and an empty/garbage value flows into a jq argjson binding or
+    # shell arithmetic. Validate the result is a plain number before returning it.
+    if ! [[ "$_out" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
+        return 1
+    fi
     printf '%s\n' "$_out" | sed -E 's/^(-?)\./\10./'
 }
 
@@ -946,11 +960,33 @@ watchdog_run() {
 # (_mark_module_done), so the count converges to 0 unless GENUINELY persistent.
 # Args: <log_dir> <agent_log> -- <base agent command...>  (command WITHOUT
 # --override-previous-changes, which would reset the branch and discard progress).
+# Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
+# .needs_retry means the agent was killed mid-post-processing (typically by the
+# inactivity watchdog after aider finished a turn but before _mark_module_done
+# ran). Auto-resume detection uses `.needs_retry` files, so limbo modules would
+# be silently skipped without this sweep. Convert them so auto-resume re-runs them.
+_sweep_limbo_modules() {
+    local _ld="$1"
+    [[ -d "$_ld" ]] || return 0
+    local _swept=0 _aider _moddir
+    while IFS= read -r _aider; do
+        _moddir=$(dirname "$_aider")
+        if [[ ! -f "$_moddir/.done" && ! -f "$_moddir/.needs_retry" ]]; then
+            echo "limbo (agent killed mid-postprocessing, no .done marker)" > "$_moddir/.needs_retry"
+            _swept=$((_swept + 1))
+        fi
+    done < <(find "$_ld" -type f -name aider.log 2>/dev/null)
+    if [[ "$_swept" -gt 0 ]]; then
+        log "  SWEEP: converted ${_swept} limbo module(s) to .needs_retry (had aider.log but neither .done nor .needs_retry)"
+    fi
+}
+
 _auto_resume_agent() {
     local _ld="$1" _alog="$2"; shift 2
     [[ "${1:-}" == "--" ]] && shift
     local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
-    _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
     while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
         _auto=$((_auto + 1))
         log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
@@ -969,7 +1005,8 @@ _auto_resume_agent() {
         set -e
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
-        _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
@@ -1683,6 +1720,10 @@ declare -a SAMPLE_RESULT_FILES=()
 
 run_single_sample() {
     local sample_idx="$1"
+
+    # Reset the (global) resume stage to the explicit CLI baseline so a value
+    # computed for a PRIOR sample's resume can't leak into this one. (Issue 10)
+    SKIP_TO_STAGE="$_SKIP_TO_STAGE_CLI"
 
     set_sample_vars "$sample_idx"
 

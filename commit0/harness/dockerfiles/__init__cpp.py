@@ -13,7 +13,8 @@ def get_dockerfile_base_cpp() -> str:
         raise FileNotFoundError(
             f"C++ base Dockerfile template not found: {template_path}"
         )
-    return template_path.read_text()
+    from commit0.harness.constants_cpp import CPP_UBUNTU_VERSION
+    return template_path.read_text().replace("__CPP_UBUNTU_VERSION__", CPP_UBUNTU_VERSION)
 
 
 def get_dockerfile_repo_cpp(

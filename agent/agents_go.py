@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 def handle_logging(logger_name: str, log_file: Path) -> None:
     log = logging.getLogger(logger_name)
     log.setLevel(logging.DEBUG)
+    # Remove + close any FileHandler we attached on a PRIOR module's run(). These
+    # library loggers ("httpx"/"backoff") are module-level singletons, so without
+    # this every module adds another handler: each new log line is then written
+    # to EVERY prior module's aider.log (cross-module contamination that also
+    # feeds the transient scan) and one file descriptor leaks per module.
+    for _h in list(log.handlers):
+        if isinstance(_h, logging.FileHandler):
+            log.removeHandler(_h)
+            try:
+                _h.close()
+            except Exception:  # noqa: BLE001 - best-effort close
+                pass
     fh = logging.FileHandler(log_file)
     fh.setLevel(logging.DEBUG)
     log.addHandler(fh)
@@ -356,6 +368,19 @@ class AiderGoAgents(GoAgents):
         chat_history_file = log_dir / ".aider.chat.history.md"
         log_file = log_dir / "aider.log"
 
+        # Record the pre-run byte size of every stream the post-run transient
+        # scan reads. run_with_recovery re-invokes this run() with the SAME
+        # log_dir on each retry, and the logs are opened in APPEND mode, so a
+        # transient signal ("timed out", "max retries exceeded", …) left by a
+        # PRIOR attempt — or by litellm's own internal retry that then SUCCEEDED
+        # — would otherwise be re-read every retry and re-raise TransientLLMError
+        # forever (a full, real-cost module re-run each time). Scoping the scan
+        # to text appended DURING this attempt fixes the cross-retry contamination.
+        _scan_start_offsets = {
+            p: (p.stat().st_size if p.exists() else 0)
+            for p in (chat_history_file, log_file, log_dir / "llm_history.txt")
+        }
+
         _saved_stdout = sys.stdout
         _saved_stderr = sys.stderr
         try:
@@ -571,7 +596,13 @@ class AiderGoAgents(GoAgents):
         session_text = ""
         for _p in (log_file, chat_history_file, log_dir / "llm_history.txt"):
             try:
-                session_text += "\n" + Path(_p).read_text(errors="replace")
+                # Read ONLY the bytes appended during THIS attempt (from the
+                # offset captured before the run) so a prior attempt's persisted
+                # transient signal can't re-fire the retry loop.
+                _start = _scan_start_offsets.get(_p, 0)
+                with open(_p, "r", errors="replace") as _fh:
+                    _fh.seek(_start)
+                    session_text += "\n" + _fh.read()
             except OSError:
                 continue
         raise_if_transient_llm_error(

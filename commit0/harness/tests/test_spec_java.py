@@ -16,8 +16,8 @@ def _make_instance(**overrides: object) -> dict:
     defaults: dict = {
         "instance_id": "apache/commons-lang",
         "repo": "apache/commons-lang",
-        "base_commit": "abc123",
-        "reference_commit": "def456",
+        "base_commit": "abc1230000000000000000000000000000000000",
+        "reference_commit": "def4560000000000000000000000000000000000",
         "setup": {},
         "test": {"test_cmd": "mvn test"},
         "src_dir": "src",

@@ -349,9 +349,15 @@ func zeroValueExpr(expr ast.Expr) ast.Expr {
 	case *ast.StarExpr:
 		return &ast.Ident{Name: "nil"}
 	case *ast.ArrayType:
-		return &ast.Ident{Name: "nil"}
-	case *ast.SliceExpr:
-		return &ast.Ident{Name: "nil"}
+		// In Go's AST both slices ([]T) and fixed-size arrays ([N]T) are
+		// *ast.ArrayType, distinguished by .Len (nil => slice). `nil` is the
+		// zero value for a slice, but a COMPILE ERROR for a fixed-size array
+		// ("cannot use nil as [N]T value"). Emit the composite-literal zero
+		// value [N]T{} for fixed arrays so the stubbed base still compiles.
+		if t.Len == nil {
+			return &ast.Ident{Name: "nil"}
+		}
+		return &ast.CompositeLit{Type: t}
 	case *ast.MapType:
 		return &ast.Ident{Name: "nil"}
 	case *ast.ChanType:

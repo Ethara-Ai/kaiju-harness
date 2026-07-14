@@ -25,6 +25,7 @@ from agent.agent_utils_java import (
 )
 from agent.agents_java import JavaAgents
 from agent.agents import TransientLLMError
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
 from agent.config_java import JavaAgentConfig
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
 from agent.llm_cost_capture import capture_module_calls
@@ -501,30 +502,46 @@ def run_java_agent(
                             thinking_capture.summarizer_costs.add(c)
 
                     module_start = time.time()
-                    with capture_module_calls(
-                        thinking_capture=thinking_capture,
-                        module=test_log_name,
-                        log_dir=test_log_dir,
-                    ):
+                    agent_return = None
+                    _module_ok = False
+                    for _mret in range(INLINE_MODULE_MAX_RETRIES):
                         try:
-                            agent_return = run_with_recovery(java_agent.run,
-                                message="",
-                                test_cmd=test_cmd,
-                                lint_cmd=compile_cmd,
-                                fnames=stubbed_files,
-                                log_dir=test_log_dir,
-                                test_first=True,
+                            with capture_module_calls(
                                 thinking_capture=thinking_capture,
-                                current_stage="test",
-                                current_module=test_log_name,
-                                max_test_output_length=agent_config.max_test_output_length,
-                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                                test_files_readonly=test_files_readonly,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=test_log_dir,)
+                                module=test_log_name,
+                                log_dir=test_log_dir,
+                            ):
+                                agent_return = run_with_recovery(java_agent.run,
+                                    message="",
+                                    test_cmd=test_cmd,
+                                    lint_cmd=compile_cmd,
+                                    fnames=stubbed_files,
+                                    log_dir=test_log_dir,
+                                    test_first=True,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="test",
+                                    current_module=test_log_name,
+                                    max_test_output_length=agent_config.max_test_output_length,
+                                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                    test_files_readonly=test_files_readonly,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                _kaiju_log_dir=test_log_dir,)
+                            _module_ok = True
+                            break
                         except TransientLLMError as _tle:
-                            _skip_failed_module(test_log_dir, test_log_name, _tle)
-                            continue
+                            if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                _skip_failed_module(test_log_dir, test_log_name, _tle)
+                                break
+                            _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                            logger.warning(
+                                "Module %s (test) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                test_log_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                            )
+                            if thinking_capture is not None:
+                                thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
+                            time.sleep(_wait)
+                    if not _module_ok or agent_return is None:
+                        continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -596,30 +613,46 @@ def run_java_agent(
 
                 try:
                     module_start = time.time()
-                    with capture_module_calls(
-                        thinking_capture=thinking_capture,
-                        module=file_log_name,
-                        log_dir=file_log_dir,
-                    ):
+                    agent_return = None
+                    _module_ok = False
+                    for _mret in range(INLINE_MODULE_MAX_RETRIES):
                         try:
-                            agent_return = run_with_recovery(java_agent.run,
-                                message="",
-                                test_cmd="",
-                                lint_cmd=compile_cmd,
-                                fnames=[stubbed_file],
-                                log_dir=file_log_dir,
-                                lint_first=True,
+                            with capture_module_calls(
                                 thinking_capture=thinking_capture,
-                                current_stage="lint",
-                                current_module=file_log_name,
-                                max_test_output_length=agent_config.max_test_output_length,
-                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                                test_files_readonly=test_files_readonly,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=file_log_dir,)
+                                module=file_log_name,
+                                log_dir=file_log_dir,
+                            ):
+                                agent_return = run_with_recovery(java_agent.run,
+                                    message="",
+                                    test_cmd="",
+                                    lint_cmd=compile_cmd,
+                                    fnames=[stubbed_file],
+                                    log_dir=file_log_dir,
+                                    lint_first=True,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="lint",
+                                    current_module=file_log_name,
+                                    max_test_output_length=agent_config.max_test_output_length,
+                                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                    test_files_readonly=test_files_readonly,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                _kaiju_log_dir=file_log_dir,)
+                            _module_ok = True
+                            break
                         except TransientLLMError as _tle:
-                            _skip_failed_module(file_log_dir, file_log_name, _tle)
-                            continue
+                            if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                _skip_failed_module(file_log_dir, file_log_name, _tle)
+                                break
+                            _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                            logger.warning(
+                                "Module %s (lint) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                file_log_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                            )
+                            if thinking_capture is not None:
+                                thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
+                            time.sleep(_wait)
+                    if not _module_ok or agent_return is None:
+                        continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 
@@ -681,29 +714,45 @@ def run_java_agent(
                             thinking_capture.summarizer_costs.add(c)
 
                     module_start = time.time()
-                    with capture_module_calls(
-                        thinking_capture=thinking_capture,
-                        module=file_log_name,
-                        log_dir=file_log_dir,
-                    ):
+                    agent_return = None
+                    _module_ok = False
+                    for _mret in range(INLINE_MODULE_MAX_RETRIES):
                         try:
-                            agent_return = run_with_recovery(java_agent.run,
-                                message=message,
-                                test_cmd="",
-                                lint_cmd=compile_cmd,
-                                fnames=[stubbed_file],
-                                log_dir=file_log_dir,
+                            with capture_module_calls(
                                 thinking_capture=thinking_capture,
-                                current_stage="draft",
-                                current_module=file_log_name,
-                                max_test_output_length=agent_config.max_test_output_length,
-                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                                test_files_readonly=test_files_readonly,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=file_log_dir,)
+                                module=file_log_name,
+                                log_dir=file_log_dir,
+                            ):
+                                agent_return = run_with_recovery(java_agent.run,
+                                    message=message,
+                                    test_cmd="",
+                                    lint_cmd=compile_cmd,
+                                    fnames=[stubbed_file],
+                                    log_dir=file_log_dir,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="draft",
+                                    current_module=file_log_name,
+                                    max_test_output_length=agent_config.max_test_output_length,
+                                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                    test_files_readonly=test_files_readonly,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                _kaiju_log_dir=file_log_dir,)
+                            _module_ok = True
+                            break
                         except TransientLLMError as _tle:
-                            _skip_failed_module(file_log_dir, file_log_name, _tle)
-                            continue
+                            if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                _skip_failed_module(file_log_dir, file_log_name, _tle)
+                                break
+                            _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                            logger.warning(
+                                "Module %s (draft) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                file_log_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                            )
+                            if thinking_capture is not None:
+                                thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
+                            time.sleep(_wait)
+                    if not _module_ok or agent_return is None:
+                        continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

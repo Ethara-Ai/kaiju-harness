@@ -215,10 +215,11 @@ class TestGenerateSetupDictTsEdgeCases:
     def test_package_json_parse_failure_fallback(self, tmp_path: Path) -> None:
         (tmp_path / "package.json").write_text("invalid json")
 
-        # Issue E3: With no detectable test dir and no config, generate_setup_dict_ts
-        # must hard-error (previous silent `__tests__` default caused batch-2 failures).
-        with pytest.raises(RuntimeError, match="Could not detect a test directory"):
-            generate_setup_dict_ts(tmp_path)
+        # B5: reverted E3 hard-error — mirror JS (prepare_repo_js.py:711-716)
+        # and default test_dir='.' so the framework self-discovers. A truly
+        # test-less repo surfaces downstream as 0 collected (infra flag).
+        setup_dict, test_dict, test_framework = generate_setup_dict_ts(tmp_path)
+        assert test_dict["test_dir"] == "."
 
     def test_package_json_parse_failure_with_tests_present(self, tmp_path: Path) -> None:
         (tmp_path / "package.json").write_text("invalid json")
@@ -232,12 +233,12 @@ class TestGenerateSetupDictTsEdgeCases:
         assert test_dict["test_dir_detected_by"] in ("config", "recursive-scan")
 
     def test_no_test_dirs_raises_runtime_error(self, tmp_path: Path) -> None:
-        # Issue E3: hard error when no test dir is detectable.
+        # B5: reverted E3 hard-error — defaults test_dir='.' with warning.
         pkg = {"devDependencies": {"jest": "^29.0.0"}}
         (tmp_path / "package.json").write_text(json.dumps(pkg))
 
-        with pytest.raises(RuntimeError, match="Could not detect a test directory"):
-            generate_setup_dict_ts(tmp_path)
+        setup_dict, test_dict, test_framework = generate_setup_dict_ts(tmp_path)
+        assert test_dict["test_dir"] == "."
 
     def test_known_test_packages_filtered(self, tmp_path: Path) -> None:
         pkg = {

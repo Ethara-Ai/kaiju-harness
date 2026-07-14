@@ -133,26 +133,31 @@ class Commit0TsSpec(Spec):
         setup = self._get_setup_dict()
         install_cmd = setup.get("install", "npm install")
         default_test = f"{_exec_prefix_from_install(install_cmd)} jest"
-        test_cmd = (
+        # Metachar guard runs on the RAW test_cmd (BEFORE the timeout wrapper),
+        # because the wrapper itself contains `$` and `{}` from ${EVAL_TEST_TIMEOUT:-900}
+        # which are intentional interpolation, not injection. Doing this check
+        # after wrapping would false-positive on every legitimate command.
+        _raw_test_cmd = (
             test.get("test_cmd", default_test)
             if isinstance(test, dict)
             else default_test
         )
-
         _SHELL_DANGER = set(";&|`$(){}!><\\\n\r")
-        if any(c in _SHELL_DANGER for c in test_cmd):
-            # NEVER execute a metachar-bearing test command; warn and fall back to
-            # the safe default instead of raising (mirrors spec_js).
+        if any(c in _SHELL_DANGER for c in _raw_test_cmd):
             logger.warning(
                 "test_cmd contains shell metacharacters (injection risk): %r; "
-                "falling back to the safe default %r.", test_cmd, default_test,
+                "falling back to the safe default %r.", _raw_test_cmd, default_test,
             )
-            test_cmd = default_test
+            _raw_test_cmd = default_test
+        # Prepend `timeout` so a runaway test suite is killed cleanly instead of
+        # hanging until the outer Docker container timeout. Exit 124 = timeout.
+        _to = 'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" '
+        test_cmd = _to + _raw_test_cmd
 
         try:
-            _tokens = shlex.split(test_cmd)
+            _tokens = shlex.split(_raw_test_cmd)
         except ValueError:
-            _tokens = test_cmd.split()
+            _tokens = _raw_test_cmd.split()
         _basenames = {t.rsplit("/", 1)[-1] for t in _tokens}
         is_vitest = "vitest" in _basenames
         is_node_test = (

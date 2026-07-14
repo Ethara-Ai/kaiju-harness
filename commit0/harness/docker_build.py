@@ -714,6 +714,12 @@ def build_repo_images(
     with tqdm(
         total=len(configs_to_build), smoothing=0, desc="Building repo images"
     ) as pbar:
+        # P14: ThreadPoolExecutor here is safe wrt log files because each thread
+        # gets a unique build_dir keyed by `image_name.replace(":", "__")`.
+        # Image names are unique per-repo (dict keys from configs_to_build), so
+        # `setup_logger(image_name, build_dir / "build_image.log")` inside each
+        # thread writes to a distinct file. If future refactors reuse image
+        # names across workers, add a per-image lock here.
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(

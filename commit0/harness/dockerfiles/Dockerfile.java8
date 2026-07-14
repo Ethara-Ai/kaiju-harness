@@ -1,0 +1,106 @@
+FROM eclipse-temurin:8-jdk-jammy
+
+ARG TARGETARCH
+ARG http_proxy=""
+ARG https_proxy=""
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ARG no_proxy="localhost,127.0.0.1,::1"
+ARG NO_PROXY="localhost,127.0.0.1,::1"
+ARG CA_CERT_PATH="/etc/ssl/certs/ca-certificates.crt"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TZ=UTC \
+    http_proxy=${http_proxy} \
+    https_proxy=${https_proxy} \
+    HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    no_proxy=${no_proxy} \
+    NO_PROXY=${NO_PROXY} \
+    SSL_CERT_FILE=${CA_CERT_PATH} \
+    REQUESTS_CA_BUNDLE=${CA_CERT_PATH} \
+    CURL_CA_BUNDLE=${CA_CERT_PATH} \
+    NODE_EXTRA_CA_CERTS=${CA_CERT_PATH} \
+    HTTPLIB2_CA_CERTS=${CA_CERT_PATH} \
+    PIP_CERT=${CA_CERT_PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    ca-certificates \
+    curl \
+    wget \
+    gnupg \
+    unzip \
+    zip \
+    jq \
+    libatomic1 \
+    locales \
+    locales-all \
+    procps \
+    pkg-config \
+    cmake \
+    python3 \
+    ant \
+    openssh-client \
+    xz-utils \
+    file \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# JDK is pre-installed by the eclipse-temurin base image
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Force /usr/bin/java to Temurin (ant pulls default-jre-headless via update-alternatives)
+RUN for tool in java javac jar jarsigner javadoc jshell keytool jps jstack; do \
+        if [ -x "$JAVA_HOME/bin/$tool" ]; then \
+            update-alternatives --install "/usr/bin/$tool" "$tool" "$JAVA_HOME/bin/$tool" 99999 && \
+            update-alternatives --set "$tool" "$JAVA_HOME/bin/$tool" ; \
+        fi ; \
+    done
+
+ARG MAVEN_VERSION=3.9.6
+ARG MAVEN_SHA512=706f01b20dec0305a822ab614d51f32b07ee11d0218175e55450242e49d2156386483b506b3a4e8a03ac8611bae96395fd5eec15f50d3013d5deed6d1ee18224
+RUN curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+        https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz \
+        -o /tmp/maven.tar.gz \
+    && echo "${MAVEN_SHA512}  /tmp/maven.tar.gz" | sha512sum -c - \
+    && tar -xzf /tmp/maven.tar.gz -C /opt \
+    && rm /tmp/maven.tar.gz \
+    && ln -s /opt/apache-maven-${MAVEN_VERSION}/bin/mvn /usr/local/bin/mvn
+
+ARG GRADLE_VERSION=8.5
+ARG GRADLE_SHA256=9d926787066a081739e8200858338b4a69e837c3a821a33aca9db09dd4a41026
+RUN curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+        https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip \
+        -o /tmp/gradle.zip \
+    && echo "${GRADLE_SHA256}  /tmp/gradle.zip" | sha256sum -c - \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && ln -s /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle \
+    && rm /tmp/gradle.zip
+
+# Cross-distro SSL cert symlinks for libraries that look in RHEL/Fedora paths
+RUN mkdir -p /etc/pki/tls/certs /etc/pki/tls /etc/pki/ca-trust/extracted/pem /etc/ssl/certs && \
+    ln -sf /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt 2>/dev/null; \
+    ln -sf /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem 2>/dev/null; \
+    ln -sf /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/cert.pem 2>/dev/null; \
+    ln -sf /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem 2>/dev/null; \
+    ln -sf /etc/ssl/certs /etc/pki/tls/certs 2>/dev/null; \
+    true
+
+# MITM CA cert injection via BuildKit secret (only applied if secret is provided)
+RUN --mount=type=secret,id=mitm_ca,required=false \
+    if [ -f /run/secrets/mitm_ca ]; then \
+        cp /run/secrets/mitm_ca /usr/local/share/ca-certificates/mitm-ca.crt && \
+        update-ca-certificates && \
+        echo "MITM CA certificate installed successfully"; \
+    else \
+        echo "No MITM CA certificate found, skipping"; \
+    fi
+
+RUN test -d "$JAVA_HOME" && java -version && mvn --version && gradle --version
+
+WORKDIR /testbed

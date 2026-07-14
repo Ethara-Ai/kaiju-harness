@@ -95,6 +95,19 @@ def main(
     if test_ids is not None and not _TEST_IDS_RE.match(test_ids):
         raise ValueError(f"Unsafe characters in test_ids: {test_ids!r}")
 
+    # Thread the outer --timeout into the in-container test-timeout ladder so a
+    # raised budget actually reaches the tests instead of eval.sh's fixed default
+    # (Issue 7). Keep headroom below the container-exec cap:
+    #   timeout (container exec)  >  EVAL_TEST_TIMEOUT (coreutils wrapper)
+    #                             >  GO_TEST_TIMEOUT (go test -timeout)
+    # `setdefault` so an explicit operator override always wins. execution_context
+    # forwards these two vars into the container.
+    if timeout and timeout > 180:
+        _eval_to = max(timeout - 120, 60)
+        _go_to = max(_eval_to - 60, 30)
+        os.environ.setdefault("EVAL_TEST_TIMEOUT", str(_eval_to))
+        os.environ.setdefault("GO_TEST_TIMEOUT", f"{_go_to}s")
+
     dataset = load_dataset_from_config(dataset_name, split=dataset_split)
     dataset_name = dataset_name.lower()
     absolute = backend != "e2b"

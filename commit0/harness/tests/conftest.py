@@ -22,8 +22,10 @@ def sample_repo_instance() -> RepoInstance:
     return RepoInstance(
         instance_id="test/repo",
         repo="test-repo",
-        base_commit="abc123",
-        reference_commit="def456",
+        # 40-char valid-hex SHAs (eval_hardening now requires a bare hex SHA);
+        # prefixes kept so existing "abc123"/"def456" substring asserts still hold.
+        base_commit="abc123" + "0" * 34,
+        reference_commit="def456" + "0" * 34,
         setup={
             "python": "3.12",
             "packages": "requirements.txt",

@@ -76,6 +76,35 @@ def _summarize_log_dir(
     syntax_code = _read_exit_code(log_dir / "syntax_exit_code.txt")
     test_code = _read_exit_code(log_dir / "test_exit_code.txt")
 
+    # PATCH_APPLY_FAILED sentinel detection. eval.sh writes this string to
+    # test output when `git apply patch.diff` fails; without this check the
+    # patch-failure would score as a legitimate 0/N. Search head+tail of
+    # test_stdout.txt + test_results.json so large intervening output can't
+    # push the sentinel out of a fixed-size window.
+    _patch_failed = False
+    for _sentinel_file in (log_dir / "test_stdout.txt", log_dir / "test_results.json"):
+        if _sentinel_file.exists():
+            try:
+                _sz = _sentinel_file.stat().st_size
+                with _sentinel_file.open("rb") as _fh:
+                    _head = _fh.read(8192).decode("utf-8", errors="replace")
+                    if "PATCH_APPLY_FAILED" in _head:
+                        _patch_failed = True
+                        break
+                    if _sz > 16384:
+                        _fh.seek(max(0, _sz - 8192))
+                        _tail = _fh.read(8192).decode("utf-8", errors="replace")
+                        if "PATCH_APPLY_FAILED" in _tail:
+                            _patch_failed = True
+                            break
+            except OSError:
+                pass
+
+    # Timeout detection: exit codes 124 (GNU timeout), 137 (SIGKILL), 143 (SIGTERM)
+    # indicate the test suite was killed by the eval script's `timeout` wrapper.
+    # Without this check a timeout-killed run scores as legitimate 0/N.
+    _timed_out = test_code in (124, 137, 143)
+
     report_file = log_dir / "test_results.json"
     parsed: JsTestResult
     if not report_file.exists():
@@ -100,7 +129,12 @@ def _summarize_log_dir(
         or report_file.stat().st_size == 0
         or parsed.raw_empty
     )
-    infra_failed = test_code is None and report_missing_or_empty
+    # Patch-apply failure and test-suite timeout are ALWAYS infra failures
+    # (never scored as legitimate 0%): the module never got a chance to run
+    # its tests, so num_passed/num_total is meaningless. Flag them so the
+    # aggregator excludes the module from denominators rather than counting
+    # it toward the failure column.
+    infra_failed = (test_code is None and report_missing_or_empty) or _patch_failed or _timed_out
 
     canonical_count = len(test_ids) if test_ids else 0
 
@@ -130,11 +164,19 @@ def _summarize_log_dir(
         # unparseable report is likewise untrustworthy (its counts are
         # regex-fabricated). In either case refuse to emit a confident verdict and
         # flag it as infra so it is excluded, not scored as a legitimate 0%.
+        # J2 fix: previously zero_but_expected required canonical_count > 0.
+        # If test-ID capture ALSO failed (canonical_count == 0) and the framework
+        # then silently collected 0 tests, the both-zero case was scored as a
+        # legitimate 0% failure instead of being flagged as infra. Widen to also
+        # trigger when the framework can enumerate tests (jest/mocha/vitest all
+        # produce a non-empty inventory for a healthy repo) but observed_total
+        # is 0 — that's an infra signal regardless of canonical availability.
         zero_but_expected = observed_total == 0 and canonical_count > 0
+        zero_both = observed_total == 0 and canonical_count == 0
         untrustworthy = parsed.truncated or (
             bool(parsed.parse_error) and observed_total == 0
         )
-        if not compile_failed and (zero_but_expected or untrustworthy):
+        if not compile_failed and (zero_but_expected or untrustworthy or zero_both):
             infra_failed = True
             compile_failed = None
             tests_failed = None
@@ -153,6 +195,8 @@ def _summarize_log_dir(
         "syntax_exit_code": syntax_code,
         "test_exit_code": test_code,
         "infra_failed": infra_failed,
+        "patch_apply_failed": _patch_failed,
+        "timed_out": _timed_out,
         "compile_failed": compile_failed,
         "tests_failed": tests_failed,
         "num_passed": parsed.num_passed,

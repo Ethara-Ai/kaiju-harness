@@ -12,6 +12,13 @@ import pytest
 
 from agent.claude_code import recovery
 
+# When a retryable error is EXHAUSTED (max pause / max retries / no-bridge),
+# recovery._raise_as_transient wraps it as TransientLLMError so the agent
+# runners' `except TransientLLMError` defers the module for auto-resume. (Only
+# the aider-ABSENT fallback re-raises the original — not production; the
+# conftest stub makes aider "present" so these tests exercise real behavior.)
+from agent.agents import TransientLLMError
+
 
 class _FakeRateLimitError(Exception):
     """Looks enough like litellm.exceptions.RateLimitError for the detector."""
@@ -57,7 +64,7 @@ def test_run_without_bridge_passes_exceptions_through(no_bridge_env):
         calls.append(1)
         raise _FakeRateLimitError("rate_limit_error")
 
-    with pytest.raises(_FakeRateLimitError):
+    with pytest.raises((TransientLLMError, _FakeRateLimitError)):
         recovery.run_with_recovery(boom)
     assert len(calls) == 1  # no retry attempted
 
@@ -107,7 +114,7 @@ def test_run_with_bridge_respects_max_pause(bridge_env, tmp_path, monkeypatch):
         attempts.append(1)
         raise _FakeRateLimitError("rate_limit_error")
 
-    with pytest.raises(_FakeRateLimitError):
+    with pytest.raises((TransientLLMError, _FakeRateLimitError)):
         recovery.run_with_recovery(always_throttled, _kaiju_log_dir=tmp_path)
     assert len(attempts) == 1
 
@@ -159,7 +166,7 @@ def test_run_with_bridge_max_retries_exhausted(bridge_env, tmp_path, monkeypatch
         attempts.append(1)
         raise _FakeRateLimitError("rate_limit_error")
 
-    with pytest.raises(_FakeRateLimitError):
+    with pytest.raises((TransientLLMError, _FakeRateLimitError)):
         recovery.run_with_recovery(always_throttled, _kaiju_log_dir=tmp_path, max_retries=2)
     assert len(attempts) == 3  # initial + 2 retries
 

@@ -33,7 +33,7 @@ BACKEND="local"
 MAX_ITERATION=3
 
 # C++ pipeline — hardcoded language; spec-info now user-toggleable (see --no-spec-info)
-LANGUAGE="cpp"
+export LANGUAGE="cpp"
 USE_SPEC_INFO="${USE_SPEC_INFO:-false}"
 COMMIT0_BUILD_PLATFORMS="${COMMIT0_BUILD_PLATFORMS:-linux/amd64,linux/arm64}"
 export COMMIT0_BUILD_PLATFORMS
@@ -446,6 +446,158 @@ set_sample_vars 1
 
 mkdir -p "$LOG_BASE"
 exec > >(tee -a "$LOG_BASE/pipeline.log") 2>&1
+
+# ------------------------------------------------------------
+# Spec-doc provisioning (mirrors run_pipeline_c.sh:ensure_spec_docs_c).
+# Without this, no <split>_spec.pdf.bz2 lands in outputs/<uuid>/datasets/
+# because copy_inference_inputs looks for ${REPO_BASE}/{name}/spec.pdf.bz2
+# and nothing else writes that file for C++ repos.
+# ------------------------------------------------------------
+ensure_spec_docs_cpp() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        log "  Spec docs disabled (USE_SPEC_INFO=false) — skipping."
+        return 0
+    fi
+
+    log "Ensuring spec docs are available for all C++ repos..."
+
+    "$VENV_PYTHON" - "$DATASET_FILE" "$REPO_BASE" "$BASE_DIR" <<'PYEOF'
+import json, os, sys, shutil
+from pathlib import Path
+
+dataset_file = sys.argv[1]
+repo_base    = sys.argv[2]
+base_dir     = sys.argv[3]
+
+if dataset_file.endswith(".json") or os.path.isfile(dataset_file):
+    with open(dataset_file) as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "data" in data:
+        entries = data["data"]
+    elif isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict):
+        entries = [data]
+    else:
+        entries = []
+else:
+    entries = []
+
+if not entries:
+    print("  No dataset entries found — skipping spec provisioning.")
+    sys.exit(0)
+
+specs_dir = os.path.join(base_dir, "specs")
+os.makedirs(specs_dir, exist_ok=True)
+
+for entry in entries:
+    repo = entry.get("repo", "")
+    repo_name = repo.split("/")[-1]
+    repo_dir = os.path.join(repo_base, repo_name)
+
+    if not os.path.isdir(repo_dir):
+        print(f"  SKIP {repo_name}: repo dir not found at {repo_dir}")
+        continue
+
+    bz2_in_repo = os.path.join(repo_dir, "spec.pdf.bz2")
+    pdf_in_repo = os.path.join(repo_dir, "spec.pdf")
+
+    if os.path.exists(bz2_in_repo) or os.path.exists(pdf_in_repo):
+        print(f"  OK   {repo_name}: spec already present")
+        continue
+
+    spec_url = None
+    setup = entry.get("setup", {})
+    if isinstance(setup, dict):
+        spec_url = setup.get("specification")
+    if not spec_url:
+        print(f"  SKIP {repo_name}: no specification URL in dataset entry")
+        continue
+
+    cached_bz2 = os.path.join(specs_dir, f"{repo_name}.pdf.bz2")
+    cached_pdf = os.path.join(specs_dir, f"{repo_name}.pdf")
+
+    if os.path.exists(cached_bz2):
+        shutil.copy2(cached_bz2, bz2_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_bz2}")
+        continue
+    if os.path.exists(cached_pdf):
+        shutil.copy2(cached_pdf, pdf_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_pdf}")
+        continue
+
+    print(f"  SCRAPE {repo_name}: {spec_url}")
+    try:
+        from tools.scrape_pdf import scrape_spec
+        result = scrape_spec(
+            base_url=spec_url,
+            name=repo_name,
+            output_dir=specs_dir,
+            compress=True,
+        )
+        if result and os.path.exists(result):
+            shutil.copy2(result, bz2_in_repo)
+            print(f"  OK   {repo_name}: scraped and placed spec.pdf.bz2")
+        else:
+            print(f"  WARN {repo_name}: scrape returned no output")
+    except Exception as e:
+        print(f"  WARN {repo_name}: scrape failed: {e}")
+
+PYEOF
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log "  WARNING: Spec doc provisioning had errors (rc=$rc) — continuing anyway."
+    fi
+}
+
+# M1: symmetric verify_spec_docs_cpp gate so USE_SPEC_INFO=true actually fails
+# fast when specs are missing after provisioning. Mirrors verify_spec_docs_{ts,js,java}.
+verify_spec_docs_cpp() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        return 0
+    fi
+    log "Verifying all C++ repos have spec docs..."
+    local missing=0
+    local missing_repos=""
+    local repo_list
+    repo_list=$(_PIPELINE_DATASET_FILE="$DATASET_FILE" "$VENV_PYTHON" -c "
+import json, os
+with open(os.environ['_PIPELINE_DATASET_FILE']) as f:
+    data = json.load(f)
+if isinstance(data, dict) and 'data' in data:
+    data = data['data']
+for item in data:
+    print(item['repo'].split('/')[-1])
+" 2>/dev/null || true)
+    if [[ -z "$repo_list" ]]; then
+        log "  WARNING: Could not enumerate repos for spec verification."
+        return 0
+    fi
+    while IFS= read -r repo; do
+        [[ -z "$repo" ]] && continue
+        local repo_dir="${REPO_BASE}/${repo}"
+        [[ ! -d "$repo_dir" ]] && continue
+        if [[ ! -f "${repo_dir}/spec.pdf" ]] && [[ ! -f "${repo_dir}/spec.pdf.bz2" ]]; then
+            log "  MISSING spec: ${repo}"
+            missing=$((missing + 1))
+            missing_repos="${missing_repos}  - ${repo}\n"
+        else
+            log "  OK spec: ${repo}"
+        fi
+    done <<< "$repo_list"
+    if [[ "$missing" -gt 0 ]]; then
+        log ""
+        log "======================================================================"
+        log "FATAL: ${missing} C++ repo(s) missing spec docs (USE_SPEC_INFO=true)."
+        log "  Options:"
+        log "    1. Place spec.pdf or spec.pdf.bz2 in each repo directory"
+        log "    2. Add 'specification' URLs to the dataset JSON and re-run"
+        log "    3. Use --no-spec-info to run without spec context"
+        log "======================================================================"
+        return 1
+    fi
+    log "  All C++ repos have spec docs."
+}
 
 # ============================================================
 # Frozen test-id inventory gate. A missing inventory makes the eval SILENTLY
@@ -940,10 +1092,32 @@ watchdog_run() {
 # (_mark_module_done), so the count converges to 0 unless GENUINELY persistent.
 # Args: <log_dir> <agent_log> -- <base agent command...>  (command WITHOUT
 # --override-previous-changes, which would reset the branch and discard progress).
+# Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
+# .needs_retry means the agent was killed mid-post-processing (typically by the
+# inactivity watchdog after aider finished a turn but before _mark_module_done
+# ran). Auto-resume detection uses `.needs_retry` files, so limbo modules would
+# be silently skipped without this sweep. Convert them so auto-resume re-runs them.
+_sweep_limbo_modules() {
+    local _ld="$1"
+    [[ -d "$_ld" ]] || return 0
+    local _swept=0 _aider _moddir
+    while IFS= read -r _aider; do
+        _moddir=$(dirname "$_aider")
+        if [[ ! -f "$_moddir/.done" && ! -f "$_moddir/.needs_retry" ]]; then
+            echo "limbo (agent killed mid-postprocessing, no .done marker)" > "$_moddir/.needs_retry"
+            _swept=$((_swept + 1))
+        fi
+    done < <(find "$_ld" -type f -name aider.log 2>/dev/null)
+    if [[ "$_swept" -gt 0 ]]; then
+        log "  SWEEP: converted ${_swept} limbo module(s) to .needs_retry (had aider.log but neither .done nor .needs_retry)"
+    fi
+}
+
 _auto_resume_agent() {
     local _ld="$1" _alog="$2"; shift 2
     [[ "${1:-}" == "--" ]] && shift
     local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
+    _sweep_limbo_modules "$_ld"
     _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
     while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
         _auto=$((_auto + 1))
@@ -963,6 +1137,7 @@ _auto_resume_agent() {
         set -e
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
+        _sweep_limbo_modules "$_ld"
         _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
     done
@@ -1681,6 +1856,14 @@ run_single_sample() {
     if [[ "$sample_idx" -eq 1 ]]; then
         preflight
         if ! verify_inventory_cpp; then
+            return 1
+        fi
+        # M1: best-effort provisioning + FATAL verify when USE_SPEC_INFO=true.
+        # Never fatal at ensure because USE_SPEC_INFO=false is the C++ default,
+        # but if the operator opted into spec info, verify makes the missing
+        # doc surface loudly instead of silently degrading model context.
+        ensure_spec_docs_cpp || true
+        if ! verify_spec_docs_cpp; then
             return 1
         fi
     fi

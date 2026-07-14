@@ -71,7 +71,12 @@ def test_vendor_cheat_guard_present():
 # --------------------------------------------------------------------------- #
 def test_go_test_and_outer_timeouts_present_and_generous():
     sc = _script()
-    assert 'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-600}"' in sc
+    # Outer coreutils timeout must be STRICTLY LARGER than the inner go-test
+    # timeout (900 > 600s): the outer counts build+run wall-clock, the inner only
+    # post-build test execution, so an equal bound made the outer SIGKILL fire
+    # first (exit 124/137 -> TEST_SUITE_TIMEOUT, excluded) before Go's clean
+    # per-test timeout+panic could produce partial output.
+    assert 'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}"' in sc
     assert "-timeout ${GO_TEST_TIMEOUT:-600s}" in sc
 
 

@@ -34,6 +34,7 @@ REPO_BASE="${BASE_DIR}/repos"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
+export LANGUAGE="python"  # H8: parity with other drivers so child processes can rely on $LANGUAGE
 
 # ============================================================
 # Argument Parsing
@@ -762,11 +763,33 @@ watchdog_run() {
 # (_mark_module_done), so the count converges to 0 unless GENUINELY persistent.
 # Args: <log_dir> <agent_log> -- <base agent command...>  (command WITHOUT
 # --override-previous-changes, which would reset the branch and discard progress).
+# Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
+# .needs_retry means the agent was killed mid-post-processing (typically by the
+# inactivity watchdog after aider finished a turn but before _mark_module_done
+# ran). Auto-resume detection uses `.needs_retry` files, so limbo modules would
+# be silently skipped without this sweep. Convert them so auto-resume re-runs them.
+_sweep_limbo_modules() {
+    local _ld="$1"
+    [[ -d "$_ld" ]] || return 0
+    local _swept=0 _aider _moddir
+    while IFS= read -r _aider; do
+        _moddir=$(dirname "$_aider")
+        if [[ ! -f "$_moddir/.done" && ! -f "$_moddir/.needs_retry" ]]; then
+            echo "limbo (agent killed mid-postprocessing, no .done marker)" > "$_moddir/.needs_retry"
+            _swept=$((_swept + 1))
+        fi
+    done < <(find "$_ld" -type f -name aider.log 2>/dev/null)
+    if [[ "$_swept" -gt 0 ]]; then
+        log "  SWEEP: converted ${_swept} limbo module(s) to .needs_retry (had aider.log but neither .done nor .needs_retry)"
+    fi
+}
+
 _auto_resume_agent() {
     local _ld="$1" _alog="$2"; shift 2
     [[ "${1:-}" == "--" ]] && shift
     local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
-    _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
     while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
         _auto=$((_auto + 1))
         log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
@@ -785,7 +808,8 @@ _auto_resume_agent() {
         set -e
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
-        _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then

@@ -17,8 +17,8 @@ def _make_instance(**overrides):
     d = {
         "instance_id": "test-1",
         "repo": "Rust-commit0/taffy",
-        "base_commit": "abc123",
-        "reference_commit": "def456",
+        "base_commit": "abc1230000000000000000000000000000000000",
+        "reference_commit": "def4560000000000000000000000000000000000",
         "setup": {"pre_install": ["apt-get update"], "install": "cargo build"},
         "test": {"test_cmd": "cargo nextest run"},
         "src_dir": "src",
@@ -140,8 +140,8 @@ class TestRustSpecMakeRepoScriptList:
         spec = _make_spec()
         scripts = spec.make_repo_script_list()
         fetch_line = [s for s in scripts if "git fetch" in s][0]
-        assert "def456" in fetch_line
-        assert "abc123" in fetch_line
+        assert "def4560000000000000000000000000000000000" in fetch_line
+        assert "abc1230000000000000000000000000000000000" in fetch_line
 
     def test_contains_git_reset(self):
         spec = _make_spec()
@@ -200,7 +200,7 @@ class TestRustSpecMakeEvalScriptList:
         spec = _make_spec()
         scripts = spec.make_eval_script_list()
         reset_line = [s for s in scripts if "git reset" in s][0]
-        assert "abc123" in reset_line
+        assert "abc1230000000000000000000000000000000000" in reset_line
 
     def test_contains_git_apply(self):
         spec = _make_spec()
@@ -453,7 +453,7 @@ class TestRustSpecRepoScriptEdge:
     def test_repo_script_resets_to_base_commit(self):
         spec = _make_spec()
         scripts = spec.make_repo_script_list()
-        assert any("abc123" in s and "reset --hard" in s for s in scripts)
+        assert any("abc1230000000000000000000000000000000000" in s and "reset --hard" in s for s in scripts)
 
     def test_repo_script_clone_uses_repo_name(self):
         spec = _make_spec()

@@ -28,6 +28,10 @@ REPO_BASE_TS="${BASE_DIR}/repos_ts"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
+# S11: env-var contract with agent config. Rust/Go/C++ pipelines export
+# LANGUAGE; downstream tooling may read either the exported var or the yaml
+# field. TS agent config already writes `language: typescript`.
+export LANGUAGE="typescript"
 
 # ============================================================
 # Argument Parsing
@@ -448,6 +452,45 @@ get_newest_aider_log() {
 # Watchdog (verbatim from run_pipeline.sh)
 # ============================================================
 
+# S3 backport from run_pipeline_go.sh: three helpers the TS watchdog was
+# missing. Without them, a healthy agent in extended-thinking or rate-limit
+# pause gets killed as "stuck" — wasting LLM budget on false-positive kills.
+
+# True iff a .rate_limit_paused marker exists under $1 with mtime within $2s.
+# recovery.py re-touches the marker each heartbeat while waiting on the
+# subscription cap.
+_pause_marker_fresh() {
+    local search_dir="$1"
+    local fresh_within="$2"
+    local now mt newest_mt=0
+    now=$(date +%s)
+    while IFS= read -r marker; do
+        mt=$(get_mtime "$marker")
+        if [[ "$mt" -gt "$newest_mt" ]]; then newest_mt="$mt"; fi
+    done < <(find "$search_dir" -name ".rate_limit_paused" 2>/dev/null)
+    [[ "$newest_mt" -gt 0 ]] || return 1
+    local age=$(( now - newest_mt ))
+    [[ "$age" -lt "$fresh_within" ]]
+}
+
+# Cumulative CPU seconds for every process in the group led by $1.
+_pgroup_cpu_secs() {
+    ps -o time= -g "$1" 2>/dev/null | awk '
+        { gsub(/ /,""); n=split($0,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; t+=s }
+        END { printf "%d", t+0 }'
+}
+
+# True if any process in group $1 has an ESTABLISHED outbound TCP connection.
+# During server-side extended thinking the local process is blocked on the
+# socket at ~0% CPU and writes no logs; a live connection is the real liveness.
+_pgroup_has_live_conn() {
+    command -v lsof >/dev/null 2>&1 || return 2
+    local pids
+    pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$pids" ]] && return 1
+    lsof -nP -a -p "$pids" -iTCP -sTCP:ESTABLISHED >/dev/null 2>&1
+}
+
 watchdog_run() {
     local agent_pid="$1"
     local log_dir="$2"
@@ -539,9 +582,38 @@ watchdog_run() {
         fi
 
         if [[ "$latest_mtime" -gt 0 ]] && [[ "$agent_active" == "false" ]]; then
-            log "  WATCHDOG: No log activity for ${idle}s (limit: ${inactivity_limit}s). Agent appears stuck."
+            # S3: rate-limit pause is NOT a hang. If recovery has a fresh marker,
+            # suppress inactivity kill (wall-time cap above still bounds it).
+            if _pause_marker_fresh "$log_dir" "$(( inactivity_limit * 2 ))"; then
+                log "  WATCHDOG: log idle ${idle}s but a fresh rate-limit pause marker is present — intentionally paused, not stuck. Continuing."
+                continue
+            fi
+            # S3: log-inactivity ALONE is not stuck. A server-side extended-thinking
+            # turn writes 0 logs and burns ~0 CPU. Before killing, require BOTH:
+            # no live LLM connection AND no local CPU progress over a short window.
+            local _alive="false"
+            if _pgroup_has_live_conn "$agent_pid"; then
+                _alive="true"
+                if [[ $(( idle % 60 )) -lt 5 ]]; then
+                    log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                fi
+            else
+                local _cpu1 _cpu2
+                _cpu1=$(_pgroup_cpu_secs "$agent_pid")
+                sleep 3
+                _cpu2=$(_pgroup_cpu_secs "$agent_pid")
+                if [[ "${_cpu2:-0}" -gt "${_cpu1:-0}" ]]; then
+                    _alive="true"
+                    log "  WATCHDOG: log idle ${idle}s but agent CPU advancing (${_cpu1}->${_cpu2}s) — working, not stuck. Continuing."
+                fi
+            fi
+            if [[ "$_alive" == "true" ]]; then
+                # Live signal DELAYS the kill; wall-time cap still backstops.
+                continue
+            fi
+            log "  WATCHDOG: No log activity for ${idle}s AND no live connection / CPU idle. Agent appears stuck."
             if [[ -n "$latest_log" ]] && [[ -f "$latest_log" ]]; then
-                log "  WATCHDOG: Last aider log: $(basename "$(dirname "$latest_log")")"
+                log "  WATCHDOG: Last aider log: $(basename \"$(dirname \"$latest_log\")\")"
             fi
             log "  WATCHDOG: Killing agent (PID ${agent_pid})."
             kill "$agent_pid" 2>/dev/null || true
@@ -836,11 +908,33 @@ AGENT_RC=0
 # (_mark_module_done), so the count converges to 0 unless GENUINELY persistent.
 # Args: <log_dir> <agent_log> -- <base agent command...>  (command WITHOUT
 # --override-previous-changes, which would reset the branch and discard progress).
+# Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
+# .needs_retry means the agent was killed mid-post-processing (typically by the
+# inactivity watchdog after aider finished a turn but before _mark_module_done
+# ran). Auto-resume detection uses `.needs_retry` files, so limbo modules would
+# be silently skipped without this sweep. Convert them so auto-resume re-runs them.
+_sweep_limbo_modules() {
+    local _ld="$1"
+    [[ -d "$_ld" ]] || return 0
+    local _swept=0 _aider _moddir
+    while IFS= read -r _aider; do
+        _moddir=$(dirname "$_aider")
+        if [[ ! -f "$_moddir/.done" && ! -f "$_moddir/.needs_retry" ]]; then
+            echo "limbo (agent killed mid-postprocessing, no .done marker)" > "$_moddir/.needs_retry"
+            _swept=$((_swept + 1))
+        fi
+    done < <(find "$_ld" -type f -name aider.log 2>/dev/null)
+    if [[ "$_swept" -gt 0 ]]; then
+        log "  SWEEP: converted ${_swept} limbo module(s) to .needs_retry (had aider.log but neither .done nor .needs_retry)"
+    fi
+}
+
 _auto_resume_agent() {
     local _ld="$1" _alog="$2"; shift 2
     [[ "${1:-}" == "--" ]] && shift
     local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
-    _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
     while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
         _auto=$((_auto + 1))
         log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
@@ -859,7 +953,8 @@ _auto_resume_agent() {
         set -e
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
-        _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        _sweep_limbo_modules \"$_ld\"
+    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
@@ -914,7 +1009,7 @@ run_agent_ts() {
         log "  Agent killed by watchdog after ${AGENT_ELAPSED}s"
     elif [[ $AGENT_RC -ne 0 ]]; then
         log "  Agent FAILED (rc=${AGENT_RC}) in ${AGENT_ELAPSED}s — last 20 lines:"
-        tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
+        tail -20 "$agent_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
     else
         log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
     fi
@@ -984,7 +1079,7 @@ run_evaluate_ts() {
 
     if [[ $eval_rc -ne 0 ]]; then
         log "  Evaluation FAILED — last 10 lines:"
-        tail -10 "$eval_log" | while IFS= read -r line; do log "    | $line"; done
+        tail -10 "$eval_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
     fi
 }
 

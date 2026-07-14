@@ -33,7 +33,6 @@ _LLM_TRANSIENT_SIGNALS = (
     "midstreamfallbackerror", "apiconnectionerror", "apitimeouterror",
     "timed out", "read timeout", "connection aborted", "connection reset",
     "server disconnected", "remoteprotocolerror", "incomplete chunked read",
-    "internalservererror", "internal server error",
     "service unavailable", "bad gateway",
     # "overloaded" alone was too permissive (matched C++ 'operator overloaded' in
     # source files). Only fire on JSON-shaped error payloads.
@@ -50,6 +49,22 @@ _LLM_TRANSIENT_SIGNALS = (
 # word boundaries ARE critical: without them, `C2504 bug` (a code comment in
 # fmt/base.h) matches `504 ` as a plain substring and triggers a false positive.
 _HTTP_TRANSIENT_CODE_RE = re.compile(r"(?:\b(?:http|status|code|error)[\s:/-]*|/1\.[01]\s+|/2(?:\.0)?\s+)(502|503|504|520|521|522|523|524|525|526|527|528|529)\b", re.IGNORECASE)
+
+# Word-bounded internal-server-error patterns. Matches ONLY in real LLM/HTTP
+# error contexts (module.ClassName paths, 500-status prefix, error-type
+# markers), NOT in source-code text (class defs, imports, string literals like
+# `"Internal server error"` in test assertions). This avoids false positives
+# on repos like BlackSheep whose source references InternalServerError as an
+# HTTP exception class.
+_INTERNAL_SERVER_ERR_RE = re.compile(
+    r"(?:"
+    r"\.internalservererror\b|"          # module.ClassName (e.g. openai.internalservererror)
+    r"500\s*[:\s]\s*internal\s+server\s+error\b|"  # 500 status prefix
+    r"\berror\s+(?:type|class|code)[:\s]+(?:internalservererror|internal\s+server\s+error)\b|"  # error-marker prefix
+    r"\.internal_server_error\b"          # module.snake_case_name variant
+    r")",
+    re.IGNORECASE,
+)
 
 
 def apply_llm_resilience(model: "Model") -> None:
@@ -95,6 +110,12 @@ def raise_if_transient_llm_error(text: str, context: str = "") -> None:
         raise TransientLLMError(
             f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
             f"matched HTTP status {code} — re-running module (timed out)."
+        )
+    ise_match = _INTERNAL_SERVER_ERR_RE.search(low)
+    if ise_match:
+        raise TransientLLMError(
+            f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
+            f"matched internal server error pattern — re-running module (timed out)."
         )
 
 

@@ -164,12 +164,23 @@ def main(
 
         # make eval file
         if coverage:
+            # P4 fix: shlex.quote src_dir before splicing into eval bash to
+            # block shell injection via a dataset row like `src_dir: foo; ...`.
+            import shlex as _shlex
             coverage_text = (
-                f" --cov={example['src_dir']} --cov-branch --cov-report json"
+                f" --cov={_shlex.quote(example['src_dir'])} --cov-branch --cov-report json"
             )
         else:
             coverage_text = ""
-        eval_script = spec.eval_script.format(test_ids=test_ids, coverage=coverage_text)
+        # P3 fix: previously `.format()` on the whole template chokes on `{` in
+        # a shlex-quoted test_cmd (e.g. `--filter '{foo,bar}'`) with KeyError.
+        # Use plain .replace() on documented sentinels so values (which may
+        # legitimately contain braces from Python test parametrization or Go
+        # regex alternation) pass through unmodified.
+        eval_script = (
+            spec.eval_script.replace("{test_ids}", test_ids)
+                            .replace("{coverage}", coverage_text)
+        )
 
     else:
         if branch == "reference":
@@ -265,9 +276,19 @@ def main(
             print(test_output.read_text())
         pytest_exit_code_file = Path(log_dir / "pytest_exit_code.txt")
         _module_logger.debug("Reading pytest exit code from %s", pytest_exit_code_file)
-        pytest_exit_code = int(
-            pytest_exit_code_file.read_text().strip()
-        )
+        # P6 fix: pytest_exit_code.txt may be missing (container crash before
+        # `echo $? > ...`) or contain empty/non-numeric content (OOM truncation).
+        # Treat any parse failure as pytest's internal-error code 4 so the
+        # caller in evaluate.py logs a warning but doesn't crash the whole
+        # batch with an opaque ValueError/FileNotFoundError.
+        try:
+            pytest_exit_code = int(pytest_exit_code_file.read_text().strip())
+        except (FileNotFoundError, ValueError) as exc:
+            _module_logger.warning(
+                "pytest_exit_code.txt missing or unparseable (%s); treating as pytest rc=4",
+                exc,
+            )
+            pytest_exit_code = 4
         sys.exit(pytest_exit_code)
     except EvaluationError as e:
         error_msg = (

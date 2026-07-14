@@ -447,15 +447,30 @@ def run_tests_in_docker(
         "docker_error": None,
     }
 
-    container_name = f"validate-{full_name.replace('/', '-')}-{int(time.time())}"
+    # T7: Docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]* and
+    # be <=64 chars. full_name with unusual characters (unicode, spaces,
+    # slashes we didn't replace) would produce silent docker run failures
+    # with a name-format error. Sanitize + truncate to guarantee validity.
+    _raw_name = f"validate-{full_name.replace('/', '-')}-{int(time.time())}"
+    _safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", _raw_name)
+    if not re.match(r"[A-Za-z0-9]", _safe_name[:1]):
+        _safe_name = "v" + _safe_name
+    container_name = _safe_name[:64]
     image = f"python:{python_version}-slim-bookworm"
 
     # Build install + test script
     install_script = _build_install_script(repo_dir)
+    # T1 (shell-injection close): install_script is embedded into a bash heredoc
+    # and executes inside the container. A poisoned repo (or dataset row) with
+    # `$(cmd)` / backticks / `;` / `|` etc. previously only WARNED, then the
+    # dangerous script ran anyway. Now: raise ValueError instead of warning —
+    # candidate is rejected before docker run.
     _SHELL_METACHAR_RE = re.compile(r"[;|`$&<>]")
     if _SHELL_METACHAR_RE.search(install_script):
-        logger.warning(
-            "install_script contains shell metacharacters: %s", install_script
+        raise ValueError(
+            "Refusing to run candidate validation: install_script contains "
+            "shell metacharacters (;|`$&<>) which would execute unbounded shell "
+            f"in the container. Script: {install_script!r}"
         )
 
     script = f"""#!/bin/bash
@@ -505,7 +520,10 @@ cat /tmp/coverage.json 2>/dev/null || echo '{{}}'
             ],
             capture_output=True,
             text=True,
-            timeout=timeout + 120,  # Extra buffer for Docker overhead
+            # T10: outer docker timeout was `timeout + 120` unbounded. A
+            # dataset entry (or CLI) could set --timeout to millions of
+            # seconds and hang the validator indefinitely. Cap at 2h.
+            timeout=min(timeout + 120, 7200),
         )
 
         output = proc.stdout
@@ -811,7 +829,12 @@ def main() -> None:
             }
         ]
     elif args.candidates_file:
-        candidates = json.loads(Path(args.candidates_file).read_text(encoding="utf-8"))
+        # T3 fix: guard against malformed candidates file.
+        try:
+            candidates = json.loads(Path(args.candidates_file).read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            parser.error(f"Candidates JSON at {args.candidates_file} is malformed: {e}")
+            return
     else:
         parser.error("Provide either candidates_file or --repo")
         return

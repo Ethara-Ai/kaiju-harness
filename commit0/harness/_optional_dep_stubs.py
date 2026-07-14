@@ -44,6 +44,43 @@ class _StubClass:
         return _StubClass()
 
 
+class _StubInputOutput:
+    """Stand-in for ``aider.io.InputOutput`` that ``GuardedInputOutput`` subclasses.
+
+    Unlike the bare ``_StubClass`` (which only has instance-level ``__getattr__``),
+    this exposes REAL, patchable methods matching aider's InputOutput surface.
+    ``unittest.mock.patch.object(InputOutput, "confirm_ask", ...)`` targets the
+    CLASS, and ``__getattr__`` does not apply at the class level — so tests that
+    patch ``confirm_ask`` on the base need it to exist as a real method here.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.yes = kwargs.get("yes", False)
+
+    def confirm_ask(
+        self,
+        question,
+        default="y",
+        subject=None,
+        explicit_yes_required=False,
+        group=None,
+        allow_never=False,
+    ):
+        return "y" if self.yes else "n"
+
+    def tool_output(self, *args, **kwargs):
+        pass
+
+    def tool_error(self, *args, **kwargs):
+        pass
+
+    def tool_warning(self, *args, **kwargs):
+        pass
+
+    def __getattr__(self, name: str):
+        return _StubClass()
+
+
 class _StubError(Exception):
     """Stand-in for aider exception types (e.g. FinishReasonLength)."""
 
@@ -86,7 +123,7 @@ def _install_aider() -> None:
     except ImportError:
         pass
 
-    aider_io = _module("aider.io", {"InputOutput": _StubClass})
+    aider_io = _module("aider.io", {"InputOutput": _StubInputOutput})
     aider_coders_base = _module(
         "aider.coders.base_coder",
         {"FinishReasonLength": _StubError, "Coder": _StubClass},

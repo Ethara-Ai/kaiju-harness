@@ -29,7 +29,7 @@ def _git_repo(tmp: Path) -> Path:
 
 def test_helper_emits_independent_reverts_and_cleanup():
     lines = revert_and_clean_lines(
-        "abc123", revert_targets=["tests/", "conftest.py"],
+        "abc123" + "0" * 34, revert_targets=["tests/", "conftest.py"],
         delete_added_globs=["conftest.py", "**/conftest.py"])
     # One independent `git checkout ... || true` per target (root + nested).
     checkouts = [ln for ln in lines if ln.startswith("git checkout")]
@@ -41,7 +41,7 @@ def test_helper_emits_independent_reverts_and_cleanup():
 
 def test_nested_false_skips_double_and_magic_pathspecs():
     lines = revert_and_clean_lines(
-        "abc123", revert_targets=[":(glob)**/*.test.ts", "test/"], nested=False)
+        "abc123" + "0" * 34, revert_targets=[":(glob)**/*.test.ts", "test/"], nested=False)
     checkouts = [ln for ln in lines if ln.startswith("git checkout")]
     assert len(checkouts) == 2  # no '**/' doubling when nested=False
 

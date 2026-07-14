@@ -1,4 +1,4 @@
-FROM gcc:13-bookworm
+FROM gcc:__C_GCC_VERSION__-bookworm
 
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive

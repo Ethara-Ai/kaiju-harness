@@ -49,9 +49,9 @@ class TestNodeVersions:
         assert isinstance(SUPPORTED_NODE_VERSIONS, frozenset)
 
     def test_supported_node_versions(self) -> None:
-        # 18 (older libs), 20/22 (active LTS), 24 (current); each has a
-        # matching Dockerfile.node<version>.
-        assert SUPPORTED_NODE_VERSIONS == frozenset({18, 20, 22, 24})
+        # 14/16 (legacy EOL for old repos), 18 (older libs), 20/22 (active LTS),
+        # 24 (current); each has a matching Dockerfile.node<version>.
+        assert SUPPORTED_NODE_VERSIONS == frozenset({14, 16, 18, 20, 22, 24})
 
     def test_default_is_in_supported(self) -> None:
         assert DEFAULT_NODE_VERSION in SUPPORTED_NODE_VERSIONS

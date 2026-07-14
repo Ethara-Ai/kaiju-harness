@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 
 from commit0.harness.constants_ts import TsRepoInstance
 from commit0.harness.spec_ts import Commit0TsSpec, make_ts_spec
@@ -322,11 +323,22 @@ class TestShlexQuoting:
         setup = spec.setup_script
         assert "'ref;bad'" in setup
 
-    def test_base_commit_quoted_in_eval_script(self) -> None:
+    def test_hostile_base_commit_rejected_in_eval_script(self) -> None:
+        # The eval script splices base_commit into `git checkout <base> -- ...`;
+        # eval_hardening now REJECTS a non-hex base_commit there, so an injection
+        # payload can never reach the shell (stronger than the setup-script
+        # quoting checked above).
         inst = _make_ts_instance(base_commit="abc;inject")
         spec = _make_spec(inst)
+        with pytest.raises(ValueError, match="bare hex git SHA"):
+            _ = spec.eval_script
+
+    def test_valid_base_commit_in_eval_script(self) -> None:
+        inst = _make_ts_instance(base_commit="a" * 40)
+        spec = _make_spec(inst)
         evl = spec.eval_script
-        assert "'abc;inject'" in evl
+        # A valid bare-hex SHA needs no shell quoting; it appears verbatim.
+        assert "a" * 40 in evl
 
 
 # ---------------------------------------------------------------------------

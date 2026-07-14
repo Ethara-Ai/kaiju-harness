@@ -9,6 +9,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ import git
 
 from agent.agents_go import AiderGoAgents
 from agent.agents import TransientLLMError
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
 from agent.agent_utils_go import (
     collect_go_test_files,
     create_branch,
@@ -217,10 +219,17 @@ def _write_module_output(
 def run_eval_after_each_commit(
     branch: str, backend: str, commit0_config_file: str
 ) -> str:
-    eval_cmd = f"{sys.executable} {_CLI_GO_PATH} evaluate --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout {_go_test_timeout()}"
+    # Quote every interpolated field and split with shlex so a base dir / branch
+    # containing a space or shell metachar can't mis-tokenize the command. (Issue 13)
+    eval_cmd = (
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(_CLI_GO_PATH))} evaluate "
+        f"--branch {shlex.quote(branch)} --backend {shlex.quote(backend)} "
+        f"--commit0-config-file {shlex.quote(commit0_config_file)} "
+        f"--timeout {_go_test_timeout()}"
+    )
     try:
         result = subprocess.run(
-            eval_cmd.split(), capture_output=True, text=True, check=True
+            shlex.split(eval_cmd), capture_output=True, text=True, check=True
         )
         return result.stdout
     except subprocess.CalledProcessError as e:
@@ -349,7 +358,16 @@ def run_agent_for_repo(
                 if not test_id.strip():
                     continue
                 update_queue.put(("set_current_file", (repo_name, test_id)))
-                test_cmd = f"{sys.executable} {_CLI_GO_PATH} test {repo_path} {test_id} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout {_go_test_timeout()}"
+                # Quote interpolated fields (repo_path/test_id/branch/... may
+                # carry a space or shell metachar) so aider's shell execution of
+                # this command tokenizes correctly. (Issue 13)
+                test_cmd = (
+                    f"{shlex.quote(sys.executable)} {shlex.quote(str(_CLI_GO_PATH))} test "
+                    f"{shlex.quote(str(repo_path))} {shlex.quote(test_id)} "
+                    f"--branch {shlex.quote(branch)} --backend {shlex.quote(backend)} "
+                    f"--commit0-config-file {shlex.quote(commit0_config_file)} "
+                    f"--timeout {_go_test_timeout()}"
+                )
                 if agent_config.blind_tests:
                     test_cmd = _make_blind_test_cmd(test_cmd)
                 elif agent_config.names_only_tests:
@@ -390,30 +408,46 @@ def run_agent_for_repo(
                     for c in spec_costs:
                         thinking_capture.summarizer_costs.add(c)
 
-                with capture_module_calls(
-                    thinking_capture=thinking_capture,
-                    module=test_id_safe,
-                    log_dir=test_log_dir,
-                ):
+                agent_return = None
+                _module_ok = False
+                for _mret in range(INLINE_MODULE_MAX_RETRIES):
                     try:
-                        agent_return = run_with_recovery(agent.run,
-                            message,
-                            test_cmd,
-                            lint_cmd,
-                            target_edit_files,
-                            test_log_dir,
-                            test_first=True,
+                        with capture_module_calls(
                             thinking_capture=thinking_capture,
-                            current_stage="test",
-                            current_module=test_id_safe,
-                            max_test_output_length=agent_config.max_test_output_length,
-                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                            test_files_readonly=test_files_readonly,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=test_log_dir,)
+                            module=test_id_safe,
+                            log_dir=test_log_dir,
+                        ):
+                            agent_return = run_with_recovery(agent.run,
+                                message,
+                                test_cmd,
+                                lint_cmd,
+                                target_edit_files,
+                                test_log_dir,
+                                test_first=True,
+                                thinking_capture=thinking_capture,
+                                current_stage="test",
+                                current_module=test_id_safe,
+                                max_test_output_length=agent_config.max_test_output_length,
+                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                            _kaiju_log_dir=test_log_dir,)
+                        _module_ok = True
+                        break
                     except TransientLLMError as _tle:
-                        _skip_failed_module(test_log_dir, test_id_safe, _tle)
-                        continue
+                            if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                _skip_failed_module(test_log_dir, test_id_safe, _tle)
+                                break
+                            _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                            logger.warning(
+                                "Module %s (test) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                test_id_safe, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                            )
+                            if thinking_capture is not None:
+                                thinking_capture.set_live_path(Path(test_log_dir) / "turns.jsonl")
+                            time.sleep(_wait)
+                if not _module_ok or agent_return is None:
+                    continue
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -464,30 +498,46 @@ def run_agent_for_repo(
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
 
-                with capture_module_calls(
-                    thinking_capture=thinking_capture,
-                    module=file_name,
-                    log_dir=lint_log_dir,
-                ):
+                agent_return = None
+                _module_ok = False
+                for _mret in range(INLINE_MODULE_MAX_RETRIES):
                     try:
-                        agent_return = run_with_recovery(agent.run,
-                            "",
-                            "",
-                            lint_cmd,
-                            [edit_file],
-                            lint_log_dir,
-                            lint_first=True,
+                        with capture_module_calls(
                             thinking_capture=thinking_capture,
-                            current_stage="lint",
-                            current_module=file_name,
-                            max_test_output_length=agent_config.max_test_output_length,
-                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                            test_files_readonly=test_files_readonly,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=lint_log_dir,)
+                            module=file_name,
+                            log_dir=lint_log_dir,
+                        ):
+                            agent_return = run_with_recovery(agent.run,
+                                "",
+                                "",
+                                lint_cmd,
+                                [edit_file],
+                                lint_log_dir,
+                                lint_first=True,
+                                thinking_capture=thinking_capture,
+                                current_stage="lint",
+                                current_module=file_name,
+                                max_test_output_length=agent_config.max_test_output_length,
+                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                            _kaiju_log_dir=lint_log_dir,)
+                        _module_ok = True
+                        break
                     except TransientLLMError as _tle:
-                        _skip_failed_module(lint_log_dir, file_name, _tle)
-                        continue
+                            if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                _skip_failed_module(lint_log_dir, file_name, _tle)
+                                break
+                            _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                            logger.warning(
+                                "Module %s (lint) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                file_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                            )
+                            if thinking_capture is not None:
+                                thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
+                            time.sleep(_wait)
+                if not _module_ok or agent_return is None:
+                    continue
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -549,29 +599,45 @@ def run_agent_for_repo(
                 )
                 if agent_config.blind_lint and lint_cmd:
                     lint_cmd = _make_blind_lint_cmd(lint_cmd)
-                with capture_module_calls(
-                    thinking_capture=thinking_capture,
-                    module=file_name,
-                    log_dir=file_log_dir,
-                ):
+                agent_return = None
+                _module_ok = False
+                for _mret in range(INLINE_MODULE_MAX_RETRIES):
                     try:
-                        agent_return = run_with_recovery(agent.run,
-                            message,
-                            "",
-                            lint_cmd,
-                            [f],
-                            file_log_dir,
+                        with capture_module_calls(
                             thinking_capture=thinking_capture,
-                            current_stage="draft",
-                            current_module=file_name,
-                            max_test_output_length=agent_config.max_test_output_length,
-                            spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                            test_files_readonly=test_files_readonly,
-                            inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=file_log_dir,)
+                            module=file_name,
+                            log_dir=file_log_dir,
+                        ):
+                            agent_return = run_with_recovery(agent.run,
+                                message,
+                                "",
+                                lint_cmd,
+                                [f],
+                                file_log_dir,
+                                thinking_capture=thinking_capture,
+                                current_stage="draft",
+                                current_module=file_name,
+                                max_test_output_length=agent_config.max_test_output_length,
+                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                test_files_readonly=test_files_readonly,
+                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                            _kaiju_log_dir=file_log_dir,)
+                        _module_ok = True
+                        break
                     except TransientLLMError as _tle:
-                        _skip_failed_module(file_log_dir, file_name, _tle)
-                        continue
+                            if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                _skip_failed_module(file_log_dir, file_name, _tle)
+                                break
+                            _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                            logger.warning(
+                                "Module %s (draft) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                file_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                            )
+                            if thinking_capture is not None:
+                                thinking_capture.set_live_path(Path(file_log_dir) / "turns.jsonl")
+                            time.sleep(_wait)
+                if not _module_ok or agent_return is None:
+                    continue
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(

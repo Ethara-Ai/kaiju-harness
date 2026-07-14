@@ -18,7 +18,7 @@ class TestGetDockerfileBase:
 
     def test_invalid_version_raises_valueerror(self) -> None:
         with pytest.raises(ValueError, match="Unsupported"):
-            get_dockerfile_base("3.8")
+            get_dockerfile_base("3.6")
 
     def test_version_with_spaces_raises(self) -> None:
         with pytest.raises(ValueError, match="Unsupported"):

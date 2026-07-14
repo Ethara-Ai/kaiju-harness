@@ -38,6 +38,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,22 +69,55 @@ def parse_csv(csv_path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        # T18: DictReader tolerates missing columns by returning None from .get(),
+        # which silently zeroes out every row. If the CSV lacks the required
+        # headers (typo, wrong file, missing header line), fail loudly here.
+        _fields = set(reader.fieldnames or [])
+        _required = {"Github url"}
+        _missing = _required - _fields
+        if _missing:
+            raise ValueError(
+                f"CSV {csv_path} is missing required column(s): {sorted(_missing)}."
+                f" Found columns: {sorted(_fields)}"
+            )
         for row in reader:
             github_url = (row.get("Github url") or "").strip().rstrip("/")
             if github_url.endswith(".git"):
                 github_url = github_url[:-4]
-            if not github_url or "github.com" not in github_url:
+            if not github_url:
                 lib = (row.get("library_name") or "").strip()
                 if lib:
-                    logger.warning("Skipping %s: no valid GitHub URL", lib)
+                    logger.warning("Skipping %s: empty GitHub URL", lib)
                 continue
 
-            match = re.search(r"github\.com/([^/]+/[^/]+)", github_url)
-            if not match:
-                logger.warning("Skipping: cannot parse repo from URL %s", github_url)
+            # T9: Full scheme+host validation. The old regex matched any URL
+            # containing 'github.com/' anywhere (e.g. attacker.com/github.com/fake/repo), so a
+            # poisoned CSV could inject arbitrary owner/repo. Parse the URL
+            # and require scheme http(s) with host exactly github.com or
+            # www.github.com.
+            try:
+                _parsed = urlparse(github_url)
+            except ValueError as _e:
+                logger.warning("Skipping: unparseable URL %s (%s)", github_url, _e)
                 continue
-
-            full_name = match.group(1)
+            if _parsed.scheme not in ("http", "https"):
+                logger.warning(
+                    "Skipping: URL %s must be http(s), got scheme %r",
+                    github_url, _parsed.scheme,
+                )
+                continue
+            if (_parsed.hostname or "").lower() not in ("github.com", "www.github.com"):
+                logger.warning(
+                    "Skipping: URL %s host must be github.com, got %r",
+                    github_url, _parsed.hostname,
+                )
+                continue
+            _path = (_parsed.path or "").strip("/")
+            _parts = _path.split("/")
+            if len(_parts) < 2 or not _parts[0] or not _parts[1]:
+                logger.warning("Skipping: cannot parse owner/repo from %s", github_url)
+                continue
+            full_name = f"{_parts[0]}/{_parts[1]}"
             rows.append(
                 {
                     "library_name": (row.get("library_name") or "").strip(),

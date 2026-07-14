@@ -60,6 +60,11 @@ def _strip_ansi(s: str) -> str:
 
 
 def _strip_repo_prefix(file_path: str, repo_root: str) -> str:
+    # J10: intentionally uses "/" (not os.sep). JS test-runner output emits
+    # POSIX-style paths across platforms (jest/vitest/mocha/ava all normalise
+    # to forward slashes in their JSON/TAP reporters), and the docker eval
+    # path is always Linux. os.sep would break on Windows dev machines where
+    # a path like "repo\\dir" would never match the runner's "repo/dir".
     root_prefix = repo_root.rstrip("/") + "/"
     if file_path.startswith(root_prefix):
         return file_path[len(root_prefix) :]
@@ -227,6 +232,39 @@ def _parse_node_test_output(stdout: str, repo_root: str = CONTAINER_WORKDIR) -> 
     return test_ids
 
 
+def _parse_ava_tap_output(stdout: str, repo_root: str = CONTAINER_WORKDIR) -> list[str]:
+    """J6: AVA-specific TAP parser.
+
+    AVA's `--tap` output differs from node:test in two ways that the shared
+    node:test walker gets wrong:
+      1. AVA does NOT emit `# Subtest: name` markers — it prints flat `ok N -`
+         lines whose `name` already contains the file/title path joined by
+         ` > `. The node:test walker's subtest_stack machinery is a no-op here
+         (harmless) but the intent is clearer with a dedicated function.
+      2. AVA sometimes prepends `# ` diagnostic lines for failed asserts that
+         resemble subtest markers; the shared parser would mis-attribute them.
+    Keep this in sync with AVA docs; adjust when AVA changes its TAP shape.", 
+    """
+    if not stdout or not stdout.strip():
+        return []
+    text = _strip_ansi(stdout)
+    test_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        m = _TAP_TEST_RE.match(raw.strip())
+        if not m:
+            continue
+        name = m.group(1).strip()
+        if not name:
+            continue
+        # AVA sometimes prefixes with the file path already; if not, the caller
+        # will normalize via _normalize_js_test_ids.
+        if name not in seen:
+            seen.add(name)
+            test_ids.append(name)
+    return test_ids
+
+
 def _detect_framework_from_entry(entry: dict) -> str:
     """Resolve framework from entry.test_framework, test.test_cmd, then default."""
     framework = str(entry.get("test_framework", "") or "").lower().strip()
@@ -285,8 +323,10 @@ def _dispatch_parse(
         return _parse_vitest_list_output(stdout, repo_root)
     if framework == "mocha":
         return _parse_mocha_output(stdout, repo_root)
-    if framework in ("node_test", "ava"):
-        # Both emit flat/nested TAP; the TAP walker handles either.
+    if framework == "ava":
+        # J6: AVA gets its own parser to avoid node:test's subtest_stack drift.
+        return _parse_ava_tap_output(stdout, repo_root)
+    if framework == "node_test":
         return _parse_node_test_output(stdout, repo_root)
     logger.warning("Unknown framework %r, falling back to jest parser", framework)
     return _parse_jest_json_results(stdout, repo_root)
@@ -334,14 +374,23 @@ def collect_js_test_ids_local(
             timeout=timeout,
             check=False,
         )
-    except subprocess.TimeoutExpired:
-        logger.warning(
+    except subprocess.TimeoutExpired as exc:
+        # J7: previously we swallowed timeouts and returned [], which is
+        # indistinguishable from a repo with genuinely zero tests. Raise a
+        # dedicated RuntimeError so the caller can differentiate infra
+        # (slow install / hanging test collection) from a real empty inventory.
+        logger.error(
             "  %s test collection timed out after %ds in %s", framework, timeout, repo_dir
         )
-        return []
-    except FileNotFoundError:
-        logger.warning("  npx/node not found. Is Node.js installed?")
-        return []
+        raise RuntimeError(
+            f"{framework} test-id collection timed out after {timeout}s in {repo_dir};"
+            f" empty result would be scored as 'no tests' — raising instead."
+        ) from exc
+    except FileNotFoundError as exc:
+        logger.error("  npx/node not found. Is Node.js installed?")
+        raise RuntimeError(
+            f"npx/node not on PATH; cannot run {framework} test-id collection"
+        ) from exc
 
     test_ids = _dispatch_parse(result.stdout, framework, str(repo_dir.resolve()))
 

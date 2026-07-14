@@ -126,6 +126,11 @@ class Commit0JsSpec(Spec):
                 ".mocharc.*", "**/.mocharc.*",
                 "babel.config.*", "**/babel.config.*",
                 ".babelrc*", "**/.babelrc*",
+                # J3: snapshot files (jest/vitest/mocha) surviving revert let a
+                # model prime a next run with forged expected values. Model-added
+                # __snapshots__/ dirs and .snap files must be deleted before eval.
+                "__snapshots__/", "**/__snapshots__/", "**/__snapshots__/**",
+                "*.snap", "**/*.snap",
             ],
         )
         steps: list[str] = [
@@ -148,6 +153,12 @@ class Commit0JsSpec(Spec):
                 f"echo \"PATCH_TOO_LARGE: $_diff_bytes bytes exceeds "
                 f"{MAX_PATCH_BYTES} byte cap\" >&2; "
                 "exit 4; "
+                # J9: also warn on suspiciously-small patches so downstream can
+                # differentiate a legit but empty response from encoding-corrupted
+                # patch data. `--allow-empty` stays because git needs it for
+                # metadata-only diffs (rare but valid).
+                "elif [ \"$_diff_bytes\" -lt 20 ]; then "
+                "echo \"PATCH_SUSPICIOUSLY_SMALL: $_diff_bytes bytes; possible encoding corruption\" >&2; "
                 "fi"
             ),
             f"git apply --allow-empty -v {diff_path}",
@@ -170,14 +181,19 @@ class Commit0JsSpec(Spec):
         # this stdout file when the reporter file is empty, so old versions still
         # score instead of reading as infra/0.
         stdout_path = "test_stdout.txt"
+        # Prepend `timeout` so a runaway test suite is killed cleanly (SIGTERM then
+        # SIGKILL after --kill-after grace) instead of hanging until the outer
+        # Docker container timeout fires. Exit 124 flags TEST_SUITE_TIMEOUT.
+        # Configurable via EVAL_TEST_TIMEOUT env var (default 900s).
+        _to = 'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" '
         test_cmd = {
-            "jest": f"{prefix} --json --outputFile={results_path} --reporters=default > {stdout_path} 2>&1",
-            "vitest": f"{prefix} --reporter=json --outputFile={results_path} > {stdout_path} 2>&1",
-            "mocha": f"{prefix} --reporter json --reporter-options output={results_path} > {stdout_path} 2>&1",
-            "node_test": f"{prefix} --test-reporter=tap > {results_path}",
+            "jest": f"{_to}{prefix} --json --outputFile={results_path} --reporters=default > {stdout_path} 2>&1",
+            "vitest": f"{_to}{prefix} --reporter=json --outputFile={results_path} > {stdout_path} 2>&1",
+            "mocha": f"{_to}{prefix} --reporter json --reporter-options output={results_path} > {stdout_path} 2>&1",
+            "node_test": f"{_to}{prefix} --test-reporter=tap > {results_path}",
             # AVA emits standard TAP with --tap; parsed via the shared TAP parser
             # (js_test_parser routes any non jest/vitest/mocha framework to TAP).
-            "ava": f"{prefix} --tap > {results_path}",
+            "ava": f"{_to}{prefix} --tap > {results_path}",
         }[framework]
         steps += [
             test_cmd,

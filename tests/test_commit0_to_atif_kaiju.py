@@ -38,6 +38,7 @@ def _install_harbor_stubs():
 
     harbor_traj.Agent = _Stub
     harbor_traj.FinalMetrics = _Stub
+    harbor_traj.Metrics = _Stub
     harbor_traj.Step = _Stub
     harbor_traj.ToolCall = _Stub
     harbor_traj.Trajectory = _Stub
@@ -254,7 +255,9 @@ class TestDiscoverUnitsKaiju(unittest.TestCase):
         self.assertEqual(unit_path, unit)
         self.assertEqual(model,  "mymodel")
         self.assertEqual(stage,  "draft")
-        self.assertEqual(module, "src__pexpect__FSM")
+        # module is namespaced by repo: `<repo>__<unit-dir-name>` (same convention
+        # as the non-kaiju discover_units), so multi-repo batches don't collide.
+        self.assertEqual(module, "pexpect__src__pexpect__FSM")
 
     def test_all_three_stages_found(self):
         with tempfile.TemporaryDirectory() as td:
@@ -304,7 +307,7 @@ class TestDiscoverUnitsKaiju(unittest.TestCase):
             result = mod.discover_units_kaiju(run_dir)
 
         modules = {r[3] for r in result}
-        self.assertEqual(modules, {"src__repo__alpha", "src__repo__beta"})
+        self.assertEqual(modules, {"repo__src__repo__alpha", "repo__src__repo__beta"})
 
     def test_multiple_repos_and_stages(self):
         with tempfile.TemporaryDirectory() as td:
@@ -353,17 +356,18 @@ class TestDiscoverUnitsKaiju(unittest.TestCase):
         self.assertEqual(stage, "unknown")
 
     def test_module_name_is_file_dir_name(self):
-        """module should equal the sanitized file name, e.g. src__pexpect__FSM."""
+        """module is `<repo>__<file-dir-name>` (repo-namespaced, matching the
+        non-kaiju discover_units convention)."""
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "model" / "run_0"
             run_dir.mkdir(parents=True)
-            expected_module = "src__marshmallow__schema"
-            _make_unit(run_dir, "stage1_draft", "marshmallow", "br", expected_module)
+            file_name = "src__marshmallow__schema"
+            _make_unit(run_dir, "stage1_draft", "marshmallow", "br", file_name)
 
             result = mod.discover_units_kaiju(run_dir)
 
         _, _, _, module = result[0]
-        self.assertEqual(module, expected_module)
+        self.assertEqual(module, f"marshmallow__{file_name}")
 
 
 # ===========================================================================

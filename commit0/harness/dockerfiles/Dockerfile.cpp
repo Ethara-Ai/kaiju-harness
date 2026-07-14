@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:__CPP_UBUNTU_VERSION__
 
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive

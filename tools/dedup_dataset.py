@@ -274,6 +274,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.yes:
         n_losers = sum(len(d.losers) for d in plan)
+        # T14: input() has no timeout; a batch/CI job without --yes would hang
+        # forever if stdin is not a TTY. Detect non-interactive mode and abort
+        # loudly instead of waiting for a user that will never respond.
+        if not sys.stdin.isatty():
+            logger.error(
+                "Refusing to prompt for %d loser folder(s) deletion: stdin is"
+                " not a TTY. Re-run with --yes to confirm non-interactively.",
+                n_losers,
+            )
+            return 1
         try:
             ans = input(f"\nDelete {n_losers} loser folder(s)? [y/N]: ").strip().lower()
         except EOFError:

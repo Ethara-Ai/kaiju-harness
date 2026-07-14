@@ -25,7 +25,7 @@ JS_TEST_FILE_PATTERNS: tuple[str, ...] = (
 
 # 18 (older libs, EOL upstream but still widely targeted), 20/22 (active LTS),
 # 24 (current). Each has a matching Dockerfile.node<version>.
-SUPPORTED_NODE_VERSIONS: frozenset[int] = frozenset({18, 20, 22, 24})
+SUPPORTED_NODE_VERSIONS: frozenset[int] = frozenset({14, 16, 18, 20, 22, 24})
 
 SUPPORTED_PACKAGE_MANAGERS: frozenset[str] = frozenset(
     {"npm", "pnpm", "yarn", "bun"}

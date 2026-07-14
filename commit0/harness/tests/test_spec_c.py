@@ -46,7 +46,14 @@ class TestBaseImageKey:
         df = spec.base_dockerfile
         # Base image is the gcc:13-bookworm toolchain image (provides gcc-13),
         # with clang and the cmocka test framework installed via apt.
-        assert "FROM gcc:13-bookworm" in df
+        from commit0.harness.constants_c import C_GCC_VERSION
+        # base_dockerfile returns the raw template (__C_GCC_VERSION__) that
+        # spec_c substitutes at Docker build time. Accept either raw or
+        # substituted form so tests pass for both API surfaces.
+        assert (
+            f"FROM gcc:{C_GCC_VERSION}-bookworm" in df
+            or "FROM gcc:__C_GCC_VERSION__-bookworm" in df
+        )
         assert "clang" in df
         assert "libcmocka-dev" in df
 

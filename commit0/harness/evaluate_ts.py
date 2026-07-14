@@ -227,23 +227,28 @@ def main(
         if not os.path.exists(report_file):
             log_parent = os.path.dirname(report_file)
             test_output_file = os.path.join(log_parent, "test_output.txt")
-            # Map to the shared status vocabulary so the pipeline never scores an
-            # infra/patch failure as a genuine 0%. eval.sh writes the sentinel
-            # "PATCH_APPLY_FAILED" (and nothing else) when `git apply` fails.
-            if os.path.exists(test_output_file):
-                try:
-                    with open(test_output_file, "r") as _f:
-                        _to = _f.read()
-                except OSError:
-                    _to = ""
-                if _to.strip() == "PATCH_APPLY_FAILED":
-                    reason = "patch_apply_failed"
-                    status = "PATCH_APPLY_FAILED"
-                else:
-                    # produced build/test output but no parseable report -> the
-                    # runner crashed or tests never compiled/collected.
-                    reason = "runner_crash_or_collection_error"
-                    status = "COMPILE_FAILED"
+            test_exit_file = os.path.join(log_parent, "test_exit_code.txt")
+            from pathlib import Path as _Path
+            from commit0.harness._eval_common import (
+                detect_patch_apply_failed as _dpaf,
+                detect_timeout as _dto,
+            )
+            _patch_failed = _dpaf([_Path(test_output_file), _Path(test_exit_file)])
+            _exit_code = None
+            try:
+                _exit_code = int(_Path(test_exit_file).read_text().strip())
+            except (FileNotFoundError, ValueError, OSError):
+                pass
+            _timed_out = _dto(_exit_code)
+            if _patch_failed:
+                reason = "patch_apply_failed"
+                status = "PATCH_APPLY_FAILED"
+            elif _timed_out:
+                reason = "test_suite_timeout"
+                status = "TEST_SUITE_TIMEOUT"
+            elif os.path.exists(test_output_file):
+                reason = "runner_crash_or_collection_error"
+                status = "COMPILE_FAILED"
             else:
                 reason = "container_or_infra_failure"
                 status = "OUTPUT_MISSING"
@@ -258,6 +263,8 @@ def main(
                     "num_passed": 0,
                     "num_tests": len(test_ids),
                     "status": status,
+                    "patch_apply_failed": _patch_failed,
+                    "timed_out": _timed_out,
                 }
             )
             continue

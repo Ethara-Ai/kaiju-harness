@@ -5,6 +5,7 @@ import logging
 import os
 import platform as platform_mod
 import secrets
+import shlex
 
 import tarfile
 import threading
@@ -89,18 +90,22 @@ def copy_to_container(container: Container, src: Path, dst: Path) -> None:
         data = tar_file.read()
 
     # Make directory if necessary
+    # P9 fix: shlex.quote path segments so container.exec_run (which runs via
+    # /bin/sh -c) can't be broken by paths containing spaces or shell metachars.
     logger.debug("Container exec: mkdir -p %s", dst.parent)
-    container.exec_run(f"mkdir -p {dst.parent}")
+    container.exec_run(f"mkdir -p {shlex.quote(str(dst.parent))}")
 
     # Send tar file to container and extract
     container.put_archive(os.path.dirname(dst), data)
     logger.debug("Container exec: tar extract %s", dst)
-    container.exec_run(f"tar -xf {dst}.tar -C {dst.parent}")
+    container.exec_run(
+        f"tar -xf {shlex.quote(str(dst) + '.tar')} -C {shlex.quote(str(dst.parent))}"
+    )
 
     # clean up in locally and in container
     tar_path.unlink()
     logger.debug("Container exec: rm %s.tar", dst)
-    container.exec_run(f"rm {dst}.tar")
+    container.exec_run(f"rm {shlex.quote(str(dst) + '.tar')}")
 
 
 def copy_from_container(container: Container, src: Path, dst: Path) -> None:
@@ -169,7 +174,8 @@ def copy_from_container(container: Container, src: Path, dst: Path) -> None:
 def write_to_container(container: Container, data: str, dst: Path) -> None:
     """Write a string to a file in a docker container"""
     heredoc_delim = f"EOF_{secrets.token_hex(8)}"
-    command = f"cat <<'{heredoc_delim}' > {dst}\n{data}\n{heredoc_delim}"
+    # P9 fix: shlex.quote dst to protect against paths with spaces/metachars.
+    command = f"cat <<'{heredoc_delim}' > {shlex.quote(str(dst))}\n{data}\n{heredoc_delim}"
     container.exec_run(command)
 
 
@@ -468,6 +474,11 @@ def exec_run_with_timeout(
             exec_pid = container.client.api.exec_inspect(exec_id=exec_id)["Pid"]  # pyright: ignore
             container.exec_run(f"kill -TERM {exec_pid}", detach=True)
         timed_out = True
+        # P5 fix: give the reader thread a bounded window to drain stream
+        # after we killed exec_pid. Without this the daemon thread keeps
+        # reading from exec_stream, can corrupt output when the container
+        # is reused, and leaves a dangling thread if the caller never exits.
+        thread.join(timeout=10)
     end_time = time.time()
     exec_result = "".join(_chunks)
     return exec_result, timed_out, end_time - start_time

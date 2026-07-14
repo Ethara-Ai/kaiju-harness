@@ -49,6 +49,10 @@ def classify_pyright_line(
     project_package: str,
     known_deps: set[str],
 ) -> ClassifiedError:
+    # P11: pyright's rule code is expected at line end in `[ruleName]` form.
+    # If the output format changes (extra suffix, description after the code),
+    # this returns UNKNOWN which is fine as a fallback but hides format drift.
+    # We keep the behavior but the caller can log the raw line for triage.
     m = re.search(r"\[(\w+)\]$", line.strip())
     if not m:
         return ClassifiedError(line, ErrorCategory.UNKNOWN, None)
@@ -56,16 +60,22 @@ def classify_pyright_line(
     rule_code = m.group(1)
 
     if rule_code in PYRIGHT_ENV_RULES:
-        import_match = re.search(r'Import "(\w+)"', line)
+        # P10: pyright emits `Import "foo.bar"` for dotted imports. The old
+        # `(\w+)` regex only captured `foo`, so a missing external dep like
+        # `google.cloud` matched as `google` and could be mis-classified.
+        # Match the full quoted import path, then also check the top-level
+        # package (first dotted segment) against known_deps for backward compat.
+        import_match = re.search(r'Import "([^"]+)"', line)
         if import_match:
             import_name = import_match.group(1).lower()
+            top_level = import_name.split(".", 1)[0]
             if import_name == project_package.lower():
                 return ClassifiedError(
                     line,
                     ErrorCategory.CODE,
                     f"Missing import of own package '{import_name}'",
                 )
-            if import_name in known_deps:
+            if import_name in known_deps or top_level in known_deps:
                 return ClassifiedError(
                     line,
                     ErrorCategory.ENVIRONMENT,

@@ -36,6 +36,7 @@ REPO_BASE="${BASE_DIR}/repos"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
+export LANGUAGE="c"  # H8: parity with other drivers so child processes can rely on $LANGUAGE
 
 MODEL_ARG=""
 USE_CLAUDE_CODE="false"
@@ -565,6 +566,27 @@ AGENT_ELAPSED=0
 AGENT_RC=0
 AGENT_NEEDS_RETRY=0
 
+# Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
+# .needs_retry means the agent was killed mid-post-processing (typically by the
+# inactivity watchdog after aider finished a turn but before _mark_module_done
+# ran). Auto-resume detection uses `.needs_retry` files, so limbo modules would
+# be silently skipped without this sweep. Convert them so auto-resume re-runs them.
+_sweep_limbo_modules() {
+    local _ld="$1"
+    [[ -d "$_ld" ]] || return 0
+    local _swept=0 _aider _moddir
+    while IFS= read -r _aider; do
+        _moddir=$(dirname "$_aider")
+        if [[ ! -f "$_moddir/.done" && ! -f "$_moddir/.needs_retry" ]]; then
+            echo "limbo (agent killed mid-postprocessing, no .done marker)" > "$_moddir/.needs_retry"
+            _swept=$((_swept + 1))
+        fi
+    done < <(find "$_ld" -type f -name aider.log 2>/dev/null)
+    if [[ "$_swept" -gt 0 ]]; then
+        log "  SWEEP: converted ${_swept} limbo module(s) to .needs_retry (had aider.log but neither .done nor .needs_retry)"
+    fi
+}
+
 run_agent_stage() {
     local stage_label="$1"
     local agent_config="$2"
@@ -589,6 +611,7 @@ run_agent_stage() {
     # A module that exhausted its transient-error retries is left WITHOUT a .done
     # marker plus a .needs_retry breadcrumb (run_agent_c.py::_skip_failed_module),
     # and the repo continues so other modules aren't discarded.
+    _sweep_limbo_modules "$LOG_BASE/${stage_label}"
     AGENT_NEEDS_RETRY=$(find "$LOG_BASE/${stage_label}" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
 
     # AUTO-RESUME: never leave the run needing a MANUAL --resume. For large batches
@@ -619,7 +642,8 @@ run_agent_stage() {
         set -e
         _rend=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_rend - _rstart) ))
-        AGENT_NEEDS_RETRY=$(find "$LOG_BASE/${stage_label}" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        _sweep_limbo_modules "$LOG_BASE/${stage_label}"
+    AGENT_NEEDS_RETRY=$(find "$LOG_BASE/${stage_label}" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_auto_max} finished (rc=${AGENT_RC}); ${AGENT_NEEDS_RETRY} module(s) still .needs_retry."
     done
 

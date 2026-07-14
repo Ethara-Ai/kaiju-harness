@@ -6,10 +6,14 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+# H10: hoist required-field list to module-level for parity with
+# create_dataset_{go,rust,js,ts,cpp,py}.py so schema drift is grep-visible.
+REQUIRED_FIELDS: List[str] = ["instance_id", "repo", "base_commit", "reference_commit"]
+
+
 def validate_java_entry(entry: dict) -> List[str]:
-    required_fields = ["instance_id", "repo", "base_commit", "reference_commit"]
-    issues = []
-    for field in required_fields:
+    issues: List[str] = []
+    for field in REQUIRED_FIELDS:
         if field not in entry:
             issues.append(f"Missing required field: {field}")
     return issues

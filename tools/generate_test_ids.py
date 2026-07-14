@@ -538,7 +538,14 @@ def generate_for_dataset(
     Returns a map ``{repo_name: {status, count, source}}`` for the caller's
     summary line.
     """
-    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    # T3 fix: previously bare json.loads crashed with raw traceback on malformed
+    # dataset. Surface a clean error the operator can act on.
+    try:
+        data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Dataset JSON at {dataset_path} is malformed: {e}"
+        ) from e
     if isinstance(data, dict) and "data" in data:
         entries = data["data"]
     elif isinstance(data, list):
@@ -801,17 +808,30 @@ class _ReferenceCommitCheckout:
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             logger.warning("  Cannot rev-parse HEAD before checkout: %s", exc)
             return self
-        # Stash if dirty (stubbed code is uncommitted at this stage)
+        # T5: Stash if dirty. If git status itself fails (detached HEAD,
+        # permissions issue), an empty stdout would be treated as "clean" and
+        # we'd proceed on corrupted state; log a warning and treat rc!=0 as
+        # "assume dirty, try to stash" so we don't checkout on top of unknown.
         dirty = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=self.repo_dir, capture_output=True, text=True, timeout=15,
         )
-        if dirty.stdout.strip():
+        if dirty.returncode != 0:
+            logger.warning(
+                "  git status failed in %s (rc=%s stderr=%s); assuming dirty tree",
+                self.repo_dir, dirty.returncode, dirty.stderr.strip()[:200],
+            )
+        if dirty.stdout.strip() or dirty.returncode != 0:
             stash = subprocess.run(
                 ["git", "stash", "push", "-u", "-m", "kaiju-generate-test-ids"],
                 cwd=self.repo_dir, capture_output=True, text=True, timeout=30,
             )
             self._stashed = stash.returncode == 0
+            if not self._stashed:
+                logger.warning(
+                    "  git stash push failed in %s (rc=%s stderr=%s)",
+                    self.repo_dir, stash.returncode, stash.stderr.strip()[:200],
+                )
         try:
             subprocess.run(
                 ["git", "checkout", self.reference_commit],
@@ -820,33 +840,57 @@ class _ReferenceCommitCheckout:
             )
             logger.info("  Checked out reference_commit=%s", self.reference_commit[:12])
         except subprocess.CalledProcessError as exc:
-            logger.warning(
+            # T11: previously we logged a warning then swallowed the error, so
+            # callers proceeded to collect test IDs on the WRONG commit.
+            # Roll back the stash first, then raise so the caller gets a hard
+            # signal instead of a silent inventory-vs-reality drift.
+            _stderr = (exc.stderr or exc.stdout or "").strip()[:400]
+            logger.error(
                 "  Could not checkout reference_commit %s: %s",
-                self.reference_commit, exc.stderr or exc.stdout,
+                self.reference_commit, _stderr,
             )
-            # Roll back the stash if checkout failed so the worktree returns
-            # to the state the caller expected.
             self._pop_stash()
             self._prior_head = None
+            raise RuntimeError(
+                f"failed to checkout reference_commit {self.reference_commit!r}"
+                f" in {self.repo_dir}: {_stderr}"
+            ) from exc
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        # T4: git checkout on cleanup can fail silently (dirty tree, permissions,
+        # detached ref). Without a returncode check the worktree is left in an
+        # inconsistent state while callers assume clean restore. Log so the
+        # operator can spot half-cleaned repos.
         if self._prior_head:
-            subprocess.run(
+            co = subprocess.run(
                 ["git", "checkout", self._prior_head],
                 cwd=self.repo_dir, capture_output=True, text=True,
                 timeout=30, check=False,
             )
+            if co.returncode != 0:
+                logger.warning(
+                    "  cleanup git checkout %s failed in %s (rc=%s stderr=%s);"
+                    " worktree may be at wrong commit",
+                    self._prior_head, self.repo_dir, co.returncode,
+                    co.stderr.strip()[:200],
+                )
         self._pop_stash()
 
     def _pop_stash(self) -> None:
         if not self._stashed:
             return
-        subprocess.run(
+        sp = subprocess.run(
             ["git", "stash", "pop"],
             cwd=self.repo_dir, capture_output=True, text=True,
             timeout=30, check=False,
         )
+        if sp.returncode != 0:
+            logger.warning(
+                "  cleanup git stash pop failed in %s (rc=%s stderr=%s);"
+                " stashed changes remain in stash",
+                self.repo_dir, sp.returncode, sp.stderr.strip()[:200],
+            )
         self._stashed = False
 
 
@@ -1056,7 +1100,20 @@ def main() -> None:
             if args.lenient and result.test_ids:
                 save_test_ids(result.test_ids, args.name, output_dir)
                 bz2_written = True
-                logger.info("--lenient: wrote %d test IDs anyway", len(result.test_ids))
+                # T20: partial/broken lenient uploads previously logged INFO,
+                # which was easy to miss in noisy CI logs. Downstream evaluators
+                # trust <name>.bz2 as a canonical inventory; if a repo lands via
+                # --lenient after IMPORT_ERROR or COLLECTION_FAILED, the inventory
+                # is incomplete and future scores are silently inflated/deflated.
+                # Escalate to a boxed WARNING so it survives log-scanning.
+                logger.warning(
+                    "\n" + "!" * 72
+                    + "\n!! LENIENT UPLOAD: wrote %d test IDs for %s despite status=%s."
+                    + "\n!! Downstream eval scores against this inventory are unreliable."
+                    + "\n!! Rerun without --lenient after fixing infra (see .status.json)."
+                    + "\n" + "!" * 72,
+                    len(result.test_ids), args.name, result.status.value,
+                )
 
         # ALWAYS write the .status.json artifact so downstream sweep tools can
         # detect the gap (the Argo wrapper's *.bz2-only glob silently ignores

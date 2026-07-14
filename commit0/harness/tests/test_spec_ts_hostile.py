@@ -153,27 +153,28 @@ class TestShellQuotingInvariants:
         # appear as a bare token.
         assert shlex.quote(repo_value) in script
 
-    @pytest.mark.parametrize(
-        "base_commit",
-        [
-            "a" * 40,
-            "HEAD",
-            "HEAD~1",
-            "main",
-            # Adversarial (quoting still applies — the harness does not
-            # validate commit SHAs in spec_ts itself; it relies on shlex
-            # + git to reject bad refs)
-            "not a ref",
-            "ref;rm -rf /",
-            "ref`id`",
-        ],
-    )
-    def test_base_commit_shell_quoted(self, base_commit: str) -> None:
+    @pytest.mark.parametrize("base_commit", ["a" * 40, "0" * 40, "abc1234def"])
+    def test_valid_base_commit_shell_quoted(self, base_commit: str) -> None:
+        # A valid bare-hex base_commit is shell-quoted in BOTH scripts.
         spec = _spec(base_commit=base_commit)
         setup = "\n".join(spec.make_repo_script_list())
         eval_script = "\n".join(spec.make_eval_script_list())
         assert shlex.quote(base_commit) in setup
         assert shlex.quote(base_commit) in eval_script
+
+    @pytest.mark.parametrize(
+        "base_commit",
+        ["HEAD", "HEAD~1", "main", "not a ref", "ref;rm -rf /", "ref`id`"],
+    )
+    def test_hostile_base_commit_rejected_by_eval(self, base_commit: str) -> None:
+        # eval_hardening now REJECTS any base_commit that is not a bare hex SHA
+        # (7-64 chars), so a ref name or shell-injection payload can never reach
+        # the generated eval script at all — a stronger guarantee than the old
+        # "quoting neutralizes it" model. The eval script is where the base_commit
+        # is spliced into `git checkout <base> -- ...`, so rejection happens there.
+        spec = _spec(base_commit=base_commit)
+        with pytest.raises(ValueError, match="bare hex git SHA"):
+            spec.make_eval_script_list()
 
     def test_repo_directory_quoted_in_every_cd(self) -> None:
         spec = _spec()
@@ -185,10 +186,14 @@ class TestShellQuotingInvariants:
         """Sanity: every generated line must round-trip through shlex.split()
         without raising — no unbalanced quotes even under hostile repo names.
         """
+        # The hostile input under test here is the REPO NAME (the documented
+        # target). base_commit/reference_commit must now be valid bare-hex SHAs
+        # or eval_hardening rejects them before the shlex-parseability check can
+        # exercise the repo-name quoting.
         spec = _spec(
             repo="owner/\"evil name';",
-            base_commit="sha; rm -rf /",
-            reference_commit="sha`id`",
+            base_commit="a" * 40,
+            reference_commit="b" * 40,
         )
         for line in spec.make_repo_script_list() + spec.make_eval_script_list():
             # Drop lines that are pure shell redirects (>, |) that shlex

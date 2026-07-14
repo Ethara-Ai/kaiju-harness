@@ -318,30 +318,71 @@ PY
 # with our secret to guarantee a match. Set --reuse-bridge to skip the restart if
 # you KNOW the running bridge already uses this secret.
 echo "== [2/5] bridge ($BRIDGE) =="
+
+# Liveness is decided by a real HTTP /healthz probe, NOT by `lsof ... LISTEN`.
+# A bridge process that is SUSPENDED (state T — e.g. a stray Ctrl-Z on a prior
+# run's process group) or otherwise wedged STILL HOLDS its listening socket, so
+# an lsof check passes — but it never answers a request. The container's model
+# preflight then hangs until PROBE_TIMEOUT (~120s) and the whole run aborts
+# ("MODEL API PREFLIGHT FAILED", blank error) before doing any work. Both bridges
+# expose an unauthenticated GET /healthz, so probe that.
+_bridge_healthy() {  # $1=port
+  curl -sf -m 5 "http://127.0.0.1:$1/healthz" >/dev/null 2>&1
+}
+# Force-free a TCP port even when the holder is STOPPED. A plain `kill` (SIGTERM)
+# is NOT delivered to a T-state process until it is continued, so the old
+# teardown left the stale bridge alive and silently reused it. SIGCONT first (so
+# a stopped process can run its handler and exit), then SIGTERM, then SIGKILL any
+# ORIGINAL holder still alive — tracked by PID, not by re-probing the port, since
+# a half-terminated process can drop the socket while still lingering. SIGKILL is
+# delivered even to a T-state process, so this always wins.
+_force_free_port() {  # $1=port
+  local pids p
+  pids=$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null) || true
+  [ -z "$pids" ] && return 0
+  kill -CONT $pids 2>/dev/null || true
+  kill $pids 2>/dev/null || true
+  sleep 1
+  for p in $pids; do
+    if kill -0 "$p" 2>/dev/null; then kill -9 "$p" 2>/dev/null || true; fi
+  done
+  sleep 0.5
+}
+
 if [ "$BRIDGE" = "codex" ]; then
-  if [ "$REUSE_BRIDGE" != "1" ] && lsof -i :$BPORT | grep -q LISTEN; then
-    echo "   restarting bridge on $BPORT to guarantee a matching secret (--reuse-bridge to skip)"
-    lsof -nP -iTCP:$BPORT -sTCP:LISTEN -t 2>/dev/null | xargs -r kill 2>/dev/null || true
-    sleep 1
-  fi
-  if ! lsof -i :$BPORT | grep -q LISTEN; then
+  # Reuse only if the caller opted in AND the bridge actually answers /healthz.
+  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT"; then
+    echo "   reusing healthy codex bridge on $BPORT (--reuse-bridge)"
+  else
+    # Default path (or --reuse-bridge but the bridge is unhealthy): (re)start so
+    # the bridge uses OUR secret — a stale one may hold a different secret the
+    # container can't authenticate against. Force-free the port first so a
+    # suspended/wedged holder is actually replaced, not silently reused.
+    if lsof -i :$BPORT 2>/dev/null | grep -q LISTEN; then
+      echo "   replacing bridge on $BPORT (forced restart or failed health check)"
+      _force_free_port "$BPORT"
+    fi
     python -m agent.openai_codex --check || { echo "ERROR: codex auth check failed (is ~/.codex/auth.json valid?)"; exit 1; }
     python -m agent.openai_codex --host 0.0.0.0 --port $BPORT >/tmp/codex_bridge.log 2>&1 &
-    for _i in $(seq 1 30); do lsof -i :$BPORT 2>/dev/null | grep -q LISTEN && break; sleep 1; done
+    for _i in $(seq 1 30); do _bridge_healthy "$BPORT" && break; sleep 1; done
   fi
-  lsof -i :$BPORT | grep -q LISTEN && echo "   codex bridge up on $BPORT (secret matches container)" || { echo "ERROR: bridge not up (see /tmp/codex_bridge.log)"; exit 1; }
+  _bridge_healthy "$BPORT" && echo "   codex bridge healthy on $BPORT (secret matches container)" || { echo "ERROR: bridge not answering /healthz on $BPORT (see /tmp/codex_bridge.log)"; exit 1; }
 elif [ "$BRIDGE" = "cc" ]; then
-  if [ "$REUSE_BRIDGE" != "1" ] && lsof -i :$BPORT | grep -q LISTEN; then
-    echo "   restarting bridge on $BPORT to guarantee a matching secret (--reuse-bridge to skip)"
-    KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh stop >/dev/null 2>&1 || true
-    lsof -nP -iTCP:$BPORT -sTCP:LISTEN -t 2>/dev/null | xargs -r kill 2>/dev/null || true
-    sleep 2
-  fi
-  if ! lsof -i :$BPORT | grep -q LISTEN; then
+  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT"; then
+    echo "   reusing healthy cc bridge on $BPORT (--reuse-bridge)"
+  else
+    if lsof -i :$BPORT 2>/dev/null | grep -q LISTEN; then
+      echo "   replacing bridge on $BPORT (forced restart or failed health check)"
+      # `stop` first so the watchdog is torn down and won't respawn the bridge
+      # mid-shutdown; then force-free in case the process was stopped (T-state,
+      # which `stop`'s SIGTERM can't reap).
+      KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh stop >/dev/null 2>&1 || true
+      _force_free_port "$BPORT"
+    fi
     KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh start || { echo "ERROR: cc bridge start failed"; exit 1; }
-    for _i in $(seq 1 30); do lsof -i :$BPORT 2>/dev/null | grep -q LISTEN && break; sleep 1; done
+    for _i in $(seq 1 30); do _bridge_healthy "$BPORT" && break; sleep 1; done
   fi
-  lsof -i :$BPORT | grep -q LISTEN && echo "   cc bridge up on $BPORT (secret matches container)" || { echo "ERROR: bridge not up"; exit 1; }
+  _bridge_healthy "$BPORT" && echo "   cc bridge healthy on $BPORT (secret matches container)" || { echo "ERROR: bridge not answering /healthz on $BPORT"; exit 1; }
   # Always (re)arm the self-healing watchdog. Covers --reuse-bridge (where we
   # skipped `start`, so no monitor would otherwise be attached) and re-arms a
   # monitor whose supervisor died — so a mid-run bridge crash is auto-restarted

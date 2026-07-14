@@ -4,7 +4,6 @@ import os
 import typer
 import yaml
 from pathlib import Path
-from typing import Union
 
 import commit0.harness.setup_ts
 
@@ -245,7 +244,7 @@ def evaluate(
 @commit0_ts_app.command()
 def lint(
     repo_or_repo_dir: str = typer.Argument(..., help="TS repo to lint"),
-    files: Union[list[str], None] = typer.Argument(
+    files: list[str] | None = typer.Argument(
         None,
         help=(
             "Files to lint (positional, variadic). aider appends "
@@ -275,7 +274,7 @@ def lint(
 def save(
     owner: str = typer.Argument(..., help="Owner of the repository"),
     branch: str = typer.Argument(..., help="Branch to save"),
-    github_token: Union[str, None] = typer.Option(None, help="GitHub token"),
+    github_token: str | None = typer.Option(None, help="GitHub token"),
     commit0_config_file: str = typer.Option(
         ".commit0.ts.yaml", help="Path to TS commit0 config"
     ),

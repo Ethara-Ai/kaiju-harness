@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict
 
 from commit0.harness.constants import RepoInstance
+import os
 
 
 class CLanguage(str, Enum):
@@ -20,6 +21,13 @@ class CRepoInstance(RepoInstance):
 
 C_BASE_BRANCH = "commit0"
 C_VERSION = "18"
+
+# GCC toolchain version for the C base image tag. Selected to match Docker Hub
+# gcc images (gcc:<N>-bookworm). Override via C_GCC_VERSION env var for
+# repos requiring a specific GCC (e.g. legacy code stuck on gcc 9/10, or
+# testing against GCC 14 preview). Default GCC 13 supports C89..C18.
+C_GCC_VERSION = os.environ.get("C_GCC_VERSION", "13")
+
 C_SOURCE_EXT = ".c"
 C_HEADER_EXT = ".h"
 C_STUB_MARKER = "STUB_PANIC"

@@ -423,6 +423,10 @@ def get_tests(
 ) -> None:
     """Get test IDs for a JavaScript repo."""
     check_commit0_js_path()
+    # NOTE: JS and TS both dispatch through generate_test_ids_js via the shared
+    # get_ts_test_ids entry point (there is no separate get_js_test_ids module;
+    # the discovery logic is framework-based, not language-based). Rename to
+    # `get_node_test_ids` is a future refactor.
     from commit0.harness.get_ts_test_ids import main as get_test_ids_main
 
     test_id_groups = get_test_ids_main(repo_name, verbose=verbose)

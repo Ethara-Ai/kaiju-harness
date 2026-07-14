@@ -1,3 +1,4 @@
+from pathlib import Path
 """Evaluate C repos — parallel pipeline counterpart to evaluate.py.
 
 Uses C_SPLIT, run_c_tests, and CTest JUnit XML parsing. Does NOT modify the
@@ -46,9 +47,13 @@ logger = logging.getLogger(__name__)
 # Surfaced via the `status` field on each `out` entry so downstream summarisers
 # can distinguish a REAL test outcome from a pipeline failure the harness must
 # NOT silently report as a clean 0/N model score.
+from commit0.harness._eval_common import detect_patch_apply_failed, detect_timeout
+
 OUTCOME_TESTS_RAN = "TESTS_RAN"                    # CTest reached the test phase
 OUTCOME_COMPILE_FAILED = "COMPILE_FAILED"          # build error; tests never ran
 OUTCOME_OUTPUT_MISSING = "OUTPUT_MISSING"          # test_report.xml absent / infra
+OUTCOME_PATCH_APPLY_FAILED = "PATCH_APPLY_FAILED"  # eval.sh couldn't apply patch.diff
+OUTCOME_TEST_SUITE_TIMEOUT = "TEST_SUITE_TIMEOUT"  # killed by `timeout` (or watchdog)
 
 # Statuses that are NOT a measured model score — excluded from the average and
 # reported at 0.0 (never trusted), matching evaluate_go.py.
@@ -269,14 +274,32 @@ def main(
                     )
 
         if results is None:
-            # Neither a junit report nor a parseable ctest stdout. A build error
-            # (compile_errors>0) is COMPILE_FAILED; otherwise a container/infra
-            # failure is OUTPUT_MISSING. Both are EXCLUDED from the average below
-            # (mirrors evaluate_go.py) so they never masquerade as a real 0/N.
-            status = (
-                OUTCOME_COMPILE_FAILED if compile_errors > 0 else OUTCOME_OUTPUT_MISSING
-            )
-            reason = "compile_failed" if compile_errors > 0 else "container_or_infra_failure"
+            # Neither a junit report nor a parseable ctest stdout. Distinguish:
+            # PATCH_APPLY_FAILED (eval.sh sentinel) > TEST_SUITE_TIMEOUT (exit 124/137/143)
+            # > COMPILE_FAILED (compile_errors>0) > OUTPUT_MISSING (container/infra).
+            # All are EXCLUDED from the average below (mirrors evaluate_go.py) so
+            # they never masquerade as a real 0/N.
+            _output_paths = [Path(name) / "test_output.txt", Path(name) / "test_exit_code.txt"]
+            _patch_failed = detect_patch_apply_failed(_output_paths)
+            _exit_code = None
+            _exit_file = Path(name) / "test_exit_code.txt"
+            try:
+                _exit_code = int(_exit_file.read_text().strip())
+            except (FileNotFoundError, ValueError, OSError):
+                pass
+            _timed_out = detect_timeout(_exit_code)
+            if _patch_failed:
+                status = OUTCOME_PATCH_APPLY_FAILED
+                reason = "patch_apply_failed"
+            elif _timed_out:
+                status = OUTCOME_TEST_SUITE_TIMEOUT
+                reason = "test_suite_timeout"
+            elif compile_errors > 0:
+                status = OUTCOME_COMPILE_FAILED
+                reason = "compile_failed"
+            else:
+                status = OUTCOME_OUTPUT_MISSING
+                reason = "container_or_infra_failure"
             logger.warning(
                 "%s: no test_report.xml and no recoverable ctest output (%s) -- check %s",
                 repo_label,

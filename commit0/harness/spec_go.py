@@ -92,7 +92,7 @@ class Commit0GoSpec(Spec):
     @property
     def base_dockerfile(self) -> str:
         dockerfile_path = Path(__file__).parent / "dockerfiles" / "Dockerfile.go"
-        return dockerfile_path.read_text()
+        return dockerfile_path.read_text().replace("__GO_VERSION__", GO_VERSION)
 
     @property
     def repo_dockerfile(self) -> str:
@@ -222,13 +222,27 @@ class Commit0GoSpec(Spec):
         # (SIGTERM then SIGKILL) so a hung test can't run to the outer Docker
         # timeout and lose the partial output. `-timeout` is injected only for a
         # `go test` command that doesn't already carry its own.
-        go_timeout = (
-            f"{test_cmd} -timeout ${{GO_TEST_TIMEOUT:-600s}}"
-            if test_cmd.lstrip().startswith("go test") and "-timeout" not in test_cmd
-            else test_cmd
-        )
+        # Enforce -json (Issue 9): evaluate_go / run_go_tests parse ONLY the
+        # `go test -json` event stream. A plain `go test` emits no events, so a
+        # PASSING suite yields empty results (scored 0.0 / NO_TESTS_DEFINED) and a
+        # failing one is misclassified. Inject -json for any `go test` that lacks
+        # it (the default carries it, but a dataset row may not). Then inject
+        # -timeout (same policy) so a hung test fails cleanly with partial output.
+        _is_go_test = test_cmd.lstrip().startswith("go test")
+        go_timeout = test_cmd
+        if _is_go_test and "-json" not in go_timeout:
+            go_timeout = go_timeout.replace("go test", "go test -json", 1)
+        if _is_go_test and "-timeout" not in go_timeout:
+            go_timeout = f"{go_timeout} -timeout ${{GO_TEST_TIMEOUT:-600s}}"
+        # Outer coreutils `timeout` counts wall-clock from process start INCLUDING
+        # `go build`/compile, while `go test -timeout` counts only post-build test
+        # execution. If both default to 600 the outer backstop fires FIRST -> SIGKILL
+        # (exit 124/137 -> TEST_SUITE_TIMEOUT, EXCLUDED) instead of Go's clean
+        # per-test timeout+panic with partial output. Keep the outer bound strictly
+        # larger than the inner (default 900 > 600s) so build time is headroom, not
+        # part of the test budget. (Issue 8)
         run_line = (
-            'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-600}" '
+            'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" '
             + go_timeout
             + " > test_output.json 2> test_stderr.txt"
         )

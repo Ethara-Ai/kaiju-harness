@@ -20,6 +20,7 @@ import shlex
 import sys
 from agent.agents_ts import TsAiderAgents
 from agent.agents import TransientLLMError
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
 from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
@@ -272,73 +273,88 @@ def run_agent_for_repo_ts(
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
                     _cg_enabled = _ts_compile_gate.is_enabled()
-                    with capture_module_calls(
-                        thinking_capture,
-                        module=test_file_name,
-                        log_dir=test_log_dir,
-                    ):
-                        def _invoke_agent_test():
-                            return run_with_recovery(agent.run,
-                                "",
-                                test_cmd,
-                                lint_cmd,
-                                target_edit_files,
-                                test_log_dir,
-                                test_first=True,
-                                thinking_capture=thinking_capture,
-                                current_stage="test",
-                                current_module=test_file_name,
-                                max_test_output_length=agent_config.max_test_output_length,
-                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                                test_files_readonly=test_files_readonly,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                                _kaiju_log_dir=test_log_dir,
-                            )
-
-                        def _reprompt_test(err_text):
-                            return run_with_recovery(agent.run,
-                                f"tsc --noEmit failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
-                                test_cmd,
-                                lint_cmd,
-                                target_edit_files,
-                                test_log_dir,
-                                test_first=False,
-                                thinking_capture=thinking_capture,
-                                current_stage="test",
-                                current_module=test_file_name,
-                                max_test_output_length=agent_config.max_test_output_length,
-                                spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
-                                test_files_readonly=test_files_readonly,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                                _kaiju_log_dir=test_log_dir,
-                            )
-
+                    _module_ok = False
+                    for _mret in range(INLINE_MODULE_MAX_RETRIES):
                         try:
-                            if _cg_enabled:
-                                _cg_result = _ts_compile_gate.run_with_compile_gate(
-                                    _invoke_agent_test,
-                                    repo_dir=repo_path,
-                                    local_repo=local_repo,
-                                    pre_sha=pre_sha,
-                                    max_retries=int(os.environ.get(
-                                        "KAIJU_TS_COMPILE_GATE_MAX_RETRIES", "2"
-                                    )),
-                                    re_prompt_callback=_reprompt_test,
-                                    persist_dir=str(test_log_dir),
-                                )
-                                if _cg_result.get("status") == "reverted":
-                                    logger.warning(
-                                        "compile_gate REVERTED %s to %s after %d retries (regressions: %s)",
-                                        test_file_name,
-                                        pre_sha[:8],
-                                        _cg_result.get("retries_used", 0),
-                                        _cg_result.get("regressions"),
+                            with capture_module_calls(
+                                thinking_capture,
+                                module=test_file_name,
+                                log_dir=test_log_dir,
+                            ):
+                                def _invoke_agent_test():
+                                    return run_with_recovery(agent.run,
+                                        "",
+                                        test_cmd,
+                                        lint_cmd,
+                                        target_edit_files,
+                                        test_log_dir,
+                                        test_first=True,
+                                        thinking_capture=thinking_capture,
+                                        current_stage="test",
+                                        current_module=test_file_name,
+                                        max_test_output_length=agent_config.max_test_output_length,
+                                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                        test_files_readonly=test_files_readonly,
+                                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                        _kaiju_log_dir=test_log_dir,
                                     )
-                            else:
-                                _ = _invoke_agent_test()
+
+                                def _reprompt_test(err_text):
+                                    return run_with_recovery(agent.run,
+                                        f"tsc --noEmit failed after your edits. Fix the regressions below WITHOUT changing public signatures.\n\n{err_text}",
+                                        test_cmd,
+                                        lint_cmd,
+                                        target_edit_files,
+                                        test_log_dir,
+                                        test_first=False,
+                                        thinking_capture=thinking_capture,
+                                        current_stage="test",
+                                        current_module=test_file_name,
+                                        max_test_output_length=agent_config.max_test_output_length,
+                                        spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                                        test_files_readonly=test_files_readonly,
+                                        inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                        _kaiju_log_dir=test_log_dir,
+                                    )
+
+                                if _cg_enabled:
+                                    _cg_result = _ts_compile_gate.run_with_compile_gate(
+                                        _invoke_agent_test,
+                                        repo_dir=repo_path,
+                                        local_repo=local_repo,
+                                        pre_sha=pre_sha,
+                                        max_retries=int(os.environ.get(
+                                            "KAIJU_TS_COMPILE_GATE_MAX_RETRIES", "2"
+                                        )),
+                                        re_prompt_callback=_reprompt_test,
+                                        persist_dir=str(test_log_dir),
+                                    )
+                                    if _cg_result.get("status") == "reverted":
+                                        logger.warning(
+                                            "compile_gate REVERTED %s to %s after %d retries (regressions: %s)",
+                                            test_file_name,
+                                            pre_sha[:8],
+                                            _cg_result.get("retries_used", 0),
+                                            _cg_result.get("regressions"),
+                                        )
+                                else:
+                                    _ = _invoke_agent_test()
+                            _module_ok = True
+                            break
                         except TransientLLMError as _tle:
-                            _skip_failed_module(test_log_dir, test_file_name, _tle)
-                            continue
+                                if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                    _skip_failed_module(test_log_dir, test_file_name, _tle)
+                                    break
+                                _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                                logger.warning(
+                                    "Module %s (test) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                    test_file_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                                )
+                                if thinking_capture is not None:
+                                    thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
+                                time.sleep(_wait)
+                    if not _module_ok:
+                        continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(test_log_dir)
 
@@ -401,28 +417,43 @@ def run_agent_for_repo_ts(
 
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
-                    with capture_module_calls(
-                        thinking_capture,
-                        module=lint_file_name,
-                        log_dir=lint_log_dir,
-                    ):
+                    _module_ok = False
+                    for _mret in range(INLINE_MODULE_MAX_RETRIES):
                         try:
-                            _ = run_with_recovery(agent.run,
-                                "",
-                                "",
-                                lint_cmd,
-                                [lint_file],
-                                lint_log_dir,
-                                lint_first=True,
-                                thinking_capture=thinking_capture,
-                                current_stage="lint",
-                                current_module=lint_file_name,
-                                test_files_readonly=test_files_readonly,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=lint_log_dir,)
+                            with capture_module_calls(
+                                thinking_capture,
+                                module=lint_file_name,
+                                log_dir=lint_log_dir,
+                            ):
+                                _ = run_with_recovery(agent.run,
+                                    "",
+                                    "",
+                                    lint_cmd,
+                                    [lint_file],
+                                    lint_log_dir,
+                                    lint_first=True,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="lint",
+                                    current_module=lint_file_name,
+                                    test_files_readonly=test_files_readonly,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                _kaiju_log_dir=lint_log_dir,)
+                            _module_ok = True
+                            break
                         except TransientLLMError as _tle:
-                            _skip_failed_module(lint_log_dir, lint_file_name, _tle)
-                            continue
+                                if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                    _skip_failed_module(lint_log_dir, lint_file_name, _tle)
+                                    break
+                                _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                                logger.warning(
+                                    "Module %s (lint) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                    lint_file_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                                )
+                                if thinking_capture is not None:
+                                    thinking_capture.set_live_path(lint_log_dir / "turns.jsonl")
+                                time.sleep(_wait)
+                    if not _module_ok:
+                        continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(lint_log_dir)
 
@@ -482,27 +513,42 @@ def run_agent_for_repo_ts(
                         lint_cmd = _make_blind_lint_cmd(lint_cmd)
                     pre_sha = local_repo.head.commit.hexsha
                     module_start = time.time()
-                    with capture_module_calls(
-                        thinking_capture,
-                        module=file_name,
-                        log_dir=file_log_dir,
-                    ):
+                    _module_ok = False
+                    for _mret in range(INLINE_MODULE_MAX_RETRIES):
                         try:
-                            _ = run_with_recovery(agent.run,
-                                iter_message,
-                                "",
-                                lint_cmd,
-                                [f],
-                                file_log_dir,
-                                thinking_capture=thinking_capture,
-                                current_stage="draft",
-                                current_module=file_name,
-                                test_files_readonly=test_files_readonly,
-                                inject_test_files_readonly=agent_config.inject_test_files_readonly,
-                        _kaiju_log_dir=file_log_dir,)
+                            with capture_module_calls(
+                                thinking_capture,
+                                module=file_name,
+                                log_dir=file_log_dir,
+                            ):
+                                _ = run_with_recovery(agent.run,
+                                    iter_message,
+                                    "",
+                                    lint_cmd,
+                                    [f],
+                                    file_log_dir,
+                                    thinking_capture=thinking_capture,
+                                    current_stage="draft",
+                                    current_module=file_name,
+                                    test_files_readonly=test_files_readonly,
+                                    inject_test_files_readonly=agent_config.inject_test_files_readonly,
+                                _kaiju_log_dir=file_log_dir,)
+                            _module_ok = True
+                            break
                         except TransientLLMError as _tle:
-                            _skip_failed_module(file_log_dir, file_name, _tle)
-                            continue
+                                if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
+                                    _skip_failed_module(file_log_dir, file_name, _tle)
+                                    break
+                                _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                                logger.warning(
+                                    "Module %s (draft) TransientLLMError attempt %d/%d — inline-retrying after %ds",
+                                    file_name, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
+                                )
+                                if thinking_capture is not None:
+                                    thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
+                                time.sleep(_wait)
+                    if not _module_ok:
+                        continue
                     module_elapsed = time.time() - module_start
                     _mark_module_done(file_log_dir)
 

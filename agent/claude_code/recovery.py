@@ -41,6 +41,8 @@ except ImportError:
     pass
 _LOG = logging.getLogger(__name__)
 
+_RATE_LIMIT_PHRASE_RE = re.compile(r"\brate[\s_-]?limit(?:ed|ing)?\b", re.IGNORECASE)
+
 T = TypeVar("T")
 
 DEFAULT_MAX_PAUSE_SECONDS = 6 * 3600  # 6h: just above the 5h cap, well below weekly
@@ -130,20 +132,27 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
         if cls.__name__ == "RateLimitError" and cls.__module__.startswith("openai"):
             return True
     msg = str(exc).lower()
+    # Slug-shape / exception-name / HTTP-status matches: unambiguous, no negation risk.
     if ("rate_limit_error" in msg
             or "ratelimiterror" in msg
-            # Anthropic frequently returns a rate limit wrapped in a 429/500/529
-            # whose TYPE is InternalServerError/MidStreamFallbackError but whose
-            # MESSAGE is "Rate limited" (a SPACE, not the rate_limit_error slug).
-            # Match the human message forms too, else such an error slips off the
-            # rate-limit track AND (bare, unwrapped) off the transient track ->
-            # run_with_recovery re-raises it -> module crashes with NO retry and
-            # NO output.json. These all pause-and-resume on quota reset / failover.
-            or "rate limit" in msg
-            or "rate limited" in msg
             or "too many requests" in msg
             or "resource_exhausted" in msg
             or "subscription_cap" in msg):
+        return True
+    # Human-message form: "rate limit(ed)" phrase. Guard against negations
+    # like "not a rate limit" and "no rate limit" so a test/comment/log line
+    # referencing the concept doesn't false-positive-match. Anthropic frequently
+    # returns a rate limit wrapped in a 429/500/529 whose TYPE is
+    # InternalServerError/MidStreamFallbackError but whose MESSAGE is
+    # "Rate limited" (a SPACE, not the rate_limit_error slug) — that legitimate
+    # form still matches because no negation precedes it.
+    for m in _RATE_LIMIT_PHRASE_RE.finditer(msg):
+        prefix = msg[max(0, m.start() - 12):m.start()]
+        # Add a leading space so negations at message start (e.g. "not a rate...")
+        # still match the pattern " not a " / " not " with word boundaries.
+        prefix_padded = " " + prefix
+        if any(neg in prefix_padded for neg in (" not a ", " not ", " no ", " isn't a ", " isn't ")):
+            continue
         return True
     # Bridge "all accounts exhausted" signal: when every account in a
     # multi-account pool is capped, the bridge short-circuits with a 401
@@ -176,6 +185,13 @@ _TRANSIENT_EXC_NAMES = (
     "ReadError", "WriteError", "RemoteProtocolError", "ConnectError",
     "NetworkError", "MidStreamFallbackError", "APIConnectionError",
     "APITimeoutError",
+    # LLM API server-side errors (openai/anthropic/litellm) — class-name check
+    # is safe (zero false-positive risk) because it matches type(exc).__name__,
+    # NOT source code text. Substring match on 'InternalServerError' was
+    # removed from _LLM_TRANSIENT_SIGNALS to avoid false positives on repos
+    # like BlackSheep whose source references InternalServerError as an HTTP
+    # exception class. Class-name detection catches the RAISED form here.
+    "InternalServerError", "ServiceUnavailableError",
     # Raised by agent.agents.raise_if_transient_llm_error when aider SWALLOWED a
     # transient LLM/network error (printed but did not re-raise). Retrying it
     # re-runs the whole module so no litellm error is left unhandled.

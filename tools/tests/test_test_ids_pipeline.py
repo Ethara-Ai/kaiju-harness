@@ -19,6 +19,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 from tools.generate_test_ids import (
     _ReferenceCommitCheckout,
@@ -315,12 +317,18 @@ class TestReferenceCommitCheckout:
         assert after == second
         assert (tmp_path / "a.txt").read_text() == "dirty\n"
 
-    def test_bad_ref_warns_and_passes_through(self, tmp_path: Path, caplog) -> None:
+    def test_bad_ref_raises_and_leaves_head(self, tmp_path: Path, caplog) -> None:
         first, second = _git_init_with_commits(tmp_path)
-        with _ReferenceCommitCheckout(tmp_path, "doesnotexist123"):
-            inside = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
-            # Checkout failed → HEAD stayed at second
-            assert inside == second
+        # T11: a bad reference_commit must RAISE (not silently pass through), so
+        # the caller never collects test IDs against the wrong commit.
+        with pytest.raises(RuntimeError, match="failed to checkout reference_commit"):
+            with _ReferenceCommitCheckout(tmp_path, "doesnotexist123"):
+                pass  # pragma: no cover - context manager raises on __enter__
+        # checkout failed → HEAD stayed at second
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+        ).strip()
+        assert head == second
 
 
 # ---------------------------------------------------------------------------

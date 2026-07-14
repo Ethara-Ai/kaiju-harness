@@ -32,6 +32,42 @@ _logger = logging.getLogger(__name__)
 _CPP_PROMPT_PATH = Path(__file__).parent / "prompts" / "cpp_system_prompt.md"
 
 
+def _looks_like_build_failure(text: str) -> bool:
+    """True when the test-command output is a BUILD/compile failure (tests never
+    ran), not test results.
+
+    C++ test feedback is deliberately minimal (pass/fail counts). But when the
+    build fails, "counts only" is an EMPTY signal — the model can't see why its
+    code won't compile, so a refine stage is structurally wasted. Compiler errors
+    are BUILD diagnostics (not test answers), so surfacing them does not leak test
+    expectations. Require a build-phase marker AND the absence of test-run markers
+    (so a test that merely prints "error:" isn't mistaken for a build failure).
+    """
+    if not text:
+        return False
+    low = text.lower()
+    build_markers = (
+        "compile_failed",
+        "cmake error",
+        "ninja: build stopped",
+        "error: ",  # gcc/clang diagnostic
+        "undefined reference",
+        "recipe for target",
+        "make: *** ",
+        "make[1]: *** ",
+        "fatal error:",
+    )
+    ran_tests = (
+        "% tests passed" in low        # ctest summary
+        or "tests passed," in low
+        or "[  passed  ]" in low        # gtest
+        or "[==========]" in low        # gtest banner
+        or "assertions:" in low         # catch2/doctest
+        or "test cases:" in low
+    )
+    return any(m in low for m in build_markers) and not ran_tests
+
+
 class CppAiderAgents(AiderAgents):
     """AiderAgents subclass for C++ repositories.
 
@@ -142,7 +178,20 @@ class CppAiderAgents(AiderAgents):
 
                 def _wrapped_cmd_test(test_cmd_arg: str) -> str:
                     raw = _original_cmd_test(test_cmd_arg)
-                    if raw and len(raw) > _max_len:
+                    if not raw:
+                        return raw
+                    # BUILD FAILURE: return the compiler diagnostics (a bounded
+                    # tail) instead of summarizing them to counts. The tests never
+                    # ran, so "counts only" would be an empty signal and the refine
+                    # stage does nothing; the model needs the actual errors to fix
+                    # compilation. These are BUILD diagnostics, not test answers,
+                    # so this does not leak test expectations.
+                    if _looks_like_build_failure(raw):
+                        _cap = max(_max_len, 4000)
+                        if len(raw) > _cap:
+                            return "...(compiler output truncated)...\n" + raw[-_cap:]
+                        return raw
+                    if len(raw) > _max_len:
                         result, costs = summarize_test_output(
                             raw,
                             max_length=_max_len,
