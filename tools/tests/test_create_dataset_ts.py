@@ -61,11 +61,14 @@ def test_validate_ts_entry_missing_setup():
 
 
 def test_validate_ts_entry_bad_node_version():
+    # "12" is below the supported floor (SUPPORTED_NODE_VERSIONS = 14/16/18/20/22/24).
+    # "14" is now SUPPORTED (Dockerfile.node14 was added), so it's no longer a
+    # valid "bad" fixture.
     entry = _make_valid_ts_entry()
-    entry["setup"]["node_version"] = "14"
+    entry["setup"]["node_version"] = "12"
     issues = validate_ts_entry(entry, 0)
     assert len(issues) == 1
-    assert "14" in issues[0]
+    assert "12" in issues[0]
 
 
 @pytest.mark.parametrize("version", ["20", "22"])

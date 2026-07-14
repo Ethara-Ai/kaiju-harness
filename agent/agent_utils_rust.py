@@ -351,6 +351,33 @@ def get_rust_test_ids(repo_path: str) -> list[str]:
         )
 
     repo_name = os.path.basename(os.path.normpath(repo_path))
+
+    # Resolve the canonical inventory the SAME way evaluate_rust does — via
+    # find_test_ids_file, which checks the container-staged dir first
+    # (KAIJU_TEST_IDS_DIR, ``<name>_test_ids.bz2``) and only then the host legacy
+    # dir. Without this the agent looked ONLY in commit0/data/rust_test_ids/ —
+    # absent inside the eval container — so when ``cargo test --list`` can't build
+    # the stubbed base (a non-compiling base is exactly stage 3's starting point),
+    # the fallback found nothing and the test-refine stage got ZERO modules.
+    try:
+        import commit0 as _commit0
+        from kaiju.paths import find_test_ids_file
+
+        _staged = find_test_ids_file(
+            os.path.dirname(_commit0.__file__), "rust_test_ids", f"{repo_name}.bz2"
+        )
+        if _staged is not None:
+            raw = bz2.decompress(Path(_staged).read_bytes()).decode("utf-8")
+            ids = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            if ids:
+                logger.info(
+                    "Loaded %d test IDs from staged inventory %s for %s",
+                    len(ids), _staged, repo_name,
+                )
+                return sorted(ids)
+    except Exception as _exc:  # noqa: BLE001 - best-effort; fall through to legacy
+        logger.debug("staged rust inventory lookup failed for %s: %s", repo_name, _exc)
+
     cache_path = RUST_TEST_IDS_DIR / f"{repo_name}.json"
     cache_path_bz2 = RUST_TEST_IDS_DIR / f"{repo_name}.bz2"
     if cache_path.exists():

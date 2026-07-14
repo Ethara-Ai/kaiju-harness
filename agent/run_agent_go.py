@@ -317,6 +317,25 @@ def run_agent_for_repo(
     logger.info("Found %d target edit files for %s", len(target_edit_files), repo_name)
 
     test_files_str = [xx for x in get_go_test_ids(repo_name, verbose=0) for xx in x]
+    if not test_files_str:
+        # The canonical inventory wasn't found for this repo (e.g. it was never
+        # staged into the container's KAIJU_TEST_IDS_DIR). Rather than leave the
+        # test-refine stage with ZERO modules and silently do nothing, discover
+        # test IDs LIVE with `go test -list` (mirrors rust's `cargo test --list`
+        # primary path). Same `package/TestName` format the inventory uses.
+        try:
+            from tools.generate_test_ids_go import collect_test_ids_local
+
+            test_files_str = collect_test_ids_local(Path(repo_path))
+            logger.warning(
+                "get_go_test_ids found no canonical IDs for %s; live "
+                "`go test -list` discovered %d",
+                repo_name, len(test_files_str),
+            )
+        except Exception as _e:  # noqa: BLE001 - best-effort live fallback
+            logger.warning(
+                "live go test-id discovery failed for %s: %s", repo_name, _e
+            )
 
     experiment_log_dir = Path(log_dir) / repo_name / branch / "current"
     experiment_log_dir.mkdir(parents=True, exist_ok=True)
