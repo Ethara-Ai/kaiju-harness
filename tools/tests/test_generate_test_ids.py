@@ -19,7 +19,7 @@ class TestParseCollectOutput:
         ]
 
     def test_verbose_format(self):
-        """Verbose output with <Module>::<Class>::<Function> tags."""
+        """Legacy verbose output with inline <Module>::<Class>::<Function> tags."""
         output = (
             "<Module tests/test_foo.py>::<Function test_bar>\n"
             "<Module tests/test_foo.py>::<Class TestBaz>::<Function test_qux>\n"
@@ -29,6 +29,76 @@ class TestParseCollectOutput:
             "tests/test_foo.py::test_bar",
             "tests/test_foo.py::TestBaz::test_qux",
         ]
+
+    def test_modern_indented_tree_format(self):
+        """Modern pytest (7/8/9) prints an INDENTED tree — each node on its own
+        line, NOT the legacy single-line ``<Module>::<Function>`` form. Each
+        Dir/Package/Module contributes a ``/`` path segment; Class/Function join
+        with ``::``. The rootdir container node is dropped (ids are rootdir-
+        relative). Regression for the BlackSheep ``tests/Test:`` degenerate
+        inventory (verbose tree yielded zero real ids)."""
+        output = (
+            "============================= test session starts ==============================\n"
+            "collected 3 items\n"
+            "\n"
+            "<Dir testbed>\n"
+            "  <Package tests>\n"
+            "    <Package client>\n"
+            "      <Module test_client.py>\n"
+            "        <Function test_get_url_value[-/]>\n"
+            "        <Coroutine test_client_session_add_middlewares>\n"
+            "    <Module test_utils.py>\n"
+            "      <UnitTestCase TestUtils>\n"
+            "        <TestCaseFunction test_thing>\n"
+            "\n"
+            "======================== 3 tests collected in 3.58s ========================\n"
+        )
+        result = _parse_collect_output(output)
+        assert result == [
+            "tests/client/test_client.py::test_get_url_value[-/]",
+            "tests/client/test_client.py::test_client_session_add_middlewares",
+            "tests/test_utils.py::TestUtils::test_thing",
+        ]
+
+    def test_warnings_line_with_colons_not_parsed_as_id(self):
+        """A deprecation note in the warnings summary
+        (``Test: tests/x.py::y, argvalues type: generator``) contains ``::`` but
+        its first token is ``Test:`` — it must NOT be saved as a node id. This is
+        the exact BlackSheep bug that produced an 11-byte ``tests/Test:``
+        inventory. Verifies BOTH the tree path and the quiet-line fallback."""
+        # Quiet output followed by the poisoning warnings section.
+        quiet = (
+            "tests/test_responses.py::test_ok\n"
+            "tests/test_responses.py::test_redirect\n"
+            "\n"
+            "=============================== warnings summary ===============================\n"
+            "../usr/local/lib/python3.10/site-packages/_pytest/python.py:124\n"
+            "  PytestRemovedIn10Warning: Passing a non-Collection iterable is deprecated.\n"
+            "  Test: tests/test_responses.py::test_redirect_method_raises, argvalues type: generator\n"
+            "  Please convert to a list or tuple.\n"
+            "2 tests collected in 1.82s\n"
+        )
+        result = _parse_collect_output(quiet)
+        assert result == [
+            "tests/test_responses.py::test_ok",
+            "tests/test_responses.py::test_redirect",
+        ]
+        assert not any("Test:" in r for r in result)
+
+        # Same warnings poison, but after an indented TREE (verbose default).
+        tree = (
+            "collected 1 items\n"
+            "<Dir testbed>\n"
+            "  <Package tests>\n"
+            "    <Module test_responses.py>\n"
+            "      <Function test_ok>\n"
+            "=============================== warnings summary ===============================\n"
+            "  Test: tests/test_responses.py::test_redirect_method_raises, argvalues type: generator\n"
+            "1 tests collected in 0.5s\n"
+        )
+        result = _parse_collect_output(tree)
+        assert result == ["tests/test_responses.py::test_ok"]
+        assert not any("Test:" in r for r in result)
 
     def test_empty_output(self):
         result = _parse_collect_output("")

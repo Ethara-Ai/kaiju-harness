@@ -10,7 +10,7 @@ from commit0.harness.constants import (
     RELATIVE_REPO_DIR,
     RepoInstance,
 )
-from commit0.harness.constants_go import GoRepoInstance
+from commit0.harness.constants_go import GO_BASE_IMAGE_TAG, GoRepoInstance
 from commit0.harness.eval_hardening import (
     revert_and_clean_lines,
     guard_snapshot_lines,
@@ -87,7 +87,7 @@ def _require_safe_test_cmd(value: str) -> str:
 class Commit0GoSpec(Spec):
     @property
     def base_image_key(self) -> str:
-        return "commit0.base.go:latest"
+        return GO_BASE_IMAGE_TAG
 
     @property
     def base_dockerfile(self) -> str:
@@ -142,8 +142,13 @@ class Commit0GoSpec(Spec):
 
         setup_commands.extend(
             [
-                "go mod download 2>/dev/null || true",
-                "go build ./... 2>/dev/null || true",
+                # N27: previously piped stderr to /dev/null, hiding go mod
+                # replace-directive failures and network flakes that later
+                # surfaced as confusing build errors. Redirect to diagnostic
+                # files instead so a postmortem can `docker cp` them; still
+                # tolerant of failure (some repos may not need the download).
+                "go mod download >/tmp/kaiju_go_mod_download.log 2>&1 || true",
+                "go build ./... >/tmp/kaiju_go_build.log 2>&1 || true",
                 f"git reset --hard {base_commit}",
             ]
         )
@@ -189,6 +194,16 @@ class Commit0GoSpec(Spec):
                 "go.work.sum", "**/go.work.sum",
                 "sitecustomize.py", "**/sitecustomize.py",
                 "usercustomize.py", "**/usercustomize.py",
+                # N2 cheat-vector close: a model could add `internal/x/impl.go`
+                # with a full working implementation. `internal/` is not in the
+                # scored surface (excluded from stub/discover) and the eval used
+                # to leave added files there untouched — the addition survived
+                # and let the model 'measure' a solved problem. This deletion
+                # targets only ADDED paths under internal/ (via ls-files --others
+                # + diff --diff-filter=A in eval_hardening.revert_and_clean_lines);
+                # base's tracked internal/ files are unaffected.
+                "internal/*.go", "internal/**/*.go",
+                "**/internal/*.go", "**/internal/**/*.go",
             ],
         )
         # A model-ADDED vendor/ (or one it tampered) is not deleted by the helper
@@ -240,6 +255,12 @@ class Commit0GoSpec(Spec):
             "find . -name '*.go' -not -name '*_test.go' -not -path '*/vendor/*' -print0 | xargs -0 -r goimports -w",
             "git status",
             *guard_heal_lines(),
+            # N30 pre-gate: cheap `go vet` diagnostic capture. Non-blocking —
+            # the subsequent `go test` invocation still runs and produces the
+            # authoritative pass/fail signal, but vet output lands in a
+            # postmortem file so an evaluator can distinguish 'model wrote
+            # obviously wrong Go' from 'model got a runtime failure'.
+            "go vet ./... > /tmp/kaiju_go_vet.log 2>&1 || true",
             run_line,
             "echo $? > go_test_exit_code.txt",
         ]

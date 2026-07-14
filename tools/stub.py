@@ -52,6 +52,25 @@ SKIP_DIRS: set[str] = {
     "build",
     "dist",
     ".nox",
+    # Build/packaging tooling — stubbing these breaks the editable install
+    # itself (e.g. SmartSim's `smartsim/_core/_install/buildenv.py`, whose
+    # `is_compatible_python()` setup.py depends on). A stubbed build helper
+    # returns `None`/`pass`, so `setup.py`'s guards misfire and the base can
+    # NEVER install → the package never imports → false 0/N. The library under
+    # test lives in the source package, never in its `_install` build subtree.
+    "_install",
+}
+
+
+# Path segments (any depth) that mark build/packaging tooling. Kept separate
+# from SKIP_DIRS because these must be matched case-insensitively and also
+# guard the per-file prepare path (should_skip_file), not just the directory
+# walk. GENERAL across libraries: `_install`/`_core/_install` (SmartSim-style
+# vendored build backends), `_build_meta`, and PEP 517 in-tree backend dirs.
+SKIP_PATH_SEGMENTS: set[str] = {
+    "_install",
+    "_build_meta",
+    "_build_backend",
 }
 
 
@@ -72,9 +91,102 @@ def is_test_file(path: Path) -> bool:
 SKIP_FILENAMES: set[str] = {"__init__.py", "__main__.py", "conftest.py"}
 
 
+# Build/packaging module filenames that setup.py commonly imports directly and
+# whose bodies must stay implemented for the install to succeed. GENERAL: these
+# names are packaging conventions, not library API. Stubbing them (e.g. a
+# `buildenv.py` that gates the Python version, or a `_version.py`/`versioneer`
+# that setup.py reads) makes `pip install -e .` fail before any test runs.
+SKIP_BUILD_FILENAMES: set[str] = {
+    "setup.py",
+    "setup_helpers.py",
+    "buildenv.py",
+    "build_env.py",
+    "build_meta.py",
+    "_build_meta.py",
+    "versioneer.py",
+    "_version.py",
+    "version.py",
+    "_distutils_hack.py",
+}
+
+
+def is_build_tooling_file(path: Path) -> bool:
+    """Return True for build/packaging tooling that must NEVER be stubbed.
+
+    Stubbing the build system (not the library under test) breaks the editable
+    install itself: a stubbed helper returns ``None``/``pass``, so ``setup.py``'s
+    guards misfire and the package can never install → base never imports →
+    false 0/N.  Root cause of the SmartSim failure (B13): its
+    ``smartsim/_core/_install/buildenv.py`` was stubbed, so
+    ``BuildEnv.is_compatible_python()`` returned ``None`` and ``setup.py``'s
+    ``if not is_compatible_python(): sys.exit`` always fired.
+
+    Detection is GENERAL (old-to-new libs):
+    - any path segment named ``_install`` / ``_build_meta`` / ``_build_backend``
+      (build backends vendored inside the package, incl. ``_core/_install``);
+    - well-known build-helper filenames setup.py imports (``buildenv.py``,
+      ``versioneer.py``, ``_version.py``, …).
+    """
+    parts_lower = {p.lower() for p in path.parts}
+    if parts_lower & SKIP_PATH_SEGMENTS:
+        return True
+    return path.name in SKIP_BUILD_FILENAMES
+
+
 def should_skip_file(path: Path) -> bool:
-    """Skip __init__.py, __main__.py, conftest.py, and test files from stubbing."""
-    return path.name in SKIP_FILENAMES or is_test_file(path)
+    """Skip package-structure files, build tooling, and tests from stubbing."""
+    return (
+        path.name in SKIP_FILENAMES
+        or is_build_tooling_file(path)
+        or is_test_file(path)
+    )
+
+
+def collect_setup_imported_modules(repo_dir: Path) -> set[str]:
+    """Return absolute paths (as strings) of first-party modules imported by
+    the build system, which must NOT be stubbed.
+
+    Parses ``setup.py`` (and, best-effort, PEP 517 ``pyproject.toml`` build
+    backends) for ``import X`` / ``from X import ...`` statements, then resolves
+    each dotted name to a file inside *repo_dir*.  Any module setup.py imports
+    runs at install time; stubbing its body (→ ``pass``/``None``) can flip a
+    version/compat guard and make ``pip install -e .`` sys.exit before any test
+    is collected (the SmartSim ``buildenv`` failure, B13).
+
+    GENERAL, not library-specific: it follows the actual import graph of the
+    repo's own build script rather than hard-coding names.  Best-effort — any
+    parse/resolve failure is ignored (the static filename/segment rules in
+    ``is_build_tooling_file`` remain the safety net).
+    """
+    resolved: set[str] = set()
+    setup_py = repo_dir / "setup.py"
+    if not setup_py.exists():
+        return resolved
+    try:
+        tree = ast.parse(setup_py.read_text(errors="replace"))
+    except SyntaxError:
+        return resolved
+
+    dotted_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                dotted_names.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            # Only intra-repo imports matter (level>0 relative, or a name that
+            # resolves to a file in the repo). Record the module path.
+            if node.module:
+                dotted_names.add(node.module)
+
+    for dotted in dotted_names:
+        rel = dotted.replace(".", "/")
+        for candidate in (
+            repo_dir / f"{rel}.py",
+            repo_dir / rel / "__init__.py",
+        ):
+            if candidate.is_file():
+                resolved.add(str(candidate.resolve()))
+    return resolved
 
 
 def is_dunder_method(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:

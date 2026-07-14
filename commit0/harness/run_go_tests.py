@@ -261,8 +261,21 @@ def main(
         go_exit_code_file = Path(log_dir / "go_test_exit_code.txt")
         _module_logger.debug("Reading go test exit code from %s", go_exit_code_file)
         if go_exit_code_file.exists():
-            go_exit_code = int(go_exit_code_file.read_text().strip())
-            return go_exit_code
+            # N7: previously `int(read_text().strip())` propagated ValueError
+            # on an OOM-truncated / empty / non-numeric file, killing the
+            # evaluator instead of being treated as a run failure. Treat any
+            # unparseable exit code as a generic failure (1) with a warning —
+            # the surrounding evaluate_go path will classify based on the
+            # test_output.json content, so returning 1 here just says 'not 0'.
+            raw = go_exit_code_file.read_text().strip()
+            try:
+                return int(raw)
+            except ValueError:
+                _module_logger.warning(
+                    "go_test_exit_code.txt has non-numeric content %r; treating as failure",
+                    raw[:64],
+                )
+                return 1
         else:
             _module_logger.warning("go_test_exit_code.txt not found, assuming failure")
             return 1

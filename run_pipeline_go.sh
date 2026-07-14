@@ -39,6 +39,7 @@ REPO_BASE="${BASE_DIR}/repos"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
+LANGUAGE="go"  # LOW: parity with rust driver (LANGUAGE="rust") for one env-var contract.
 
 MODEL_ARG=""
 USE_CLAUDE_CODE="false"
@@ -298,12 +299,57 @@ exec > >(tee -a "$LOG_BASE/pipeline.log") 2>&1
 preflight() {
     local errors=0
 
-    for cmd in jq bc timeout; do
+    # N16: Go preflight parity with rust driver's preflight() (checks docker CLI,
+    # docker daemon, and go toolchain BEFORE we spend LLM budget on runs that
+    # would fail mid-eval). In-container skips docker (eval uses local_inplace).
+    if ! command -v docker &>/dev/null; then
+        local _docker_app_bin="/Applications/Docker.app/Contents/Resources/bin"
+        if [[ -x "$_docker_app_bin/docker" ]]; then
+            export PATH="$_docker_app_bin:$PATH"
+            echo "  Docker CLI not on PATH; auto-resolved to $_docker_app_bin/docker"
+        fi
+    fi
+    local _required_cmds=(jq bc timeout go docker)
+    if [[ "${KAIJU_IN_CONTAINER:-0}" == "1" ]]; then
+        _required_cmds=(jq bc timeout go)
+    fi
+    for cmd in "${_required_cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: Required command '$cmd' not found"
             errors=$((errors + 1))
         fi
     done
+    if [[ "${KAIJU_IN_CONTAINER:-0}" != "1" ]] && command -v docker &>/dev/null; then
+        if ! docker info &>/dev/null; then
+            echo "Error: Docker daemon not reachable. Start Docker Desktop and retry."
+            echo "       (docker info returned non-zero; socket likely missing)"
+            errors=$((errors + 1))
+        fi
+    fi
+    if command -v go &>/dev/null; then
+        local go_v
+        go_v=$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')
+        if [[ -z "$go_v" ]]; then
+            echo "Error: go found but 'go version' probe failed"
+            errors=$((errors + 1))
+        else
+            echo "  Toolchain: go $go_v"
+            if [[ -n "${GO_VERSION:-}" ]] && [[ "$GO_VERSION" != "stable" ]]; then
+                if [[ "$go_v" != "$GO_VERSION"* ]]; then
+                    echo "Warning: go version '$go_v' does not match pinned GO_VERSION='$GO_VERSION'."
+                fi
+            fi
+        fi
+    fi
+    if [[ "${KAIJU_IN_CONTAINER:-0}" != "1" ]]; then
+        # goimports / staticcheck are only needed on the HOST for lint refine
+        # (in-container the tools are baked into the image).
+        for opt_tool in goimports staticcheck; do
+            if ! command -v "$opt_tool" &>/dev/null; then
+                echo "Warning: '$opt_tool' not found on PATH — lint refine may skip; install with 'go install ...'"
+            fi
+        done
+    fi
 
     if [[ ! -x "$VENV_PYTHON" ]]; then
         echo "Error: Python venv not found at $VENV_PYTHON"
@@ -505,6 +551,7 @@ blind_tests: false
 names_only_tests: false
 inject_test_files_readonly: true
 strip_non_stubs: false
+language: go
 EOF
     log "  Wrote agent Go config: ${AGENT_CONFIG}"
 }
@@ -676,9 +723,12 @@ for item in data:
     print(item['repo'].split('/')[-1])
 " 2>/dev/null || true)
     else
-        repo_list=$("$VENV_PYTHON" -c "
+        # N9 injection close: mirror rust driver — pass REPO_SPLIT via env var,
+        # never interpolate into the Python -c body.
+        repo_list=$(_PIPELINE_REPO_SPLIT="$REPO_SPLIT" "$VENV_PYTHON" -c "
+import os
 from commit0.harness.constants_go import GO_SPLIT
-for r in sorted(GO_SPLIT.get('${REPO_SPLIT}', [])):
+for r in sorted(GO_SPLIT.get(os.environ['_PIPELINE_REPO_SPLIT'], [])):
     print(r)
 " 2>/dev/null || true)
     fi
@@ -937,7 +987,7 @@ run_agent() {
     # Base command. Resume rounds reuse this WITHOUT --override-previous-changes:
     # that flag resets the branch and would discard every module already completed.
     local cmd=(
-        "$VENV_PYTHON" agent/config_go.py run "$branch"
+        "$VENV_PYTHON" -m agent.config_go run "$branch"  # N15: module invocation for parity with rust driver's `-m agent.cli_rust`
         --backend "$BACKEND"
         --agent-config-file "$AGENT_CONFIG"
         --commit0-config-file "$COMMIT0_CONFIG"

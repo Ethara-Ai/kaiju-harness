@@ -88,14 +88,26 @@ def parse_go_test_json_with_durations(
     pkg_durations: Dict[str, float] = {}
     running: Dict[str, bool] = {}  # tests that got "run" but no terminal action yet
 
-    for line in raw_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    # N12: detect truncation. `go test -json` writes ONE JSON object per line,
+    # so a decode failure on the LAST non-empty line indicates the runner was
+    # killed mid-write (OOM / SIGKILL / timeout). Previously that line was
+    # silently `logger.debug`'d and dropped, so the denominator went stale
+    # without any signal. Track it and WARN so the caller (evaluate_go.py) can
+    # classify accordingly.
+    lines = [ln for ln in (raw.strip() for raw in raw_output.splitlines()) if ln]
+    last_index = len(lines) - 1
+    for idx, line in enumerate(lines):
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
-            logger.debug("Skipping non-JSON line: %s", line[:100])
+            if idx == last_index:
+                logger.warning(
+                    "go test -json output appears truncated at last line "
+                    "(non-JSON: %s) — runner likely killed mid-write; inventory may be incomplete",
+                    line[:120],
+                )
+            else:
+                logger.debug("Skipping non-JSON line: %s", line[:100])
             continue
 
         action = event.get("Action")

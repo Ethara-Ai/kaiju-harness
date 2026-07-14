@@ -175,8 +175,8 @@ def main(
     callers (and :mod:`commit0.harness.evaluate_js`) can distinguish a
     compile/install failure from a real test failure.
     """
-    dataset: Iterator[RepoInstance | SimpleInstance] = load_dataset_from_config(
-        dataset_name, split=dataset_split
+    dataset_list: list[RepoInstance | SimpleInstance] = list(
+        load_dataset_from_config(dataset_name, split=dataset_split)
     )
     absolute = True
 
@@ -186,18 +186,33 @@ def main(
 
     repo_or_repo_dir = repo_or_repo_dir.rstrip("/")
     base = os.path.basename(repo_or_repo_dir)
-    for entry in dataset:
+    for entry in dataset_list:
         candidate_name = entry["repo"].split("/")[-1]
-        if candidate_name == base or candidate_name == repo_or_repo_dir:
+        if (
+            candidate_name == base
+            or candidate_name == repo_or_repo_dir
+            or repo_or_repo_dir.endswith("/" + candidate_name)
+        ):
             example = entry
             repo_name = candidate_name
             spec = make_js_spec(cast(RepoInstance, entry), absolute=absolute)
             break
 
+    # A resolved repo path can follow a symlink — local_inplace links the repo dir
+    # to the repo-image checkout at /testbed, so basename('/testbed') is 'testbed',
+    # NOT the repo name, and the match above fails. Every trajectory test_cmd runs
+    # exactly ONE repo, so for a single-entry dataset fall back to that entry rather
+    # than raising (which silently zero-worked stage 3). git.Repo(repo_or_repo_dir)
+    # below still loads the real checkout, so the symlinked path is fine.
+    if spec is None and len(dataset_list) == 1:
+        example = dataset_list[0]
+        repo_name = example["repo"].split("/")[-1]
+        spec = make_js_spec(cast(RepoInstance, example), absolute=absolute)
+
     if spec is None or example is None or repo_name is None:
         raise ValueError(
             f"No matching JS spec for repo_or_repo_dir={repo_or_repo_dir!r} "
-            f"in dataset={dataset_name!r}"
+            f"in dataset={dataset_name!r} ({len(dataset_list)} entries)"
         )
 
     hashed_test_ids = get_hash_string(test_ids)

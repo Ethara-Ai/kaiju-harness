@@ -9,6 +9,7 @@ import sys
 from typing import Iterator
 
 import docker
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 
 from commit0.harness.constants_go import GoRepoInstance, GO_SPLIT, GO_VERSION
 from commit0.harness.split_utils import resolve_split
@@ -71,39 +72,45 @@ def main(
 
     logger.info("Building %d Go repo image(s)", len(specs))
 
-    client = docker.from_env()
+    client = docker_client()
     successful, failed = build_repo_images(
         client, specs, "commit0", num_workers, verbose
     )
 
-    health_failures: list[str] = []
+    # H8: health-check severity model.
+    # - `go_tools`: goimports + staticcheck are REQUIRED by the eval script
+    #   (spec_go.py runs `goimports -w` before test invocation). A missing tool
+    #   silently corrupts every eval on that image → BLOCKING.
+    # - `go_version`: minor-version drift is a soft warning (base image patch
+    #   bumps are expected) → NON-BLOCKING but logged.
+    _BLOCKING_CHECKS = frozenset({"go_tools"})
+    blocking_health_failures: list[tuple[str, str, str]] = []
+    warning_health_failures: list[tuple[str, str, str]] = []
     for spec in specs:
         image_key = spec.repo_image_key
         if image_key in failed:
             continue
-        # Assert the toolchain version too (non-blocking). Use the MINOR version
-        # (e.g. "1.25") rather than the full "1.25.0" so a patch bump in the
-        # golang:1.25-bookworm base image (which pins only the minor version)
-        # does not produce a spurious drift warning; check_go_version does a
-        # substring match, so "go1.25" matches "go1.25.x".
         go_minor = ".".join(GO_VERSION.split(".")[:2])
         results = run_go_health_checks(client, image_key, go_version=go_minor)
         for passed, check_name, detail in results:
-            if not passed:
-                logger.warning(
-                    "Health check FAILED [%s] for %s: %s (non-blocking)",
-                    check_name,
-                    image_key,
-                    detail,
-                )
-                health_failures.append(image_key)
-            else:
+            if passed:
                 logger.info(
                     "Health check passed [%s] for %s: %s",
-                    check_name,
-                    image_key,
-                    detail,
+                    check_name, image_key, detail,
                 )
+                continue
+            if check_name in _BLOCKING_CHECKS:
+                logger.error(
+                    "Health check FAILED [%s] for %s: %s (BLOCKING — image unusable)",
+                    check_name, image_key, detail,
+                )
+                blocking_health_failures.append((image_key, check_name, detail))
+            else:
+                logger.warning(
+                    "Health check WARNING [%s] for %s: %s (non-blocking)",
+                    check_name, image_key, detail,
+                )
+                warning_health_failures.append((image_key, check_name, detail))
 
     if failed:
         logger.error(
@@ -112,11 +119,18 @@ def main(
             list(failed),
         )
         sys.exit(1)
-    if health_failures:
+    if blocking_health_failures:
+        logger.error(
+            "%d image(s) failed BLOCKING health checks (goimports/staticcheck missing — eval would silently misfire): %s",
+            len(blocking_health_failures),
+            [(img, name) for img, name, _ in blocking_health_failures],
+        )
+        sys.exit(1)
+    if warning_health_failures:
         logger.warning(
-            "%d image(s) built but had health check warnings: %s",
-            len(health_failures),
-            health_failures,
+            "%d image(s) built with non-blocking health warnings: %s",
+            len(warning_health_failures),
+            [(img, name) for img, name, _ in warning_health_failures],
         )
 
 

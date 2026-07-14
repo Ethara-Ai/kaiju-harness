@@ -25,19 +25,31 @@ class TransientLLMError(Exception):
 
 # Substrings that identify a retryable transient LLM/network failure in aider's
 # swallowed output. Kept in sync with the recovery layer's signal list.
+# Substring signals identifying a retryable transient LLM/network failure in
+# aider's swallowed output. Kept in sync with the recovery layer's signal list.
+# NOTE: HTTP status-code checks are done via a WORD-BOUNDED regex separately,
+# not as raw substrings, so 'C2504 bug' in a source comment does NOT match '504'.
 _LLM_TRANSIENT_SIGNALS = (
     "midstreamfallbackerror", "apiconnectionerror", "apitimeouterror",
     "timed out", "read timeout", "connection aborted", "connection reset",
     "server disconnected", "remoteprotocolerror", "incomplete chunked read",
     "internalservererror", "internal server error",
     "service unavailable", "bad gateway",
-    "502 ", "503 ", "504 ", "529 ", "overloaded",
+    # "overloaded" alone was too permissive (matched C++ 'operator overloaded' in
+    # source files). Only fire on JSON-shaped error payloads.
+    '"overloaded_error"', "error type: overloaded", "anthropic api overloaded",
     # Bridge/daemon briefly down or restarting (monitor respawns it): the raw
     # socket error can surface WITHOUT the litellm exception name, so match the
     # connection-refused forms directly. Provider-agnostic (both bridges).
     "connection refused", "errno 111", "econnrefused", "connectionrefusederror",
     "remote end closed connection", "max retries exceeded",
 )
+
+# Word-bounded HTTP status codes for transient errors. Compiled once.
+# `re.IGNORECASE` isn't needed since we lowercase before matching, but the
+# word boundaries ARE critical: without them, `C2504 bug` (a code comment in
+# fmt/base.h) matches `504 ` as a plain substring and triggers a false positive.
+_HTTP_TRANSIENT_CODE_RE = re.compile(r"(?:\b(?:http|status|code|error)[\s:/-]*|/1\.[01]\s+|/2(?:\.0)?\s+)(502|503|504|520|521|522|523|524|525|526|527|528|529)\b", re.IGNORECASE)
 
 
 def apply_llm_resilience(model: "Model") -> None:
@@ -77,6 +89,13 @@ def raise_if_transient_llm_error(text: str, context: str = "") -> None:
                 f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
                 f"matched {sig!r} — re-running module (timed out)."
             )
+    http_match = _HTTP_TRANSIENT_CODE_RE.search(low)
+    if http_match:
+        code = http_match.group(1)
+        raise TransientLLMError(
+            f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
+            f"matched HTTP status {code} — re-running module (timed out)."
+        )
 
 
 def _patch_litellm_output_config_passthrough() -> None:

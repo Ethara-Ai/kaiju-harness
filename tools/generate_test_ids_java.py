@@ -526,10 +526,13 @@ def main() -> None:
 
     args = parser.parse_args()
     output_dir = Path(args.output_dir)
+    # Repos handled by *this* run — scopes --install to this run's test IDs only.
+    install_repo_names: list[str] = []
 
     if args.repo_dir:
         if not args.name:
             parser.error("--name is required with --repo-dir")
+        install_repo_names = [args.name]
         repo_dir = Path(args.repo_dir)
         logger.info("Collecting Java test IDs from %s...", repo_dir)
 
@@ -562,6 +565,7 @@ def main() -> None:
             validate_base=args.validate_base,
             build_system_override=args.build_system,
         )
+        install_repo_names = list(results.keys())
 
         total = sum(abs(v) for v in results.values())
         repos_with_tests = sum(1 for v in results.values() if v > 0)
@@ -578,7 +582,7 @@ def main() -> None:
         return
 
     if args.install:
-        installed = install_test_ids(output_dir)
+        installed = install_test_ids(output_dir, repo_names=install_repo_names or None)
         logger.info("Installed %d test ID files into commit0 data directory", installed)
 
 

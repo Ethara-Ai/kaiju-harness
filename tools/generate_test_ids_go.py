@@ -48,7 +48,7 @@ def _find_docker_image(repo_name: str) -> str | None:
                 if tag.startswith(needle):
                     return tag
         return None
-    except Exception:
+    except (docker.errors.DockerException, OSError):
         logger.debug("Failed to find Docker image for %s", repo_name, exc_info=True)
         return None
 
@@ -88,48 +88,51 @@ def _parse_go_test_list_json(stdout: str) -> list[str]:
 
     return test_ids
 
-
 def _parse_go_test_list_plain(stdout: str, module_path: str = "") -> list[str]:
-    """Fallback parser for plain `go test -list .` output (non-JSON).
+    """Fallback parser for plain ``go test -list . ./...`` output (non-JSON).
 
-    WARNING: This parser has a known sequencing issue — test names appear
-    BEFORE their package summary line, so tests may be assigned to the
-    wrong package when multiple packages are listed. Use _parse_go_test_list_json
-    whenever possible.
+    Go writes test names FIRST, then a summary line naming the package
+    (``ok example.com/pkg 0.123s``, ``FAIL ...``, or ``? example.com/pkg
+    [no test files]``). The naive line-by-line reader assigned pending
+    names to the *previous* package summary; this implementation buffers
+    pending names and flushes them to the correct package once its summary
+    line appears. Names that never see a summary (rare — implies truncated
+    output or a bare ``go test -list .`` on a single package with no
+    trailing status) fall back to ``module_path`` if provided.
 
-    Returns test IDs in format: package/TestName
+    Returns test IDs in format: package/TestName.
     """
     test_ids: list[str] = []
-    current_package = ""
+    pending: list[str] = []
 
     for line in stdout.strip().split("\n"):
         line = line.strip()
         if not line:
             continue
 
-        if line.startswith("ok") or line.startswith("?") or line.startswith("---"):
-            pkg_match = re.match(r"(?:ok|[?])\s+(\S+)", line)
-            if pkg_match:
-                current_package = pkg_match.group(1)
+        pkg_match = re.match(r"^(?:ok|FAIL|\?)\s+(\S+)", line)
+        if pkg_match:
+            package = pkg_match.group(1)
+            for name in pending:
+                test_ids.append(f"{package}/{name}")
+            pending = []
             continue
 
-        if line.startswith("FAIL") or line.startswith("#"):
+        if line.startswith("---") or line.startswith("# ") or line.startswith("FAIL\t"):
             continue
 
         if re.match(r"^(Test|Example|Fuzz)\w+", line):
-            test_name = line.split()[0]
-            if current_package:
-                test_ids.append(f"{current_package}/{test_name}")
-            elif module_path:
-                test_ids.append(f"{module_path}/{test_name}")
-            else:
-                test_ids.append(test_name)
+            pending.append(line.split()[0])
+
+    if pending and module_path:
+        for name in pending:
+            test_ids.append(f"{module_path}/{name}")
 
     return test_ids
 
 
 def _get_module_path(repo_dir: Path) -> str:
-    """Read module path from go.mod."""
+    """Read the module path declared in ``go.mod`` (e.g. ``github.com/foo/bar``)."""
     go_mod = repo_dir / "go.mod"
     if not go_mod.exists():
         return ""
@@ -154,9 +157,9 @@ def _ensure_go_modules(repo_dir: Path, timeout: int = 300) -> None:
     denominator to the observed test count.
 
     A vendored repo (``vendor/`` present) needs no download — `go test` reads
-    the checked-in vendor tree — so we skip it there. Any failure is swallowed:
-    listing itself will surface the real problem, and an already-warm cache makes
-    this a no-op.
+    the checked-in vendor tree — so we skip it there. A non-zero exit is
+    raised as a ``RuntimeError`` so callers see the real cause instead of a
+    downstream empty-inventory silent failure.
     """
     if (repo_dir / "vendor" / "modules.txt").exists():
         logger.debug("  Vendored module detected; skipping go mod download")
@@ -164,15 +167,28 @@ def _ensure_go_modules(repo_dir: Path, timeout: int = 300) -> None:
     if not (repo_dir / "go.mod").exists():
         return
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["go", "mod", "download"],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             timeout=timeout,
         )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.debug("  go mod download did not complete (%s); continuing", e)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"go mod download timed out after {timeout}s in {repo_dir}: {e}"
+        ) from e
+    except OSError as e:
+        raise RuntimeError(
+            f"go mod download could not be executed in {repo_dir} "
+            f"(is the 'go' binary installed?): {e}"
+        ) from e
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"go mod download failed in {repo_dir} (rc={result.returncode}):\n"
+            f"--- stdout ---\n{result.stdout}\n"
+            f"--- stderr ---\n{result.stderr}"
+        )
 
 
 def collect_test_ids_local(
@@ -213,9 +229,11 @@ def collect_test_ids_local(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
+            logger.warning("  go test -list (plain fallback) timed out after %ds", timeout)
             return []
         combined_plain = result_plain.stdout + "\n" + result_plain.stderr
         test_ids = _parse_go_test_list_plain(combined_plain, module_path)
+
 
     # A package that fails to COMPILE during listing is dropped from the
     # inventory silently — `go test -list ./...` still lists the packages that
@@ -294,8 +312,10 @@ def collect_test_ids_docker(
                 else raw_plain
             )
         except (docker.errors.ContainerError, requests.exceptions.ReadTimeout):
+            logger.warning("  Docker plain-text fallback failed")
             return []
         test_ids = _parse_go_test_list_plain(stdout_plain)
+
 
     return test_ids
 
@@ -508,7 +528,9 @@ def main() -> None:
         )
 
         if args.install:
-            installed = install_test_ids(args.output_dir)
+            installed = install_test_ids(
+                args.output_dir, repo_names=list(results.keys()) or None
+            )
             logger.info("Installed %d files into commit0 data directory", installed)
     else:
         parser.error("Provide either input_file or --repo-dir")

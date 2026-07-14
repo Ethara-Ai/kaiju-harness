@@ -147,6 +147,7 @@ class TestD3PreflightImageCheck:
 
         with (
             patch("commit0.harness.evaluate.docker") as mock_docker_mod,
+            patch("commit0.harness.evaluate.docker_client", return_value=mock_client),
             patch(
                 "commit0.harness.evaluate.load_dataset_from_config",
                 return_value=[{"repo": "org/test"}],
@@ -156,7 +157,6 @@ class TestD3PreflightImageCheck:
                 return_value=[mock_spec],
             ),
         ):
-            mock_docker_mod.from_env.return_value = mock_client
             mock_docker_mod.errors = __import__(
                 "docker.errors",
                 fromlist=["ImageNotFound", "APIError", "DockerException"],
@@ -181,6 +181,7 @@ class TestD3PreflightImageCheck:
 
         with (
             patch("commit0.harness.evaluate.docker") as mock_docker_mod,
+            patch("commit0.harness.evaluate.docker_client", return_value=mock_client),
             patch(
                 "commit0.harness.evaluate.load_dataset_from_config",
                 return_value=[{"repo": "org/test"}],
@@ -190,7 +191,6 @@ class TestD3PreflightImageCheck:
                 return_value=[mock_spec],
             ),
         ):
-            mock_docker_mod.from_env.return_value = mock_client
             mock_docker_mod.errors = __import__(
                 "docker.errors",
                 fromlist=["ImageNotFound", "APIError", "DockerException"],
@@ -204,8 +204,13 @@ class TestD3PreflightImageCheck:
         """When Docker daemon is not running, returns sentinel."""
         from commit0.harness.evaluate import _preflight_check_images
 
-        with patch("commit0.harness.evaluate.docker") as mock_docker_mod:
-            mock_docker_mod.from_env.side_effect = Exception("Cannot connect")
+        with (
+            patch("commit0.harness.evaluate.docker") as mock_docker_mod,
+            patch(
+                "commit0.harness.evaluate.docker_client",
+                side_effect=Exception("Cannot connect"),
+            ),
+        ):
             mock_docker_mod.errors.DockerException = Exception
 
             result = _preflight_check_images("dataset", "split", "local")

@@ -117,7 +117,7 @@ if MODE == "snapshot":
         except Exception: continue
         man.append(f + "\t" + ("1" if balanced(src) else "0") + "\t" + key)
     try: (SNAP / "manifest.tsv").write_text("\n".join(man), encoding="utf-8")
-    except Exception: pass
+    except OSError as e: sys.stderr.write("HARNESS_GUARD_SNAPSHOT_WRITE_FAILED " + str(e) + "\n")
 
 elif MODE == "heal":
     mf = SNAP / "manifest.tsv"
@@ -136,7 +136,7 @@ elif MODE == "heal":
                     p.write_text(body, encoding="utf-8", errors="surrogateescape")
                     sys.stderr.write("HARNESS_HEALED " + f + "\n")
                     print("HARNESS_HEALED " + f)
-                except Exception: pass
+                except OSError as e: sys.stderr.write("HARNESS_GUARD_HEAL_FAILED " + f + " " + str(e) + "\n")
     shutil.rmtree(SNAP, ignore_errors=True)
 '''
 

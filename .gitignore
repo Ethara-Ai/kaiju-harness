@@ -229,3 +229,15 @@ harbor-tasks/
 
 # consolidated scratch/dump (session cleanup)
 _scratch_dump/
+tools/jsstubber/.install.lock
+
+# local scratch / artifacts — never commit
+.claude/
+CLAUDE.md
+BUG_REPORT_PREPARE_SCRIPTS.md
+findings.json
+test_ids/
+commit0/data/rust_test_ids/
+docs/CLAUDE_CODE_BRIDGE.md
+docs/MULTI_ACCOUNT_SETUP.md
+docs/VERTEX_AI_CACHING.md

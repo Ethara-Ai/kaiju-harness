@@ -10,6 +10,7 @@ import sys
 from typing import Iterator
 
 import docker
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 
 from commit0.harness.constants_c import CRepoInstance, C_SPLIT
 from commit0.harness.split_utils import resolve_split
@@ -72,7 +73,7 @@ def main(
 
     logger.info("Building %d C repo image(s)", len(specs))
 
-    client = docker.from_env()
+    client = docker_client()
     successful, failed = build_repo_images(
         client, specs, "commit0", num_workers, verbose
     )

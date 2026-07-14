@@ -9,6 +9,10 @@ import pytest
 
 MODULE = "commit0.harness.docker_build_rust"
 
+from commit0.harness.constants_rust import RUST_BASE_IMAGE_TAG
+
+_BASE_OCI_KEY = RUST_BASE_IMAGE_TAG.replace(":", "__")
+
 
 def _make_rust_spec(
     repo_image_key="repo1",
@@ -31,7 +35,7 @@ def _make_rust_spec(
 class TestBuildBaseImagesRust:
     """Tests for build_base_images_rust()."""
 
-    BASE_IMG = "commit0.base.rust:latest"
+    BASE_IMG = RUST_BASE_IMAGE_TAG
 
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}._multiarch_builder_args")
@@ -61,8 +65,8 @@ class TestBuildBaseImagesRust:
         client.images.get.return_value = MagicMock()
         oci_dir = (
             tmp_path
-            / "commit0.base.rust__latest"
-            / "commit0.base.rust__latest.tar"
+            / _BASE_OCI_KEY
+            / f"{_BASE_OCI_KEY}.tar"
         )
         oci_dir.parent.mkdir(parents=True)
         oci_dir.touch()
@@ -84,8 +88,8 @@ class TestBuildBaseImagesRust:
         client.images.get.return_value = MagicMock()
         oci_dir = (
             tmp_path
-            / "commit0.base.rust__latest"
-            / "commit0.base.rust__latest.tar"
+            / _BASE_OCI_KEY
+            / f"{_BASE_OCI_KEY}.tar"
         )
         oci_dir.parent.mkdir(parents=True)
         oci_dir.touch()
@@ -232,7 +236,7 @@ class TestBuildBaseImagesRust:
         from commit0.harness.docker_build import BuildImageError
 
         mock_bi.side_effect = BuildImageError(
-            "commit0.base.rust:latest", "build failed", MagicMock()
+            RUST_BASE_IMAGE_TAG, "build failed", MagicMock()
         )
         from commit0.harness.docker_build_rust import build_base_images_rust
 
@@ -246,7 +250,7 @@ class TestBuildBaseImagesRust:
     @patch(f"{MODULE}.OCI_IMAGE_DIR", Path("/oci"))
     def test_oci_key_derivation(self, mock_gdf, mock_mba, mock_bi, tmp_path):
         client = MagicMock()
-        oci_key = "commit0.base.rust__latest"
+        oci_key = _BASE_OCI_KEY
         tar_path = tmp_path / oci_key / f"{oci_key}.tar"
         tar_path.parent.mkdir(parents=True)
         tar_path.touch()

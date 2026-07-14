@@ -34,7 +34,9 @@ EXCLUDED_DIRS = {
     ".git",
     "vendor",
     "testdata",
-    "internal/testdata",
+    # N32 cleanup: 'internal/testdata' was DEAD — os.walk dirs contain single-
+    # segment names, never paths with slashes, so this entry could never match.
+    # 'testdata' above already excludes it via exact-segment match.
     "node_modules",
     ".github",
     ".vscode",

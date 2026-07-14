@@ -385,6 +385,37 @@ class TestExitCodeContract:
                 )
             assert excinfo.value.code == 2
 
+    def test_symlinked_testbed_path_falls_back_to_single_entry(self, mock_runtime):
+        # local_inplace resolves the repo dir through a symlink to /testbed, whose
+        # basename ('testbed') doesn't match the dataset repo ('foo'). Stage 3's
+        # test_cmd must STILL resolve (single-entry fallback) instead of raising
+        # "No matching JS spec" and silently zero-working stage 3.
+        log_root = mock_runtime
+        with patch(
+            "commit0.harness.run_js_tests._read_exit_code",
+            side_effect=lambda p: {
+                "test_exit_code.txt": 0,
+                "install_exit_code.txt": 0,
+                "syntax_exit_code.txt": 0,
+            }.get(p.name),
+        ):
+            with pytest.raises(SystemExit) as excinfo:
+                run_main(
+                    dataset_name="x",
+                    dataset_split="test",
+                    base_dir=str(log_root),
+                    repo_or_repo_dir="/testbed",  # symlink-resolved, != 'foo'
+                    branch="reference",
+                    test_ids="",
+                    backend="local",
+                    timeout=60,
+                    num_cpus=1,
+                    rebuild_image=False,
+                    verbose=0,
+                )
+            # Reached the exit-code contract (rc=0) rather than raising ValueError.
+            assert excinfo.value.code == 0
+
     def test_syntax_failure_exits_2(self, mock_runtime):
         log_root = mock_runtime
         with patch(

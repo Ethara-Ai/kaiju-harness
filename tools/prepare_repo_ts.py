@@ -800,7 +800,10 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
         DEFAULT_NODE_VERSION,
         SUPPORTED_NODE_VERSIONS,
     )
-    from tools.node_version import detect as _detect_node
+    from tools.node_version import (
+        detect as _detect_node,
+        resolve_engines_floor as _resolve_engines_floor,
+    )
     from tools._versioning import NoSignalsError, VersionConflictError
 
     try:
@@ -814,8 +817,15 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
         version_conflicts = det.conflicts
     except VersionConflictError as exc:
         logger.error("Node version conflict: %s", exc)
-        node_version_value = DEFAULT_NODE_VERSION
-        version_source = "conflict-fallback"
+        # Prefer the declared engines.node floor over the hardcoded default so a
+        # node>=22 repo does not get mis-targeted to node20 (breaks the build).
+        floor = _resolve_engines_floor(repo_dir, SUPPORTED_NODE_VERSIONS)
+        if floor is not None:
+            node_version_value = floor
+            version_source = "conflict-fallback:engines-floor"
+        else:
+            node_version_value = DEFAULT_NODE_VERSION
+            version_source = "conflict-fallback"
         version_conflicts = [
             f"{src}: {reason}" for src, reason in exc.rejecting_sources.items()
         ]
@@ -1544,6 +1554,28 @@ def main() -> None:
         print(json.dumps(entries[0], indent=2))
     else:
         print(json.dumps(entries, indent=2))
+
+    # Generate the commit0-ts build config (parity with prepare_repo_go/rust) so
+    # `commit0 ts build --commit0-config-file .commit0_ts.yaml` works without the
+    # operator hand-writing dataset_name/split/repo_split/base_dir.
+    if entries:
+        try:
+            _ds_name = (
+                f"./{Path(args.output).name}" if args.output else "ts_custom_dataset.json"
+            )
+            _cfg = _PROJECT_ROOT / ".commit0_ts.yaml"
+            _first = entries[0]
+            _cfg.write_text(
+                f"# commit0 TS config for {_first.get('original_repo', '?')}\n"
+                f"dataset_name: {_ds_name}\n"
+                "dataset_split: test\n"
+                "repo_split: all\n"
+                "base_dir: repos_ts\n"
+                f"# fork: {_first.get('repo', '?')}\n"
+            )
+            logger.info("Generated config: %s", _cfg)
+        except Exception as _cfg_err:  # noqa: BLE001 - best-effort
+            logger.warning("commit0-ts config generation failed: %s", _cfg_err)
 
     if entries:
         logger.info(

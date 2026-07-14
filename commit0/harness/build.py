@@ -2,6 +2,7 @@ import logging
 import sys
 
 import docker
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 from typing import Iterator, Union
 
 from commit0.harness.constants import RepoInstance, SimpleInstance, SPLIT
@@ -53,7 +54,7 @@ def main(
         spec = make_spec(example, dataset_type, absolute=True)
         specs.append(spec)
 
-    client = docker.from_env()
+    client = docker_client()
     successful, failed = build_repo_images(
         client, specs, dataset_type, num_workers, verbose
     )

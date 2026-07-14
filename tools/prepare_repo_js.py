@@ -40,7 +40,10 @@ from commit0.harness.constants_js import (
     SUPPORTED_PACKAGE_MANAGERS,
 )
 from tools._git_auth import fork_repo, setup_git_credentials
-from tools.node_version import detect as _detect_node_version
+from tools.node_version import (
+    detect as _detect_node_version,
+    resolve_engines_floor as _resolve_engines_floor,
+)
 from tools.prepare_repo import (
     full_clone,
     get_default_branch,
@@ -398,6 +401,34 @@ def detect_js_src_dir(repo_dir: Path) -> str:
     return ""
 
 
+def _looks_like_typescript_repo(repo_dir: Path) -> bool:
+    """True if this is a TypeScript project routed to the JS tool by mistake.
+
+    Detects either an explicit ``tsconfig.json`` or a source tree that has
+    ``.ts``/``.tsx`` files but no plain ``.js`` sources. Used to turn the opaque
+    "Cannot detect JavaScript source dir" abort into an actionable message
+    pointing the operator at ``prepare_repo_ts.py``.
+    """
+    if (repo_dir / "tsconfig.json").is_file():
+        return True
+    has_ts = False
+    has_js = False
+    for dirpath, dirnames, filenames in os.walk(repo_dir):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in _TEST_SCAN_SKIP_DIRS and not d.startswith(".")
+        ]
+        for f in filenames:
+            if f.endswith((".ts", ".tsx")) and not f.endswith(".d.ts"):
+                has_ts = True
+            elif f.endswith((".js", ".mjs", ".cjs", ".jsx")):
+                has_js = True
+        if has_js:
+            return False
+    return has_ts and not has_js
+
+
 def _walk_repo_filtered(repo_dir: Path):
     for dirpath, dirnames, filenames in os.walk(repo_dir):
         dirnames[:] = [
@@ -441,6 +472,16 @@ def _detect_node_version_for_repo(repo_dir: Path) -> tuple[int, str, list[str]]:
             det.source,
             list(det.conflicts),
         )
+    except VersionConflictError as exc:
+        # Prefer the declared engines.node floor over the hardcoded default so a
+        # node>=22 repo isn't mis-targeted to node20 (which breaks the build).
+        floor = _resolve_engines_floor(repo_dir, SUPPORTED_NODE_VERSIONS)
+        conflicts = [
+            f"{src}: {reason}" for src, reason in exc.rejecting_sources.items()
+        ]
+        if floor is not None:
+            return int(floor), "conflict-fallback:engines-floor", conflicts
+        return DEFAULT_NODE_VERSION, "conflict-fallback", conflicts
     except NoSignalsError:
         return DEFAULT_NODE_VERSION, "default", []
 
@@ -1127,7 +1168,17 @@ def prepare_js_repo(
 
     src_dir = src_dir_override or detect_js_src_dir(repo_dir)
     if not src_dir:
-        logger.error("  Cannot detect JavaScript source dir for %s", full_name)
+        if _looks_like_typescript_repo(repo_dir):
+            logger.error(
+                "  %s is a TypeScript repo (tsconfig.json / only .ts/.tsx "
+                "sources, no .js) — the JavaScript preparer cannot stub it. "
+                "Re-run with the TypeScript tool: "
+                "python -m tools.prepare_repo_ts %s",
+                full_name,
+                full_name,
+            )
+        else:
+            logger.error("  Cannot detect JavaScript source dir for %s", full_name)
         return None
     logger.info("  Source directory: %s", src_dir)
     _assert_monorepo_safety(repo_dir, src_dir, src_dir_override)

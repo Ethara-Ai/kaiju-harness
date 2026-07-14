@@ -14,6 +14,7 @@ __all__ = [
     "RustRepoInstance",
     "RUST_VERSION",
     "RUST_STUB_MARKER",
+    "RUST_BASE_IMAGE_TAG",
     "RUST_SPLIT",
     "RUST_BASE_BRANCH",
     "RUST_GITIGNORE_ENTRIES",
@@ -32,6 +33,14 @@ __all__ = [
 # for the official `rust` image (e.g. "1.96" or "1.96.0"). Override via the
 # RUST_VERSION env var for a bisect / MSRV check.
 RUST_VERSION = os.environ.get("RUST_VERSION", "1.96")
+
+# Immutable base image tag. Includes RUST_VERSION so a version bump forces a
+# fresh base rebuild instead of reusing a stale `:latest` cache (M7 fix). Docker
+# tags must not contain `:` inside the version component, but `1.96` and `1.96.0`
+# are both valid so any RUST_VERSION value the constant supports is safe. Single
+# source of truth for both the BUILD side (docker_build_rust.py) and the LOOKUP
+# side (spec_rust.Commit0RustSpec.base_image_key).
+RUST_BASE_IMAGE_TAG = f"commit0.base.rust:{RUST_VERSION}"
 
 # Marker used to identify stub functions in Rust source
 RUST_STUB_MARKER = 'panic!("STUB: not implemented")'

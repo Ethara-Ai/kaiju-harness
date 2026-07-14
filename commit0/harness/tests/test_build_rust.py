@@ -178,7 +178,7 @@ from commit0.harness.build_rust import main
 
 class TestMain:
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_success(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -188,7 +188,7 @@ class TestMain:
         mock_build.assert_called_once()
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_failed_builds_exit(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -197,7 +197,7 @@ class TestMain:
             main("/path/to/data.json")
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_passes_num_workers(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -207,7 +207,7 @@ class TestMain:
         assert call_kwargs["max_workers"] == 8
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_passes_verbose(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -217,7 +217,7 @@ class TestMain:
         assert call_kwargs["verbose"] == 2
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_default_workers(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -227,7 +227,7 @@ class TestMain:
         assert call_kwargs["max_workers"] == 4
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_empty_dataset(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = []
@@ -235,7 +235,7 @@ class TestMain:
         main("/path/to/data.json")
         mock_build.assert_called_once()
 
-    @patch(f"{MODULE}.docker.from_env", side_effect=Exception("Docker not running"))
+    @patch(f"{MODULE}.docker_client", side_effect=Exception("Docker not running"))
     @patch(f"{MODULE}._load_datasets")
     def test_docker_not_available(self, mock_load, mock_docker):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -243,7 +243,7 @@ class TestMain:
             main("/path/to/data.json")
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_partial_failure(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}, {"repo": "org/b"}]
@@ -308,7 +308,7 @@ class TestLoadDatasetsEdgeCasesExtra:
 # ===== main() edge-cases =====
 class TestMainEdge:
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_num_workers_passed(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -321,7 +321,7 @@ class TestMainEdge:
         assert kwargs["verbose"] == 2
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_default_workers_is_four(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -333,7 +333,7 @@ class TestMainEdge:
         assert kwargs["max_workers"] == 4
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_all_success_no_exit(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -343,7 +343,7 @@ class TestMainEdge:
         main("/path")
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_client_from_env_called(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -354,7 +354,7 @@ class TestMainEdge:
         mock_docker.assert_called_once()
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_client_passed_to_build(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -367,7 +367,7 @@ class TestMainEdge:
         assert mock_build.call_args[0][0] is fake_client
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_dataset_passed_to_build(self, mock_load, mock_docker, mock_build):
         instances = [{"repo": "org/a"}, {"repo": "org/b"}]
@@ -379,7 +379,7 @@ class TestMainEdge:
         assert mock_build.call_args[0][1] is instances
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_logs_instance_count(self, mock_load, mock_docker, mock_build, caplog):
         import logging
@@ -393,7 +393,7 @@ class TestMainEdge:
         assert any("2" in r.message and "instance" in r.message for r in caplog.records)
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_logs_success_count(self, mock_load, mock_docker, mock_build, caplog):
         import logging
@@ -409,7 +409,7 @@ class TestMainEdge:
         )
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_failure_logs_error(self, mock_load, mock_docker, mock_build, caplog):
         import logging
@@ -426,7 +426,7 @@ class TestMainEdge:
         )
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_exit_code_one_on_failure(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = [{"repo": "org/a"}]
@@ -438,7 +438,7 @@ class TestMainEdge:
         assert exc.value.code == 1
 
     @patch(f"{MODULE}.build_rust_repo_images")
-    @patch(f"{MODULE}.docker.from_env")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}._load_datasets")
     def test_path_object_created(self, mock_load, mock_docker, mock_build):
         mock_load.return_value = []

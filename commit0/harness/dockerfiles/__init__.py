@@ -162,20 +162,39 @@ def get_dockerfile_repo(
         )
         lines.append("")
 
+    # Python installs go through uv (fast, reliable resolver) with a pip fallback so
+    # a uv hiccup — or a non-pip installer — still works. `--system` targets the
+    # image's system python (uv otherwise defaults to a venv). Requested: use uv for
+    # python installation.
     if packages:
-        lines.append(f"RUN pip install --no-cache-dir -r {packages}")
+        lines.append(
+            f"RUN uv pip install --system -r {packages} "
+            f"|| pip install --no-cache-dir -r {packages}"
+        )
         lines.append("")
 
     if pip_packages:
         escaped = " ".join(f'"{p}"' for p in pip_packages)
-        lines.append(f"RUN pip install --no-cache-dir {escaped}")
+        lines.append(
+            f"RUN uv pip install --system {escaped} "
+            f"|| pip install --no-cache-dir {escaped}"
+        )
         lines.append("")
 
     if install_cmd:
-        pip_cmd = install_cmd.replace("uv pip install", "pip install --no-cache-dir")
-        if pip_cmd.startswith("pip install"):
-            pip_cmd = "pip install --no-cache-dir" + pip_cmd[len("pip install") :]
-        lines.append(f"RUN {pip_cmd}")
+        # Normalize to a bare `pip install …`, then prefer uv (pip fallback). A
+        # non-pip installer (e.g. `python setup.py develop`) is left untouched.
+        norm = install_cmd.replace("python -m pip install", "pip install").replace(
+            "uv pip install", "pip install"
+        )
+        if norm.startswith("pip install"):
+            args_str = norm[len("pip install"):]
+            lines.append(
+                f"RUN uv pip install --system{args_str} "
+                f"|| pip install --no-cache-dir{args_str}"
+            )
+        else:
+            lines.append(f"RUN {norm}")
         lines.append("")
 
     # Verify key dependencies are importable after install

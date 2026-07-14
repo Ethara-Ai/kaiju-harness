@@ -13,8 +13,17 @@ from typing import Iterator, Union
 
 from tqdm import tqdm
 
-from commit0.harness.constants import RepoInstance
+from commit0.harness.constants import RepoInstance, TIMEOUT_EXIT_CODES, TIMEOUT_EXIT_SIGKILL, TIMEOUT_EXIT_SIGTERM
 from commit0.harness.constants_rust import (
+
+# N29 note: proc-macros can expand differently between the reference commit
+# (used at inventory capture) and eval-time (with the model's edits). Reasons
+# include compiler version drift, feature flags, or env-dependent macro logic
+# (e.g. build-time file reads). We have NO automated divergence detector for
+# this today; if a repo's inventory silently drifts you'll see the observed
+# test count diverge from the canonical count in _aggregate_rust_results. If
+# it becomes a recurring source of false CHEAT_DETECTED / COMPILE_FAILED
+# classifications, add a `cargo expand`-based fingerprint here.
     RUST_SPLIT,
     RUN_RUST_TESTS_LOG_DIR,
 )
@@ -84,7 +93,7 @@ _FETCH_FAIL_SENTINEL = "INFRA_FETCH_FAILED"
 # it doesn't name). `.+` missed those, leaving a doctest in the denominator that
 # the doctest-blind numerator can never match — silently capping a perfect
 # solution below 1.0. The `.rs ` prefix still guards against unit-test names.
-_DOCTEST_INVENTORY_RE = re.compile(r"^\S+\.rs\s+-\s+.*\(line\s+\d+\)")
+_DOCTEST_ID_RE = re.compile(r"\S+\.rs\s+-\s+.*\(line\s+\d+\)")
 
 # CRITICAL: the numerator is NOT doctest-blind. `cargo test` runs doctests and
 # prints their result lines as `test path/to/file.rs - item (line N) ... ok`,
@@ -100,7 +109,7 @@ _DOCTEST_INVENTORY_RE = re.compile(r"^\S+\.rs\s+-\s+.*\(line\s+\d+\)")
 # parsed `name` is the doctest line minus the ` ... ok` suffix, i.e. the same
 # `<path>.rs - item (line N)` shape as the inventory entry (anchored, `.rs `
 # prefix guards real unit tests whose names never carry a `.rs ` path).
-_DOCTEST_RESULT_NAME_RE = re.compile(r"^\S+\.rs\s+-\s+.*\(line\s+\d+\)$")
+# The doctest ID regex is now consolidated as _DOCTEST_ID_RE above (line 87).
 
 
 def _strip_doctests(report: dict) -> int:
@@ -111,7 +120,7 @@ def _strip_doctests(report: dict) -> int:
     `passed`/`failed`/`total` no longer include doctests.
     """
     tests = report.get("tests", [])
-    kept = [t for t in tests if not _DOCTEST_RESULT_NAME_RE.match(t.get("name", ""))]
+    kept = [t for t in tests if not _DOCTEST_ID_RE.fullmatch(t.get("name", ""))]
     dropped = len(tests) - len(kept)
     if not dropped:
         return 0
@@ -228,7 +237,7 @@ def _load_rust_test_ids(repo_name: str) -> list[str] | None:
         logger.debug("rust_test_ids unreadable for %s (%s): %s", repo_name, p, e)
         return None
     # Exclude doctests so the denominator matches the doctest-blind numerator.
-    unit = [i for i in ids if not _DOCTEST_INVENTORY_RE.search(i)]
+    unit = [i for i in ids if not _DOCTEST_ID_RE.fullmatch(i)]
     dropped = len(ids) - len(unit)
     if dropped:
         logger.info(
@@ -258,18 +267,27 @@ def _classify_eval_outcome(log_dir: str, content: str) -> tuple[str, str]:
         return (OUTCOME_INFRA_FETCH_FAILED,
                 "cargo could not fetch dependencies (network/registry) — infra, not a model failure")
     exit_code = _read_exit_code(log_dir)
-    n_compile_errors = _count_compile_errors(content)
-    # Compile failure: rustc exit 101 with error lines, OR error lines visible even
-    # if exit code is missing (we still want the attribution).
-    if n_compile_errors > 0 and (exit_code in (101, None) or exit_code != 0):
-        return (OUTCOME_COMPILE_FAILED,
-                f"cargo build failed with {n_compile_errors} compile error(s)")
-    # `timeout` exits 124 on SIGTERM, 137 on SIGKILL (128 + 9). Wrapper may also
-    # surface 143 (128 + 15 = SIGTERM-from-shell) on some configurations.
-    if exit_code in (124, 137, 143):
+    # N1 fix: timeouts must be classified BEFORE compile-fail. `timeout` exits
+    # 124 on SIGTERM, 137 on SIGKILL (128+9); some shell configs surface 143
+    # (128+15). Previously the compile-fail branch fired first with the overly
+    # broad `exit_code != 0` predicate, mis-labelling every timeout that had
+    # any `error:` line in the noise as COMPILE_FAILED (silently corrupting
+    # eval scores). Ordering timeout FIRST guarantees the attribution is right.
+    if exit_code in TIMEOUT_EXIT_CODES:
         return (OUTCOME_TEST_SUITE_TIMEOUT,
                 f"test suite killed by timeout (exit {exit_code}); "
                 f"raise EVAL_TEST_TIMEOUT if this is a legitimate slow suite")
+    n_compile_errors = _count_compile_errors(content)
+    # Compile failure: rustc's own exit 101, OR error lines visible even when
+    # exit code is missing (we still want the attribution). The old formulation
+    # `n_compile_errors > 0 and (exit_code in (101, None) or exit_code != 0)`
+    # simplified to `n_compile_errors > 0 and exit_code != 0` (True for any
+    # non-zero) which pulled OOMs / network flakes / real test failures into
+    # COMPILE_FAILED. Timeouts are already handled above, so the safe test is
+    # `errors seen OR exit_code == 101` — both are strong compile-fail signals.
+    if n_compile_errors > 0 or exit_code == 101:
+        return (OUTCOME_COMPILE_FAILED,
+                f"cargo build failed with {n_compile_errors} compile error(s)")
     if _RUNNING_ZERO_RE.search(content):
         return (OUTCOME_NO_TESTS_DEFINED,
                 "cargo ran 0 tests — suite is empty for this configuration")
@@ -366,8 +384,12 @@ def _aggregate_rust_results(
         # is the authoritative ceiling.
         exit_code = _read_exit_code(log_dir)
         # Read raw output once for sentinel checks (timeout / cheat).
+        # N5 FD-leak fix: prior code used `open(...).read()` without `with`,
+        # leaking a file descriptor per repo. On batch runs over hundreds of
+        # repos the FD table exhausts and eval crashes with EMFILE.
         try:
-            _raw = open(test_output_file, "r", encoding="utf-8", errors="replace").read()
+            with open(test_output_file, "r", encoding="utf-8", errors="replace") as _fh:
+                _raw = _fh.read()
         except OSError:
             _raw = ""
         status = OUTCOME_TESTS_RAN
@@ -375,7 +397,7 @@ def _aggregate_rust_results(
         # `timeout` cut the suite short. 143 (SIGTERM) is dropped here: a run that
         # already produced parseable test results was NOT mid-run-killed by us, and
         # 143 can come from unrelated causes — zeroing it would discard a real run.
-        if exit_code in (124, 137):
+        if exit_code in (TIMEOUT_EXIT_SIGTERM, TIMEOUT_EXIT_SIGKILL):
             # The suite was KILLED mid-run; a partial pass count is NOT a score.
             status = OUTCOME_TEST_SUITE_TIMEOUT
             logger.warning(
@@ -385,11 +407,13 @@ def _aggregate_rust_results(
         elif _CHEAT_SENTINEL in _raw:
             status = "CHEAT_DETECTED"
             logger.warning("%s: CHEAT_DETECTED — model edited in-src test code; flagging", name)
-        elif _detect_result_injection(_raw, exit_code, num_passed, observed_total):
+        elif (_injection := _detect_result_injection(_raw, exit_code, num_passed, observed_total)):
+            # N11: cache the anti-cheat verdict; previously the same call ran
+            # twice (predicate + log arg), wasting CPU AND risking split-brain
+            # if the classifier ever becomes non-deterministic.
             status = "CHEAT_DETECTED"
             logger.warning(
-                "%s: CHEAT_DETECTED — forged test output: %s", name,
-                _detect_result_injection(_raw, exit_code, num_passed, observed_total),
+                "%s: CHEAT_DETECTED — forged test output: %s", name, _injection,
             )
         elif _FETCH_FAIL_SENTINEL in _raw:
             status = OUTCOME_INFRA_FETCH_FAILED

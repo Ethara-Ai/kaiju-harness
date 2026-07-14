@@ -22,6 +22,38 @@ logger = logging.getLogger(__name__)
 HEREDOC_DELIMITER = "EOF_1399519320"
 
 
+def docker_client() -> "docker.DockerClient":
+    """A Docker client that honors the active docker CLI *context*, not just DOCKER_HOST.
+
+    ``docker.from_env()`` reads only ``DOCKER_HOST`` and otherwise targets
+    ``/var/run/docker.sock`` — which is DEAD on hosts whose ``docker`` CLI uses a
+    non-default context (Docker Desktop broken / rootless / **colima**), yielding
+    ``DockerException: 500``. When ``DOCKER_HOST`` is unset we resolve the active
+    context's endpoint via ``docker context inspect`` and target it directly.
+
+    No-op (returns ``docker.from_env()``) when ``DOCKER_HOST`` is set, the CLI is
+    unavailable, or the active context is the default socket — so Docker Desktop and
+    standard setups are unaffected.
+    """
+    if os.environ.get("DOCKER_HOST"):
+        return docker.from_env()
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["docker", "context", "inspect", "--format",
+             "{{.Endpoints.docker.Host}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        host = (out.stdout or "").strip()
+        if out.returncode == 0 and host and host != "unix:///var/run/docker.sock":
+            logger.info("Using active docker context endpoint: %s", host)
+            return docker.DockerClient(base_url=host)
+    except Exception:  # noqa: BLE001 - best-effort; fall back to from_env
+        logger.debug("docker context resolution failed; using from_env", exc_info=True)
+    return docker.from_env()
+
+
 def get_docker_platform() -> str:
     """Return the Docker platform string for the current machine architecture."""
     machine = platform_mod.machine()

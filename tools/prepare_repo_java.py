@@ -854,6 +854,13 @@ def main() -> None:
         print(f"  {e['instance_id']}: {e['repo']} (base={e['base_commit'][:12]})")
     print(f"{'=' * 80}")
 
+    # Exit non-zero when nothing was prepared so batch drivers / CI keying on the
+    # exit code don't treat a total prepare failure as success (parity with the
+    # other prepare_repo_*.py scripts).
+    if not dataset_entries:
+        logger.error("Prepared 0 entries — nothing to build. Exiting non-zero.")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

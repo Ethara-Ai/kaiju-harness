@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Union, cast
 
 from commit0.harness.constants import (
@@ -11,6 +12,7 @@ from commit0.harness.constants import (
     RepoInstance,
     SimpleInstance,
 )
+from commit0.harness.constants_rust import RUST_BASE_IMAGE_TAG
 from commit0.harness.spec import Spec
 from commit0.harness.eval_hardening import (
     revert_and_clean_lines,
@@ -24,136 +26,7 @@ from commit0.harness.dockerfiles.__init__rust import (
 
 logger = logging.getLogger(__name__)
 
-# Robust in-src test restore, run inside the eval when python3 is available
-# (the agent image always has it; the local_inplace path the pipeline uses runs
-# there). It reconstructs each changed src file as: the model's IMPL (every
-# `#[test]` / `#[cfg(test)]` / `#[tokio::test]` item stripped) + BASE's test
-# items — so ANY model edit to in-src tests (a variable RENAME, reformat, or a
-# real weakening) is neutralized, regardless of whether tests are a
-# `#[cfg(test)] mod` block or top-level `#[test]` fns, and even when interspersed
-# with impl. `sys.argv[1]` is the base commit. Best-effort per file; always
-# exits 0 (the count-based guard below backstops any miss).
-_INSRC_RESTORE_PY = r'''
-import re, subprocess, sys, pathlib
-BASE = sys.argv[1]
-_TA = re.compile(r'#\[\s*(?:cfg\(\s*test\s*\)|test|tokio::test|async_std::test|'
-                 r'cfg_attr\([^\]]*\btest\b[^\]]*\))\s*\]')
-_RAW = re.compile(r'b?r(#*)"')
-_STR = re.compile(r'b?"')
-_CHR = re.compile(r"b?'(?:\\.[^']*|[^'\\])'")
-def _strip_code(src):
-    # Blank every comment/string/char literal (multi-line aware) to spaces,
-    # preserving newlines 1:1, so brace counting sees ONLY real code braces.
-    # A per-line regex (the old _bd) could not do this: a multiline raw string
-    # r#"...{..."# or block comment /* ...} */ leaked its inner braces and made
-    # the splitter mis-classify a following #[test] as impl -> the base test was
-    # never restored -> a model could weaken it undetected. This is the fix.
-    out = []; i = 0; n = len(src)
-    while i < n:
-        c = src[i]
-        if c == '/' and i + 1 < n and src[i+1] == '/':
-            while i < n and src[i] != '\n':
-                out.append(' '); i += 1
-            continue
-        if c == '/' and i + 1 < n and src[i+1] == '*':
-            depth = 1; out.append('  '); i += 2
-            while i < n and depth > 0:
-                if src[i] == '/' and i + 1 < n and src[i+1] == '*':
-                    depth += 1; out.append('  '); i += 2; continue
-                if src[i] == '*' and i + 1 < n and src[i+1] == '/':
-                    depth -= 1; out.append('  '); i += 2; continue
-                out.append('\n' if src[i] == '\n' else ' '); i += 1
-            continue
-        m = _RAW.match(src, i)
-        if m:
-            close = '"' + m.group(1)
-            end = src.find(close, i + m.end())
-            end = n if end == -1 else end + len(close)
-            for j in range(i, end):
-                out.append('\n' if src[j] == '\n' else ' ')
-            i = end; continue
-        m = _STR.match(src, i)
-        if m:
-            start = i; i += m.end()
-            while i < n and src[i] != '"':
-                i += 2 if (src[i] == '\\' and i + 1 < n) else 1
-            i += 1 if i < n else 0
-            for j in range(start, min(i, n)):
-                out.append('\n' if src[j] == '\n' else ' ')
-            continue
-        m = _CHR.match(src, i)
-        if m:
-            for _ in range(m.end()):
-                out.append(' ')
-            i += m.end(); continue
-        out.append(c); i += 1
-    return ''.join(out)
-def _split(src):
-    lines = src.split('\n'); n = len(lines); i = 0; out = []
-    clean = _strip_code(src).split('\n')
-    if len(clean) < n:
-        clean = clean + [''] * (n - len(clean))
-    elif len(clean) > n:
-        clean = clean[:n]
-    while i < n:
-        start = i; is_test = False
-        while i < n and (lines[i].lstrip().startswith('#[')
-                         or lines[i].lstrip().startswith('//')
-                         or lines[i].lstrip().startswith('#!')):
-            if _TA.search(lines[i]): is_test = True
-            i += 1
-        if i >= n:
-            out.append(('\n'.join(lines[start:i]), is_test)); break
-        depth = 0; opened = False
-        while i < n:
-            depth += clean[i].count('{') - clean[i].count('}')
-            if depth > 0: opened = True
-            prev = clean[i].rstrip(); i += 1
-            if opened:
-                if depth <= 0: break
-            elif prev.endswith(';') or prev.endswith('}') or prev == '':
-                break
-        out.append(('\n'.join(lines[start:i]), is_test))
-    return out
-def _sh(*a):
-    return subprocess.run(a, capture_output=True, text=True).stdout
-def _balanced(s):
-    # Cheap, dependency-free proxy for "still parses": with comments/strings
-    # blanked, every bracket kind must balance. The brace-based _split can
-    # mis-segment files whose in-src tests are EMITTED by macro_rules! (e.g.
-    # byteorder's `mod $name { ... }` test templates): the impl/test cut then
-    # lands inside a macro body and the reassembled file is unbalanced. Building
-    # on that would fail a VALID submission (compiles + all tests pass) with a
-    # bogus COMPILE_FAILED. Balance is exactly the property that breaks here.
-    c = _strip_code(s)
-    return (c.count('{') == c.count('}')
-            and c.count('(') == c.count(')')
-            and c.count('[') == c.count(']'))
-for f in _sh('git', 'diff', '--name-only', BASE, '--', 'src').split():
-    try:
-        if not f.endswith('.rs'):
-            continue
-        p = pathlib.Path(f)
-        if not p.is_file():
-            continue
-        base_src = _sh('git', 'show', BASE + ':' + f)
-        if not _TA.search(base_src):
-            continue
-        model_src = p.read_text()
-        impl = '\n'.join(t for t, x in _split(model_src) if not x)
-        tests = '\n'.join(t for t, x in _split(base_src) if x)
-        rewritten = impl.rstrip() + '\n\n' + tests.strip() + '\n'
-        # SAFETY NET: only commit the rewrite if it stays balanced AND the model
-        # file itself was balanced. If the splitter corrupted the rewrite (macro-
-        # generated tests, unusual nesting, ...), KEEP the model's file untouched
-        # — losing the in-src cheat-guard on this one file is far better than a
-        # false COMPILE_FAILED on code that actually compiles. The separate
-        # marker-count guard still runs on the intact file and reports honestly.
-        if _balanced(model_src) and _balanced(rewritten):
-            p.write_text(rewritten)
-    except Exception:
-        pass
-'''
+_INSRC_RESTORE_PY = (Path(__file__).parent / "insrc_restore.py").read_text()
 
 # A commit-ish that we interpolate into a bash script must be a bare git SHA
 # (full or abbreviated). Anything else is rejected so dataset-supplied values
@@ -174,7 +47,7 @@ def _require_commitish(value: str, field: str) -> str:
 class RustSpec(Spec):
     @property
     def base_image_key(self) -> str:
-        return "commit0.base.rust:latest"
+        return RUST_BASE_IMAGE_TAG
 
     @property
     def base_dockerfile(self) -> str:
@@ -267,6 +140,15 @@ class RustSpec(Spec):
                 ".cargo", "**/.cargo",
                 ".config", "**/.config",
                 "xtask", "**/xtask",
+                # H2 cheat-vector close: model must not be able to SWITCH the
+                # toolchain by ADDING a rust-toolchain(.toml) that the base repo
+                # doesn't ship. `revert_targets` above already restores an
+                # EXISTING base version; only added-but-not-in-base files need
+                # deletion. Without this, an added `rust-toolchain.toml` with
+                # `channel = "nightly"` would silently switch the compiler and
+                # let a model use unstable features / lints to skew scoring.
+                "rust-toolchain", "**/rust-toolchain",
+                "rust-toolchain.toml", "**/rust-toolchain.toml",
             ],
         )
         # Fail loudly (and force a non-passing result) if tests still differ.
@@ -368,6 +250,15 @@ class RustSpec(Spec):
             + test_cmd
             + " __TEST_IDS__ > test_output.txt 2>&1",
             "echo $? > cargo_test_exit_code.txt",
+
+            # N30 note: cargo has no zero-cost pre-gate for Rust — `cargo check`
+            # does a full type-check compile (same order as `cargo test`'s build
+            # phase), so running it before the test invocation would double the
+            # wall time on large workspaces without adding classifier signal
+            # (`cargo test` already surfaces `error[E####]:` diagnostics that
+            # evaluate_rust._count_compile_errors classifies). Go DOES get a
+            # cheap `go vet ./...` pre-gate in spec_go because vet is
+            # semantic-only and doesn't recompile.
             # A10: a network/registry fetch failure makes `cargo test` fail with a
             # download error that is NOT the model's fault. The setup-time
             # `cargo fetch` is intentionally tolerant (deps may resolve at build
@@ -377,9 +268,13 @@ class RustSpec(Spec):
             # start) so a test name / panic / asserted string that merely CONTAINS
             # "failed to download" can't false-trigger an INFRA classification on a
             # legitimately passing/failing run.
-            "if grep -qE '^error: (failed to (download|fetch|get|load source)|"
-            "could not resolve host|network failure|spurious network error)' test_output.txt 2>/dev/null; then "
-            "echo 'INFRA_FETCH_FAILED: cargo could not fetch dependencies (network/registry)' >> test_output.txt; fi",
+            # M8: harden the pattern. Cargo copy has churned across versions (e.g.
+            # "failed to fetch" vs "failed to get", the "update registry" wording,
+            # download variants), so we widen coverage to include: the historical
+            # prefixes above, TLS / certificate errors, proxy failures, generic
+            # network timeouts, and "failed to (query|update|read) index/registry".
+            "if grep -qE '^error: (failed to (download|fetch|get|load source|query registry|update registry|read the registry index|resolve dependencies from the network|write the registry index)|could not resolve host|network failure|spurious network error|connection (refused|reset by peer|timed out)|(unable to get local issuer certificate|certificate verify failed|SSL certificate problem|TLS handshake)|proxy authentication required)' test_output.txt 2>/dev/null; then "
+            "echo 'INFRA_FETCH_FAILED: cargo could not fetch dependencies (network/registry/TLS)' >> test_output.txt; fi",
             # CHEAT-GUARD (A3) — COUNT-BASED backstop, runs AFTER cargo test (which
             # truncates test_output.txt via `>`), so we APPEND. It flags a cheat
             # only on a NET DECREASE in in-src test markers/assertions vs base,

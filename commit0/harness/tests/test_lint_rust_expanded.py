@@ -109,6 +109,18 @@ class TestFindCargoToml:
 
 class TestRunCargoClippy:
 
+    # B5 hardening (post-hoc test fix): _run_cargo_clippy now calls
+    # _bust_clippy_cache first, which itself invokes subprocess.run for `cargo
+    # metadata`. These tests were written before that hardening and mock
+    # subprocess.run with a single return value that (a) can't parse as JSON,
+    # (b) makes the cache-bust fail, (c) returns returncode=-2 from clippy.
+    # Bypass the cache-bust so the tests can focus on _run_cargo_clippy's
+    # actual behavior. _bust_clippy_cache has its own dedicated tests.
+    @pytest.fixture(autouse=True)
+    def _bypass_cache_bust(self):
+        with patch(f"{MODULE}._bust_clippy_cache", return_value=True):
+            yield
+
     @patch(f"{MODULE}.subprocess.run")
     @patch(f"{MODULE}.shutil.which", return_value="/usr/bin/cargo")
     def test_success_zero_issues(self, mock_which, mock_run):
@@ -916,6 +928,10 @@ class TestMain:
 
 
 class TestEdgeCases:
+    @pytest.fixture(autouse=True)
+    def _bypass_cache_bust(self):
+        with patch(f"{MODULE}._bust_clippy_cache", return_value=True):
+            yield
 
     @patch(f"{MODULE}.subprocess.run")
     @patch(f"{MODULE}.shutil.which", return_value="/usr/bin/cargo")

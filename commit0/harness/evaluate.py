@@ -4,6 +4,7 @@ import os
 from collections import Counter
 
 import docker
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 import docker.errors
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -42,7 +43,7 @@ def _preflight_check_images(
         return []  # only Docker backend needs local images
 
     try:
-        client = docker.from_env()
+        client = docker_client()
     except docker.errors.DockerException as e:
         logger.error(f"Pre-flight: cannot connect to Docker daemon: {e}")
         return ["<docker-daemon-unreachable>"]

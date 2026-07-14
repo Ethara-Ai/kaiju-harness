@@ -9,7 +9,7 @@ import os
 from typing import Iterator
 
 from commit0.harness.constants import BASE_BRANCH
-from commit0.harness.constants_go import GoRepoInstance, GO_SPLIT
+from commit0.harness.constants_go import GO_GITIGNORE_ENTRIES, GO_SPLIT, GoRepoInstance
 from commit0.harness.utils import clone_repo, load_dataset_from_config
 from commit0.harness.split_utils import resolve_split
 
@@ -73,7 +73,7 @@ def main(
                 with open(gitignore_path, "r") as f:
                     existing_lines = f.read().splitlines()
             added_lines: list[str] = []
-            for entry in [".aider*", "logs/", "vendor/"]:
+            for entry in GO_GITIGNORE_ENTRIES:
                 if entry not in existing_lines:
                     added_lines.append(entry)
             if added_lines:

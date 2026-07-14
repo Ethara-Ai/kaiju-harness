@@ -32,8 +32,19 @@ _EVENT_STATUS_MAP: Dict[str, TestStatus] = {
 # `name` is non-greedy (`.+?`) so it also matches doctest lines whose name
 # contains spaces, e.g. `test src/lib.rs - foo (line 12) ... ok`. The mandatory
 # ` ... <outcome>` anchor keeps it from matching the `test result:` summary.
+# LOW-item hardening: outcome group now includes `bench` (accidental benchmark
+# run) and `skipped` (deprecated libtest alias for ignored). No DOTALL: matching
+# is line-by-line, and `.+?` MUST NOT span newlines or it would swallow
+# is line-by-line, and `.+?` MUST NOT span newlines or it would swallow
+# subsequent test lines. Callers translate outcome via TestStatus.
+# N20: async runtimes (`#[tokio::test]`, `#[async_std::test]`) currently DELEGATE
+# to libtest for reporting, so the emitted lines look identical to `#[test]`
+# (`test <name> ... ok`) and this regex matches them without special-casing. If
+# a future runtime (e.g. `#[monoio::test]`) emits differently, add its shape
+# here — the parser is otherwise runtime-agnostic. There's no compile-time
+# assertion of this, so it MUST be revisited when adding a new async runtime.
 _LIBTEST_LINE_RE = re.compile(
-    r"^test\s+(?P<name>.+?)\s+\.\.\.\s+(?P<outcome>ok|FAILED|ignored)"
+    r"^test\s+(?P<name>.+?)\s+\.\.\.\s+(?P<outcome>ok|FAILED|ignored|bench|skipped)"
     r"(?:\s+[<\(]\s*(?P<duration>[0-9]+(?:\.[0-9]+)?)s\s*[>\)])?\s*$"
 )
 # Final summary line:
@@ -47,6 +58,12 @@ _LIBTEST_OUTCOME_MAP: Dict[str, TestStatus] = {
     "ok": TestStatus.PASSED,
     "FAILED": TestStatus.FAILED,
     "ignored": TestStatus.SKIPPED,
+    # LOW-item hardening: `bench` (defensive — benchmarks shouldn't run since we
+    # don't pass -bench, but be explicit rather than silently dropping them) and
+    # `skipped` (a deprecated libtest alias for `ignored`) both count as SKIPPED
+    # so they don't inflate the pass count.
+    "bench": TestStatus.SKIPPED,
+    "skipped": TestStatus.SKIPPED,
 }
 
 

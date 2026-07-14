@@ -25,9 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 EXISTING_GO_REPOS: set[str] = set()
-
-SKIP_DIRS: set[str] = {"vendor", ".git", "testdata", "internal"}
-
 GITHUB_API = "https://api.github.com"
 
 

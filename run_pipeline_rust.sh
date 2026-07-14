@@ -38,7 +38,7 @@ source "${BASE_DIR}/scripts/_outputs_layout.sh"
 REPO_BASE="${BASE_DIR}/repos"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
-MAX_ITERATION=1
+MAX_ITERATION=3  # H6: aligned with go/c/cpp/java/js/ts (was 1 → pass@1 vs pass@3 methodology divergence). Override via --max-iteration.
 
 # Rust pipeline — spec info enabled by default (use --no-spec-info to disable)
 LANGUAGE="rust"
@@ -764,9 +764,15 @@ for item in data:
     print(item['repo'].split('/')[-1])
 " 2>/dev/null || true)
     else
-        repo_list=$("$VENV_PYTHON" -c "
+        # N9 injection close: REPO_SPLIT was interpolated directly into the
+        # Python literal (RUST_SPLIT.get('${REPO_SPLIT}', [])), letting a value
+        # containing quotes / newlines / `);import os;os.system(...)` execute
+        # arbitrary code in the harness venv. Pass via env var so Python reads
+        # it as opaque data — same pattern used at line 757 for DATASET_FILE.
+        repo_list=$(_PIPELINE_REPO_SPLIT="$REPO_SPLIT" "$VENV_PYTHON" -c "
+import os
 from commit0.harness.constants_rust import RUST_SPLIT
-for r in sorted(RUST_SPLIT.get('${REPO_SPLIT}', [])):
+for r in sorted(RUST_SPLIT.get(os.environ['_PIPELINE_REPO_SPLIT'], [])):
     print(r)
 " 2>/dev/null || true)
     fi
@@ -1318,7 +1324,7 @@ for e in rows: print(e['repo'].split('/')[-1])" "$DATASET_FILE" 2>/dev/null | he
         log "  Agent killed by watchdog after ${AGENT_ELAPSED}s"
     elif [[ $AGENT_RC -ne 0 ]]; then
         log "  Agent FAILED (rc=${AGENT_RC}) in ${AGENT_ELAPSED}s — last 20 lines:"
-        tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
+        tail -20 "$agent_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
     else
         log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
     fi
@@ -1386,7 +1392,7 @@ run_build_once() {
 
     if [[ $build_rc -ne 0 ]]; then
         log "  Docker image build FAILED (rc=$build_rc) in ${elapsed}s — last 15 lines:"
-        tail -15 "$build_log" | while IFS= read -r line; do log "    | $line"; done
+        tail -15 "$build_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
         # C16: mark infra as broken so a downstream image-not-found eval is recorded
         # as INFRA_BROKEN, not a legitimate 0%. Without this, a broken build makes
         # every stage silently score 0/N and look like a model failure.
@@ -1407,7 +1413,7 @@ run_evaluate() {
         "$VENV_PYTHON" commit0/cli_rust.py evaluate \
             --branch "$branch" \
             --backend "$BACKEND" \
-            --timeout 300 \
+            --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-600}" \
             --num-cpus 1 \
             --num-workers 1 \
             --commit0-config-file "$COMMIT0_CONFIG"
@@ -1469,7 +1475,7 @@ run_evaluate() {
 
     if [[ $eval_rc -ne 0 || "$EVAL_STATUS" != "OK" ]]; then
         log "  Evaluation issue (rc=${eval_rc}, status=${EVAL_STATUS}) — last 10 lines:"
-        tail -10 "$eval_log" | while IFS= read -r line; do log "    | $line"; done
+        tail -10 "$eval_log" 2>/dev/null | while IFS= read -r line; do log "    | $line"; done
     fi
 }
 

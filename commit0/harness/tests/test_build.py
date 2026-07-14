@@ -58,7 +58,8 @@ def _run_main(
             f"{MODULE}.load_dataset_from_config", return_value=list(dataset)
         ) as m_load,
         patch(f"{MODULE}.make_spec", return_value=spec_sentinel) as m_spec,
-        patch(f"{MODULE}.docker") as m_docker,
+        patch(f"{MODULE}.docker"),
+        patch(f"{MODULE}.docker_client", return_value=mock_client) as m_docker_client,
         patch(f"{MODULE}.build_repo_images", return_value=build_return) as m_build,
         patch(f"{MODULE}.run_health_checks", return_value=[]),
         patch(f"{MODULE}.sys") as m_sys,
@@ -69,12 +70,13 @@ def _run_main(
 
                 main(dataset_name, dataset_split, split, num_workers, verbose)
         else:
-            m_docker.from_env.return_value = mock_client
             from commit0.harness.build import main
 
             main(dataset_name, dataset_split, split, num_workers, verbose)
 
-        return m_load, m_spec, m_docker, m_build, m_sys
+        # Position 3 is the docker_client mock — build now uses the context-aware
+        # docker_client() (B10), not docker.from_env().
+        return m_load, m_spec, m_docker_client, m_build, m_sys
 
 
 class TestDatasetTypeDetection:
@@ -177,8 +179,8 @@ class TestBuildExecution:
 
     def test_docker_from_env_called(self) -> None:
         examples = [_repo_example("r")]
-        _, _, m_docker, _, _ = _run_main("my_dataset", examples)
-        m_docker.from_env.assert_called_once()
+        _, _, m_docker_client, _, _ = _run_main("my_dataset", examples)
+        m_docker_client.assert_called_once()
 
     def test_make_spec_called_for_each_example(self) -> None:
         examples = [_repo_example("a"), _repo_example("b"), _repo_example("c")]

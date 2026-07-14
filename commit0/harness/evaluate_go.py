@@ -120,7 +120,15 @@ def _aggregate_go_results(
     # test_output.json when `git apply` fails; the parser produces no per-test
     # results for it. Detect it explicitly so it is NOT scored as a clean 0/N
     # (which would look like a model that failed every test).
-    patch_apply_failed = "PATCH_APPLY_FAILED" in raw_output[:4096]
+    # N8: the head-only [:4096] window silently missed the sentinel when a
+    # noisy test_output.json pushed the PATCH_APPLY_FAILED marker past 4KB
+    # (a real 0/N was scored instead of PATCH_APPLY_FAILED). Search the head
+    # AND the tail so the marker is reliably detected regardless of buffer
+    # size, without paying O(N) for very large outputs.
+    patch_apply_failed = (
+        "PATCH_APPLY_FAILED" in raw_output[:8192]
+        or "PATCH_APPLY_FAILED" in raw_output[-8192:]
+    )
 
     num_passed = 0
     total_duration = (

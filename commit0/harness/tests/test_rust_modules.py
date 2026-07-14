@@ -149,6 +149,14 @@ class TestFindCargoToml:
 
 
 class TestRunCargoClippy:
+    # B5-post-hoc: _run_cargo_clippy now calls _bust_clippy_cache first;
+    # tests that mock subprocess.run at the top level make the cache-bust
+    # emit ValueError on empty stdout (json.loads('')), returning rc=-2.
+    # Bypass to isolate _run_cargo_clippy behavior.
+    @pytest.fixture(autouse=True)
+    def _bypass_cache_bust(self):
+        with patch(f"{LINT_MODULE}._bust_clippy_cache", return_value=True):
+            yield
     @patch(f"{LINT_MODULE}.shutil")
     def test_cargo_not_found(self, mock_shutil):
         from commit0.harness.lint_rust import _run_cargo_clippy

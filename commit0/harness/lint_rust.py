@@ -24,14 +24,17 @@ def _find_cargo_toml(repo_dir: str) -> Optional[str]:
     return None
 
 
-def _bust_clippy_cache(cargo_dir: str, cargo_bin: str) -> None:
+def _bust_clippy_cache(cargo_dir: str, cargo_bin: str) -> bool:
     """Force clippy to re-lint local crates by cleaning just the workspace
-    packages (deps stay cached).
+    packages (deps stay cached). Returns True on success, False if any step
+    failed — callers MUST refuse to trust clippy output when this returns False,
+    because a warm cache would let clippy silently return 0/0 diagnostics on
+    unrepresented local changes (false pass).
 
-    clippy shares the `cargo check` cache: on a warm cache nothing recompiles
+    clippy shares the ``cargo check`` cache: on a warm cache nothing recompiles
     and clippy emits ZERO diagnostics, so real warnings silently vanish and the
     lint stage falsely passes. Cleaning only the local packages (via
-    `cargo metadata --no-deps`) keeps dependency build artefacts so this is
+    ``cargo metadata --no-deps``) keeps dependency build artefacts so this is
     cheap, while guaranteeing the local code is actually re-linted.
     """
     try:
@@ -40,20 +43,34 @@ def _bust_clippy_cache(cargo_dir: str, cargo_bin: str) -> None:
             capture_output=True, text=True, cwd=cargo_dir, timeout=60,
         )
         if meta.returncode != 0:
-            logger.warning("clippy cache-bust: cargo metadata failed; lint may be stale")
-            return
+            logger.error(
+                "clippy cache-bust: cargo metadata failed (rc=%d); refusing to run clippy on stale cache.\n"
+                "--- stderr ---\n%s", meta.returncode, meta.stderr,
+            )
+            return False
         names = [p.get("name") for p in json.loads(meta.stdout).get("packages", [])]
     except (subprocess.SubprocessError, OSError, ValueError) as exc:
-        logger.warning("clippy cache-bust: metadata error (%s); lint may be stale", exc)
-        return
+        logger.error("clippy cache-bust: metadata error (%s); refusing to run clippy on stale cache.", exc)
+        return False
+
+    any_clean_failed = False
     for name in filter(None, names):
         try:
-            subprocess.run(
+            clean = subprocess.run(
                 [cargo_bin, "clean", "-p", name],
                 capture_output=True, text=True, cwd=cargo_dir, timeout=60,
             )
-        except (subprocess.SubprocessError, OSError):
-            logger.debug("clippy cache-bust: clean -p %s failed", name)
+            if clean.returncode != 0:
+                logger.warning(
+                    "clippy cache-bust: clean -p %s failed (rc=%d): %s",
+                    name, clean.returncode, clean.stderr.strip(),
+                )
+                any_clean_failed = True
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("clippy cache-bust: clean -p %s errored: %s", name, exc)
+            any_clean_failed = True
+
+    return not any_clean_failed
 
 
 def _run_cargo_clippy(cargo_dir: str) -> Dict[str, Any]:
@@ -69,7 +86,13 @@ def _run_cargo_clippy(cargo_dir: str) -> Dict[str, Any]:
         return {"warnings": 0, "errors": 0, "messages": [], "returncode": -1,
                 "raw_stderr": "cargo not found"}
 
-    _bust_clippy_cache(cargo_dir, clippy_bin)
+    if not _bust_clippy_cache(cargo_dir, clippy_bin):
+        logger.error(
+            "clippy cache-bust failed \u2014 refusing to run clippy on potentially "
+            "stale artifacts (which would silently pass with 0 diagnostics).",
+        )
+        return {"warnings": 0, "errors": 0, "messages": [], "returncode": -2,
+                "raw_stderr": "clippy cache-bust failed; refused to run to avoid stale-cache false pass"}
 
     cmd = [
         clippy_bin,

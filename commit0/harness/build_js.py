@@ -9,6 +9,7 @@ from commit0.harness.health_check_js import run_js_health_checks
 from commit0.harness.spec_js import Commit0JsSpec, make_js_spec
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.utils import load_dataset_from_config
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,8 @@ def main(
         logger.warning("No JS repos matched split '%s'. Nothing to build.", split)
         return
 
-    import docker
-
     logger.info("Building %d JS repo image(s) for split '%s'", len(specs), split)
-    client = docker.from_env()
+    client = docker_client()
 
     health_failures: list[str] = []
     try:

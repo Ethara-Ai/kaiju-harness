@@ -721,7 +721,18 @@ def find_commit0_venv(repo_dir: Path, python_version: str) -> Path | None:
 
 
 def find_docker_image_for_repo(repo_name: str) -> str | None:
-    """Search local Docker daemon for a ``commit0.repo.<short_name>.*`` tag."""
+    """Search local Docker daemon for a ``commit0.repo.<short_name>.*`` tag.
+
+    Prefers the REPO image over the AGENT image. The agent image is layered on
+    the repo image but runs ``python`` from ``/opt/kaiju/.venv`` (the agent's
+    own venv, holding aider/etc.), which does NOT contain the repo's installed
+    dependencies — so ``pytest --collect-only`` there fails with a spurious
+    ``ModuleNotFoundError`` (e.g. ``essentials``) and collects ZERO tests. The
+    repo image installs the repo's deps into system-python and collects the
+    full suite, so it is the correct environment for the canonical test-id
+    inventory. Agent images (tag contains ``-agent.``) are used only as a last
+    resort when no repo image exists.
+    """
     try:
         import docker
 
@@ -731,16 +742,23 @@ def find_docker_image_for_repo(repo_name: str) -> str | None:
     short_name = repo_name.split("/")[-1].split("__")[-1].split("-")[0].lower()
     needle = f"commit0.repo.{short_name}."
     fallback = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
+    repo_match: str | None = None
+    agent_match: str | None = None
     try:
         for image in client.images.list():
             for tag in image.tags:
-                if tag.startswith(needle):
-                    return tag
                 if tag == fallback:
-                    return tag
+                    return tag  # exact repo image — best possible match
+                if tag.startswith(needle):
+                    # ``commit0.repo.<name>.<hash>-agent.<hash>:v0`` is the agent
+                    # image; ``commit0.repo.<name>.<hash>:v0`` is the repo image.
+                    if "-agent." in tag:
+                        agent_match = agent_match or tag
+                    else:
+                        repo_match = repo_match or tag
     except Exception:  # noqa: BLE001
         return None
-    return None
+    return repo_match or agent_match
 
 
 def resolve_runtime(

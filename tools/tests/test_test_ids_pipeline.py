@@ -31,7 +31,57 @@ from tools.python_runtime import (
     TestCollectionResult,
     TestCollectionStatus,
     classify_failure,
+    find_docker_image_for_repo,
 )
+
+
+# ---------------------------------------------------------------------------
+# Docker image selection: prefer the REPO image over the AGENT image
+# ---------------------------------------------------------------------------
+
+
+class _FakeImage:
+    def __init__(self, tags: list[str]) -> None:
+        self.tags = tags
+
+
+def _patch_docker(monkeypatch, tags: list[str]) -> None:
+    """Patch ``docker.from_env`` to return a client whose ``images.list()``
+    yields one image per tag in ``tags`` (in the given order)."""
+    import sys
+    import types
+
+    images_ns = types.SimpleNamespace(list=lambda: [_FakeImage([t]) for t in tags])
+    client = types.SimpleNamespace(images=images_ns)
+    fake_docker = types.SimpleNamespace(from_env=lambda: client)
+    monkeypatch.setitem(sys.modules, "docker", fake_docker)
+
+
+class TestFindDockerImageForRepo:
+    def test_prefers_repo_image_over_agent(self, monkeypatch) -> None:
+        # Agent image listed FIRST — must still pick the repo image, because the
+        # agent image's /opt/kaiju/.venv lacks the repo's deps (essentials) and
+        # collects zero tests.
+        _patch_docker(
+            monkeypatch,
+            [
+                "commit0.repo.blacksheep.3da1597-agent.cc8664:v0",
+                "commit0.repo.blacksheep.3da1597:v0",
+            ],
+        )
+        got = find_docker_image_for_repo("Aman-Yadav-Ethara-AI/BlackSheep")
+        assert got == "commit0.repo.blacksheep.3da1597:v0"
+
+    def test_agent_image_only_as_last_resort(self, monkeypatch) -> None:
+        _patch_docker(
+            monkeypatch, ["commit0.repo.blacksheep.3da1597-agent.cc8664:v0"]
+        )
+        got = find_docker_image_for_repo("x/BlackSheep")
+        assert got == "commit0.repo.blacksheep.3da1597-agent.cc8664:v0"
+
+    def test_no_match_returns_none(self, monkeypatch) -> None:
+        _patch_docker(monkeypatch, ["commit0.repo.other.deadbeef:v0"])
+        assert find_docker_image_for_repo("x/BlackSheep") is None
 
 
 # ---------------------------------------------------------------------------

@@ -110,20 +110,103 @@ def _normalize_test_ids(test_ids: list[str], test_dir: str) -> list[str]:
     return normalized
 
 
+# pytest --collect-only TREE nodes whose ``name`` is a PATH segment (joined with
+# ``/``); everything else (Class/Function/Coroutine/TestCaseFunction/…) joins the
+# id with ``::``. Anything NOT in _TREE_CONTAINER_KINDS is treated as a test ITEM
+# (so unknown future leaf kinds still emit an id rather than being silently lost).
+_TREE_PATH_KINDS = frozenset({"Dir", "Package", "Module"})
+_TREE_CONTAINER_KINDS = frozenset(
+    {"Session", "Dir", "Package", "Module", "Class", "UnitTestCase", "Instance"}
+)
+# Legacy pytest ``<Instance ()>`` node — a container that contributes nothing to
+# the node id (drop it so we don't emit ``mod.py::TestFoo::()::test_bar``).
+_TREE_SKIP_KINDS = frozenset({"Instance"})
+_TREE_NODE_RE = re.compile(r"^(?P<indent> *)<(?P<kind>\w+) (?P<name>.+)>$")
+# Banners that mark the END of the collection tree. Everything after them
+# (warnings summary, short test summary, the trailing ``N tests collected``
+# banner) is NOT a node id and MUST NOT be scanned — a deprecation note such as
+# ``Test: tests/x.py::y, argvalues type: generator`` contains ``::`` and would
+# otherwise be mis-parsed into a garbage id like ``Test:``.
+_COLLECT_END_RE = re.compile(
+    r"^=+.*\b(warnings summary|short test summary|passed|failed|errors?|"
+    r"tests? collected|no tests ran|slowest)\b.*=*$",
+    re.IGNORECASE,
+)
+
+
+def _build_tree_nodeid(stack: list[tuple[int, str, str]]) -> str:
+    """Assemble a pytest node id from an ancestry stack of ``(indent, kind, name)``.
+
+    Path-like ancestors (Dir/Package/Module) join with ``/``; item ancestors
+    (Class/Function/…) join with ``::``. The outermost node (the rootdir
+    container) is dropped so ids come out rootdir-relative — identical to what
+    ``pytest --collect-only -q`` prints.
+    """
+    path_segs: list[str] = []
+    id_tail: list[str] = []
+    for _indent, kind, name in stack[1:]:  # skip the rootdir container
+        if kind in _TREE_SKIP_KINDS:
+            continue
+        if kind in _TREE_PATH_KINDS:
+            path_segs.append(name)
+        else:
+            id_tail.append(name)
+    path = "/".join(path_segs)
+    return f"{path}::{'::'.join(id_tail)}" if id_tail else path
+
+
+def _parse_collect_tree(lines: list[str]) -> list[str]:
+    """Parse pytest's INDENTED verbose ``--collect-only`` tree.
+
+    Modern pytest (7/8/9) prints each collected node on its own indented line
+    (``<Dir>`` / ``<Package>`` / ``<Module>`` / ``<Function>``), NOT the legacy
+    single-line ``<Module x>::<Function y>`` form. Returns ``[]`` when the output
+    is not tree-shaped so the caller falls back to line-based parsing.
+    """
+    ids: list[str] = []
+    stack: list[tuple[int, str, str]] = []
+    for raw in lines:
+        if _COLLECT_END_RE.match(raw.strip()):
+            break  # reached the warnings/summary tail — stop scanning
+        m = _TREE_NODE_RE.match(raw)
+        if not m:
+            continue  # header/blank/other line — ignore
+        indent = len(m.group("indent"))
+        kind = m.group("kind")
+        name = m.group("name")
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, kind, name))
+        if kind not in _TREE_CONTAINER_KINDS:
+            ids.append(_build_tree_nodeid(stack))
+    return ids
+
+
 def _parse_collect_output(stdout: str) -> list[str]:
-    """Parse pytest ``--collect-only`` output in any of three formats.
+    """Parse pytest ``--collect-only`` output in any supported format.
+
+    Tries the modern INDENTED tree first (the verbose default on pytest 7+),
+    then falls back to line-based parsing for quiet ``-q`` node ids, the legacy
+    single-line ``<Module x>::<Function y>`` tree, and per-file summary counts.
+    """
+    lines = stdout.split("\n")
+    tree_ids = _parse_collect_tree(lines)
+    if tree_ids:
+        return tree_ids
+    return _parse_collect_lines(lines)
+
+
+def _parse_collect_lines(lines: list[str]) -> list[str]:
+    """Line-based fallback parser.
 
     Handles:
-    - **Verbose tree** (``-v`` or default ``--collect-only``):
-      ``<Module tests/test_foo.py>::<Class TestFoo>::<Function test_bar>``
     - **Quiet node IDs** (``-q``): ``tests/test_foo.py::TestFoo::test_bar``
-    - **Per-file summary** (custom reporters, ``-qq`` style, or pytest plugins
-      that suppress node IDs): ``tests/test_foo.py: 11`` — emitted as a
-      file-level pseudo-ID (``tests/test_foo.py``) that pytest still accepts
-      as a run target. Used **only as a fallback** when no per-test IDs were
-      found in the same output; per-test IDs are always preferred when both
-      are present, since the harness's ``fail_to_pass``/``pass_to_pass``
-      machinery operates at test-level granularity.
+    - **Legacy inline tree**: ``<Module tests/test_foo.py>::<Function test_bar>``
+    - **Per-file summary** (custom reporters / plugins that suppress node IDs):
+      ``tests/test_foo.py: 11`` — emitted as a file-level pseudo-ID that pytest
+      still accepts as a run target. Used **only as a fallback** when no
+      per-test IDs were found, since fail_to_pass/pass_to_pass operate at
+      test-level granularity.
 
     Robust to mixed output with separator lines, error lines, and empty lines.
     """
@@ -134,10 +217,15 @@ def _parse_collect_output(stdout: str) -> list[str]:
     # between the colon and the count to avoid eating IDs like ``foo:bar``.
     summary_re = re.compile(r"^(\S+\.py)(?:\[[^\]]+\])?:\s+(\d+)\s*$")
 
-    for line in stdout.strip().split("\n"):
+    for line in lines:
         line = line.strip()
         if not line:
             continue
+        # Stop at the warnings/summary tail: lines there (e.g. a deprecation
+        # note ``Test: tests/x.py::y, argvalues type: generator``) can contain
+        # ``::`` and would otherwise be mis-read as node ids.
+        if _COLLECT_END_RE.match(line):
+            break
         if line.startswith(("=", "-", "no tests ran")):
             continue
         if "error" in line.lower() and "::" not in line:
@@ -163,7 +251,11 @@ def _parse_collect_output(stdout: str) -> list[str]:
 
         if "::" in line:
             test_id = line.split(" ")[0]
-            if test_id:
+            # A real node id carries ``::`` in its FIRST whitespace-delimited
+            # token. Warnings/summary lines like ``Test: a.py::b argvalues ...``
+            # place the ``::`` in a LATER token, leaving ``Test:`` as token[0] —
+            # reject those rather than saving a garbage id.
+            if "::" in test_id:
                 test_ids.append(test_id)
             continue
 
@@ -906,10 +998,14 @@ def main() -> None:
     prefer = (
         args.prefer.split(",") if args.prefer else (["docker"] if args.docker else None)
     )
+    # Repos handled by *this* run — used to scope --install so it only copies
+    # this run's test IDs into commit0's shared data dir (not every language's).
+    install_repo_names: list[str] = []
 
     if args.repo_dir:
         if not args.name:
             parser.error("--name is required with --repo-dir")
+        install_repo_names = [args.name]
         repo_dir = Path(args.repo_dir)
 
         python_version, test_dir, reference_commit, breadcrumb = _resolve_repo_dir_args(
@@ -1003,6 +1099,7 @@ def main() -> None:
             lenient=args.lenient,
             quarantine_dir=quarantine_dir,
         )
+        install_repo_names = list(results.keys())
 
         total = sum(r["count"] for r in results.values())
         ok_count = sum(
@@ -1027,7 +1124,7 @@ def main() -> None:
         return
 
     if args.install:
-        installed = install_test_ids(output_dir)
+        installed = install_test_ids(output_dir, repo_names=install_repo_names or None)
         logger.info("Installed %d test ID files into commit0 data directory", installed)
 
 

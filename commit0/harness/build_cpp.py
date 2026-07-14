@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import docker
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 
 from commit0.harness.docker_build_cpp import build_cpp_repo_images
 
@@ -56,7 +57,7 @@ def main(
     logger.info("Loaded %d C++ repo instance(s) total", len(instances))
 
     try:
-        client = docker.from_env()
+        client = docker_client()
     except docker.errors.DockerException as exc:
         logger.error(
             "Cannot connect to Docker daemon. Is Docker running?\n  %s", exc

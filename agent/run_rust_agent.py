@@ -35,13 +35,26 @@ from commit0.cli import read_commit0_config_file
 from commit0.harness.constants import RUN_AGENT_LOG_DIR, RepoInstance
 from commit0.harness.constants_rust import RUST_SPLIT
 from commit0.harness.split_utils import resolve_split
-from commit0.harness.patch_utils_rust import filter_rust_patch
+from commit0.harness.patch_utils_rust import filter_rust_patch, InvalidRustPatchError
 from agent.module_patch import module_file_patch
 from commit0.harness.utils import load_dataset_from_config
 from agent.claude_code.recovery import run_with_recovery
 
 logger = logging.getLogger(__name__)
 
+
+def _filter_rust_patch_lenient(patch: str) -> str:
+    """Best-effort ``filter_rust_patch`` for agent reporting artefacts.
+
+    Agent-side stage patches must never crash the runner, so we swallow
+    :class:`InvalidRustPatchError` and log — the eval path uses the
+    default strict entry point instead.
+    """
+    try:
+        return filter_rust_patch(patch, strict=False)
+    except InvalidRustPatchError as exc:
+        logger.warning("filter_rust_patch surfaced despite strict=False: %s", exc)
+        return exc.patch
 _RUST_PROMPT_PATH = Path(__file__).parent / "prompts" / "rust_system_prompt.md"
 
 
@@ -531,7 +544,7 @@ def _module_file_patch(local_repo, base_commit: str, post_sha: str,
                        rel_path: str) -> str:
     """Rust wrapper over the shared ``module_file_patch`` (strips ``target/``)."""
     return module_file_patch(local_repo, base_commit, post_sha, rel_path,
-                             filter_fn=filter_rust_patch, logger=logger)
+                             filter_fn=_filter_rust_patch_lenient, logger=logger)
 
 
 # ---------------------------------------------------------------------------
@@ -1134,7 +1147,7 @@ def run_rust_agent_for_repo(
     # the same filter the eval uses.
     from agent.stage_patch import write_stage_patch
     write_stage_patch(local_repo, example["base_commit"], experiment_log_dir,
-                      logger, filter_fn=filter_rust_patch)
+                      logger, filter_fn=_filter_rust_patch_lenient)
 
 
 # ---------------------------------------------------------------------------

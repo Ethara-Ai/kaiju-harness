@@ -1,5 +1,6 @@
 """Build Java Docker images — base and per-repo."""
 import docker
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -45,7 +46,7 @@ def build_java_base_images(
     java_versions: Optional[List[str]] = None,
     nocache: bool = False,
 ) -> None:
-    client = docker.from_env()
+    client = docker_client()
     platform = get_docker_platform()
     mitm_ca_cert = _resolve_mitm_ca_cert()
     versions = java_versions or list(SUPPORTED_JAVA_VERSIONS)
@@ -91,7 +92,7 @@ def _build_single_repo(
     nocache: bool,
     mitm_ca_cert: Optional[Path],
 ) -> str:
-    client = docker.from_env()
+    client = docker_client()
     spec = make_java_spec(instance)
     # Tag the image with the SPEC's repo_image_key — the exact name the runner
     # (run_pipeline_containerized) looks up as the agent-image FROM base. Deriving

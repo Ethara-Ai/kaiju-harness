@@ -116,7 +116,7 @@ class Commit0TsSpec(Spec):
         steps.extend(self._package_manager_install(install_cmd))
         steps.extend(
             [
-                f"{install_cmd} --ignore-scripts 2>/dev/null || {install_cmd} --ignore-scripts 2>/dev/null || (echo 'INSTALL_FAILED' >&2; exit 1)",
+                f"{install_cmd} --ignore-scripts || {install_cmd} --ignore-scripts || (echo 'INSTALL_FAILED' >&2; exit 1)",
                 f"{prefix}{' --yes' if prefix == 'npx' else ''} node-gyp rebuild 2>/dev/null || true",
                 f"git reset --hard {shlex.quote(base_commit)}",
             ]

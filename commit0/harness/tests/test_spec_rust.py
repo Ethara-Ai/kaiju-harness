@@ -50,7 +50,9 @@ class TestRustSpecInheritance:
 class TestRustSpecBaseImageKey:
     def test_value(self):
         spec = _make_spec()
-        assert spec.base_image_key == "commit0.base.rust:latest"
+        from commit0.harness.constants_rust import RUST_BASE_IMAGE_TAG
+        assert spec.base_image_key == RUST_BASE_IMAGE_TAG
+        assert spec.base_image_key.startswith("commit0.base.rust:")
 
     def test_always_same(self):
         spec1 = _make_spec()
@@ -86,7 +88,8 @@ class TestRustSpecRepoDockerfile:
         spec = _make_spec()
         spec.repo_dockerfile
         call_kwargs = mock_fn.call_args[1]
-        assert call_kwargs["base_image"] == "commit0.base.rust:latest"
+        from commit0.harness.constants_rust import RUST_BASE_IMAGE_TAG
+        assert call_kwargs["base_image"] == RUST_BASE_IMAGE_TAG
 
     @patch(f"{MODULE}.get_dockerfile_repo_rust", return_value="FROM base\n")
     def test_passes_pre_install(self, mock_fn):

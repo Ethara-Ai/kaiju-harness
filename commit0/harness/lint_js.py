@@ -2,8 +2,14 @@
 
 JavaScript has no ``tsc --noEmit`` compile gate: ``node --check`` parses each
 file without executing it and is the closest available syntax-only signal.
-If the repo ships no ESLint configuration, the runner emits the marker
-``LINT_NO_CONFIG`` rather than synthesising rules the author never opted into.
+
+When the repo ships NO ESLint configuration, the runner falls back to a bundled
+default ruleset (:data:`_DEFAULT_ESLINT_CONFIG`) run via the base-image global
+``eslint`` — so SDE stage 2 (lint) ALWAYS produces a real signal, consistent with
+rust ``cargo clippy``, go ``go vet`` and python ``ruff`` (all of which lint with
+built-in defaults regardless of repo config). The legacy opt-in behaviour (emit
+``LINT_NO_CONFIG`` and skip) survives only as a graceful degradation when no
+``eslint`` binary is available (e.g. a base image built before this change).
 """
 
 from __future__ import annotations
@@ -27,6 +33,10 @@ logger = logging.getLogger(__name__)
 LINT_NO_CONFIG_MARKER = "LINT_NO_CONFIG"
 ESLINT_TIMEOUT_MARKER = "__ESLINT_TIMEOUT__"
 ESLINT_TIMEOUT_EXIT_CODE = 124
+
+# Bundled default flat config used when a repo ships no ESLint config of its own.
+# Self-contained (no plugin imports) so it loads from here against any repo.
+_DEFAULT_ESLINT_CONFIG = Path(__file__).resolve().parent / "eslint_default.config.mjs"
 
 
 @dataclass
@@ -148,41 +158,53 @@ def run_eslint(
 ) -> tuple[int, str, bool]:
     """Run ESLint on *repo_dir* and return ``(returncode, output, skipped)``.
 
-    When the repo has no ESLint configuration the runner emits the
-    ``LINT_NO_CONFIG`` marker, returns ``(0, marker, True)``, and does not
-    invoke ``eslint`` — per the JS pipeline's opt-in policy on lint rules.
+    If the repo ships its own ESLint config, that config is used (via the repo's
+    package-manager ``exec`` prefix, so the repo's own eslint runs). Otherwise the
+    bundled default ruleset is used via the base-image GLOBAL ``eslint`` — so lint
+    always produces a signal, matching rust/go/python. Only if no ``eslint`` binary
+    exists at all do we degrade to ``LINT_NO_CONFIG`` (``skipped=True``).
     """
-    if not _has_eslint_config(repo_dir):
-        logger.info(
-            "No ESLint config in %s — skipping ESLint and emitting %s",
-            repo_dir,
-            LINT_NO_CONFIG_MARKER,
-        )
-        return 0, LINT_NO_CONFIG_MARKER, True
+    has_config = _has_eslint_config(repo_dir)
+    env = dict(os.environ)
 
-    prefix = _detect_exec_prefix(repo_dir)
-    cmd: list[str] = prefix + [
-        "eslint",
-        "--no-error-on-unmatched-pattern",
-        "--format",
-        "stylish",
-    ]
+    if has_config:
+        # Repo-owned config: run the repo's local eslint via its exec prefix.
+        prefix = _detect_exec_prefix(repo_dir)
+        cmd: list[str] = prefix + ["eslint"]
+        # Reconcile config style with the installed ESLint major: ESLint 9 defaults
+        # to FLAT and errors on a legacy-only repo; ESLint 8 needs opt-in for flat.
+        style = _eslint_config_style(repo_dir)
+        if style == "legacy":
+            env["ESLINT_USE_FLAT_CONFIG"] = "false"
+        elif style == "flat":
+            env["ESLINT_USE_FLAT_CONFIG"] = "true"
+        mode_desc = f"{style or 'unknown'} config"
+    else:
+        # No repo config: lint with the bundled default ruleset via the GLOBAL
+        # eslint (base image), NOT the repo's local one — its version is unknown and
+        # may predate the flags below. `--no-config-lookup` (eslint>=9.9) stops
+        # eslint from searching the repo for a config.
+        cmd = [
+            "eslint",
+            "--no-config-lookup",
+            "--config",
+            str(_DEFAULT_ESLINT_CONFIG),
+            # Deny warnings so any default-ruleset finding yields a non-zero exit —
+            # otherwise warn-level rules exit 0 and aider's lint gate treats the run
+            # as clean and skips the fix. Mirrors rust `cargo clippy -- -D warnings`.
+            "--max-warnings",
+            "0",
+        ]
+        env["ESLINT_USE_FLAT_CONFIG"] = "true"
+        mode_desc = "default config (repo ships none)"
+
+    cmd += ["--no-error-on-unmatched-pattern", "--format", "stylish"]
     if files:
         cmd.extend(files)
     else:
         cmd.append(".")
 
-    # Reconcile config style with the installed ESLint major: ESLint 9 defaults to
-    # FLAT config and errors on a legacy-only repo; ESLint 8 needs opt-in for flat.
-    # Pin the mode explicitly so lint works regardless of which major is installed.
-    env = dict(os.environ)
-    style = _eslint_config_style(repo_dir)
-    if style == "legacy":
-        env["ESLINT_USE_FLAT_CONFIG"] = "false"
-    elif style == "flat":
-        env["ESLINT_USE_FLAT_CONFIG"] = "true"
-
-    logger.info("Running ESLint (%s config): %s", style or "unknown", " ".join(cmd))
+    logger.info("Running ESLint (%s): %s", mode_desc, " ".join(cmd))
     try:
         result = subprocess.run(
             cmd,
@@ -193,6 +215,16 @@ def run_eslint(
             check=False,
             env=env,
         )
+    except FileNotFoundError:
+        # No eslint binary available (e.g. base image built before global eslint
+        # was added). Degrade gracefully to the legacy opt-in marker instead of
+        # crashing the whole lint stage.
+        logger.warning(
+            "eslint not found for %s — emitting %s (re-run with --rebuild-agent-image "
+            "to install the global eslint that backs the default-config lint)",
+            repo_dir, LINT_NO_CONFIG_MARKER,
+        )
+        return 0, LINT_NO_CONFIG_MARKER, True
     except subprocess.TimeoutExpired:
         logger.warning("ESLint timed out after 300s in %s", repo_dir)
         return (
@@ -282,9 +314,10 @@ def main(
 ) -> None:
     """Run ESLint followed by ``node --check`` on a JavaScript repo.
 
-    Exit code is the worse of the two stages. When the repo has no ESLint
-    configuration, only ``node --check`` runs and the ``LINT_NO_CONFIG``
-    marker is printed to stdout.
+    Exit code is the worse of the two stages. A repo with its own ESLint config is
+    linted with it; a repo with none is linted with the bundled default ruleset
+    (via the global eslint). Only when no eslint binary exists does the runner fall
+    back to printing the ``LINT_NO_CONFIG`` marker.
     """
     repo_dir = _locate_repo_dir(dataset_name, dataset_split, base_dir, repo_or_repo_dir)
     if not os.path.isdir(repo_dir):

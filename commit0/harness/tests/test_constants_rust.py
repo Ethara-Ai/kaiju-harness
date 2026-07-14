@@ -329,6 +329,7 @@ class TestModuleExports:
             "RustRepoInstance",
             "RUST_VERSION",
             "RUST_STUB_MARKER",
+            "RUST_BASE_IMAGE_TAG",
             "RUST_SPLIT",
             "RUST_BASE_BRANCH",
             "RUST_GITIGNORE_ENTRIES",

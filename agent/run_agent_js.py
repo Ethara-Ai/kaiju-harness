@@ -373,6 +373,12 @@ def _run_agent_for_repo_js_impl(
                         f" {shlex.quote(repo_path)}"
                         f" {shlex.quote(test_file)}"
                         f" --branch {shlex.quote(branch)}"
+                        # Pass the pipeline's backend (local_inplace) — parity with
+                        # go/rust. Omitting it defaulted to 'local' (Docker), which
+                        # inside the pipeline container has no docker.sock, so the
+                        # test crashed with a Docker connection error and stage 3
+                        # did zero work.
+                        f" --backend {shlex.quote(backend)}"
                         f" --commit0-config-file {shlex.quote(commit0_config_file)}"
                         f" --timeout 100"
                     )

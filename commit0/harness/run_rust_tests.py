@@ -72,7 +72,14 @@ def main(
 
     target_base = os.path.basename(repo_or_repo_dir.rstrip("/"))
     for example in dataset:
-        repo_name = example["repo"].split("/")[-1]
+        # N21 defensive: a malformed dataset row (missing / empty / non-str repo)
+        # would previously have `repo_name` degenerate silently — mostly benign
+        # because target_base would never match "", but skip explicitly so the
+        # loop can't spend time on obviously bad rows.
+        repo_field = example.get("repo", "")
+        if not isinstance(repo_field, str) or not repo_field:
+            continue
+        repo_name = repo_field.split("/")[-1]
         # Exact basename match only. A substring/endswith test mis-resolves any
         # repo whose name is a substring of another (`serde` vs `serde_json`,
         # `time` vs `runtime`), silently running the wrong base commit/test cmd.
@@ -246,8 +253,8 @@ def main(
         close_logger(logger)
         try:
             local_repo.close()
-        except Exception:  # noqa: BLE001 - best-effort cleanup
-            pass
+        except (OSError, ValueError) as e:
+            logger.debug("local_repo.close() best-effort cleanup failed: %s", e)
 
 
 __all__ = ["main"]

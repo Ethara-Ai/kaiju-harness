@@ -247,6 +247,40 @@ def setup_git_credentials(
     return token
 
 
+# Harness-internal files that must NEVER be committed into a prepared repo. The
+# `.kaiju/entries.json` breadcrumb in particular carries the GOLDEN reference_commit
+# — committing it into the stubbed base leaks the answer to the agent (a cheat) and
+# pollutes the library. Dataset/config artifacts occasionally land in the clone dir
+# too. These are added to `.git/info/exclude` (local, never committed) so a blanket
+# `git add -A`/`git add .` can't stage them, in ANY language's prepare flow.
+_HARNESS_ARTIFACT_EXCLUDES = (
+    ".kaiju/",
+    "entries.json",
+    "*_dataset.json",
+    "dataset_entries*.json",
+    ".commit0_*.yaml",
+    "*.status.json",
+)
+
+
+def _ensure_harness_excludes(repo_dir: Path | str) -> None:
+    """Idempotently add harness-artifact patterns to ``<repo>/.git/info/exclude``."""
+    try:
+        info = Path(repo_dir) / ".git" / "info"
+        if not (Path(repo_dir) / ".git").is_dir():
+            return  # worktree/submodule (.git is a file) — skip, best-effort
+        info.mkdir(parents=True, exist_ok=True)
+        excl = info / "exclude"
+        existing = excl.read_text(encoding="utf-8", errors="replace") if excl.exists() else ""
+        missing = [p for p in _HARNESS_ARTIFACT_EXCLUDES if p not in existing]
+        if missing:
+            with excl.open("a", encoding="utf-8") as fh:
+                fh.write("\n# kaiju harness artifacts — never commit into a repo\n")
+                fh.write("\n".join(missing) + "\n")
+    except OSError:
+        pass  # best-effort; never block a prepare on this
+
+
 def git(
     repo_dir: Path | str,
     *args: str,
@@ -261,9 +295,19 @@ def git(
     ``GIT_TERMINAL_PROMPT=0`` so the process can never deadlock on a
     credential prompt.
 
+    A blanket ``git add -A`` / ``git add .`` first registers the harness-artifact
+    excludes (see :data:`_HARNESS_ARTIFACT_EXCLUDES`) so metadata like the
+    ``.kaiju/entries.json`` breadcrumb (which carries the golden reference_commit)
+    can never be committed into a prepared repo.
+
     Raises ``subprocess.CalledProcessError`` (when ``check=True``) with
     stdout / stderr populated, so callers can inspect ``e.stderr``.
     """
+    if args and args[0] == "add" and any(
+        a in ("-A", "--all", ".") for a in args[1:]
+    ):
+        _ensure_harness_excludes(repo_dir)
+
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     result = subprocess.run(
@@ -300,30 +344,72 @@ def _gh(
     )
 
 
-def verify_token_scopes(token: str | None = None) -> dict:
+_NETWORK_ERROR_PATTERNS = (
+    "network is unreachable",
+    "connection refused",
+    "connection reset",
+    "could not resolve host",
+    "temporary failure",
+    "no route to host",
+    "timeout",
+    "timed out",
+    "i/o timeout",
+    "dial tcp",
+    "tls handshake",
+    "eof",
+    "broken pipe",
+    "context deadline exceeded",
+)
+
+
+def _is_transient_network_error(stderr: str) -> bool:
+    if not stderr:
+        return False
+    low = stderr.lower()
+    return any(pat in low for pat in _NETWORK_ERROR_PATTERNS)
+
+
+def verify_token_scopes(token: str | None = None, max_retries: int = 5) -> dict:
     """Call ``gh api user`` to confirm the token authenticates.
 
     Returns the user JSON dict. Raises ``GitAuthError`` with a diagnostic
     message if the token is invalid, expired, or revoked. This is the
     cheapest available pre-flight check and must run before any fork
     work to avoid burning minutes on doomed pipelines.
+
+    Retries transient network errors (unreachable, refused, timeout, TLS)
+    with exponential backoff so a flaky link doesn't kill the whole pipeline.
     """
+    import time
     token = token or get_github_token()
-    result = _gh(["api", "user"], token=token)
-    if result.returncode != 0:
-        raise GitAuthError(
-            "GitHub token validation failed.\n"
-            f"  gh api user -> exit {result.returncode}\n"
-            f"  stderr: {result.stderr.strip()}\n"
-            "Check that GITHUB_TOKEN is valid and not expired. "
-            "Regenerate at https://github.com/settings/tokens."
-        )
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise GitAuthError(
-            f"gh api user returned non-JSON output: {result.stdout[:200]!r}"
-        ) from exc
+    last_stderr = ""
+    for attempt in range(max_retries):
+        result = _gh(["api", "user"], token=token)
+        if result.returncode == 0:
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                raise GitAuthError(
+                    f"gh api user returned non-JSON output: {result.stdout[:200]!r}"
+                ) from exc
+        last_stderr = result.stderr or ""
+        if not _is_transient_network_error(last_stderr):
+            break
+        if attempt < max_retries - 1:
+            wait = min(30, 2 ** attempt)
+            logger.warning(
+                "Transient network error validating GitHub token (attempt %d/%d): %s; retrying in %ds",
+                attempt + 1, max_retries, last_stderr.strip()[:200], wait,
+            )
+            time.sleep(wait)
+    raise GitAuthError(
+        "GitHub token validation failed.\n"
+        f"  gh api user -> exit {result.returncode} (after {max_retries} attempt(s))\n"
+        f"  stderr: {last_stderr.strip()}\n"
+        "Check that GITHUB_TOKEN is valid and not expired. "
+        "Regenerate at https://github.com/settings/tokens. "
+        "If the error looks network-related, verify VPN/proxy/DNS settings."
+    )
 
 def _get_authenticated_login(token: str | None = None) -> str | None:
     """Return the authenticated user's GitHub login, or None on failure."""

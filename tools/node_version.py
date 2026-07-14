@@ -16,6 +16,8 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+from packaging.version import InvalidVersion, Version
+
 from tools._versioning import (
     DetectionResult,
     NoSignalsError,
@@ -24,6 +26,7 @@ from tools._versioning import (
     normalize_semver_range,
     parse_constraint_str,
     resolve_two_tier,
+    version_sort_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +35,7 @@ __all__ = [
     "collect_signals",
     "detect",
     "detect_from_signals",
+    "resolve_engines_floor",
 ]
 
 
@@ -87,6 +91,26 @@ def _collect_package_engines_volta(repo_root: Path) -> list[Signal]:
     return signals
 
 
+_BARE_PIN_RE = re.compile(r"^(\d+)(?:\.\d+){1,3}$")
+
+
+def _major_only_constraint(cleaned: str):
+    """Parse a version-pin file value, collapsing patch pins to major-only.
+
+    ``.nvmrc`` / ``.node-version`` hold an *exact* runtime pin (e.g. ``22.23``
+    or ``20.10.0``). The harness only selects images by *major* version
+    (``SUPPORTED_NODE_VERSIONS`` is major-only), so a patch pin like ``22.23``
+    must resolve to major ``22`` — not raise a VersionConflictError because
+    ``22.0.0`` is not in ``==22.23.*``. Collapse a bare ``X.Y[.Z]`` pin to
+    ``==X.*`` (still contains the pinned patch, so it never *loosens* a range).
+    Non-pin strings (ranges like ``>=22``) are parsed unchanged.
+    """
+    m = _BARE_PIN_RE.match(cleaned)
+    if m:
+        return parse_constraint_str(m.group(1))  # major only -> "==X.*"
+    return parse_constraint_str(cleaned)
+
+
 def _collect_nvmrc(repo_root: Path) -> Signal | None:
     nvmrc = repo_root / ".nvmrc"
     if not nvmrc.is_file():
@@ -94,7 +118,7 @@ def _collect_nvmrc(repo_root: Path) -> Signal | None:
     raw = nvmrc.read_text(encoding="utf-8", errors="replace").strip()
     # Strip leading "v" / "node-" / etc.
     cleaned = re.sub(r"^(node-|v)", "", raw, flags=re.IGNORECASE)
-    spec = parse_constraint_str(cleaned)
+    spec = _major_only_constraint(cleaned)
     if spec is None:
         # Bare "lts/iron" / "lts/*" — not actionable, skip
         return None
@@ -112,7 +136,7 @@ def _collect_node_version_file(repo_root: Path) -> Signal | None:
         return None
     raw = f.read_text(encoding="utf-8", errors="replace").strip()
     cleaned = re.sub(r"^v", "", raw)
-    spec = parse_constraint_str(cleaned)
+    spec = _major_only_constraint(cleaned)
     if spec is None:
         return None
     return Signal(
@@ -213,6 +237,38 @@ def detect_from_signals(
     """Pure resolver — feed synthetic signal lists in tests."""
     # Node majors compared via ``X.0.0`` so semver ``<21`` excludes 21 cleanly
     return resolve_two_tier(signals, supported, version_template="{}.0.0", pick="min")
+
+
+def resolve_engines_floor(
+    repo_root: Path, supported: Iterable[str]
+) -> str | None:
+    """Best-effort fallback pick when the full resolver hits a conflict.
+
+    Some repos declare mutually-unsatisfiable signals (e.g. an ``engines.node``
+    floor of ``>=22`` plus a stale ``.node-version`` no longer in SUPPORTED).
+    Rather than blindly falling back to ``DEFAULT_NODE_VERSION`` (which for a
+    node>=22 repo mis-targets node20 and breaks the build), pick the *highest*
+    SUPPORTED major that satisfies the declared ``engines.node`` floor. Returns
+    ``None`` if no SUPPORTED version satisfies it (caller falls back to default).
+    """
+    supported_sorted = sorted(supported, key=version_sort_key)
+    signals = collect_signals(repo_root)
+    engines = [
+        s
+        for s in signals
+        if s.source == _PACKAGE_ENGINES_NODE and s.constraint is not None
+    ]
+    if not engines:
+        return None
+    best: str | None = None
+    for v in supported_sorted:
+        try:
+            vobj = Version(f"{v}.0.0")
+        except InvalidVersion:
+            continue
+        if all(s.constraint.contains(vobj, prereleases=False) for s in engines):
+            best = v  # keep the highest satisfying (sorted ascending)
+    return best
 
 
 def detect(

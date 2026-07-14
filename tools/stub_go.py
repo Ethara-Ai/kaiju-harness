@@ -33,7 +33,13 @@ logger = logging.getLogger(__name__)
 GOSTUBBER_DIR = Path(__file__).parent / "gostubber"
 GOSTUBBER_BIN = GOSTUBBER_DIR / "gostubber"
 
-SKIP_DIRS: set[str] = {"vendor", ".git", "testdata", "node_modules"}
+# N2 fix: `internal` was missing. Go's `internal/` is a LANGUAGE-ENFORCED
+# import boundary — a model could drop `internal/x/impl.go` with a full working
+# implementation and the stubber would never touch it, because it's neither
+# `vendor`, `.git`, nor `testdata`. discover_go.py already had `internal` in
+# its SKIP_DIRS; this brings stub_go in line so the stubber and inventory
+# discovery agree on what is scored-source vs excluded-source.
+SKIP_DIRS: set[str] = {"vendor", ".git", "testdata", "node_modules", "internal"}
 
 
 def _ensure_gostubber() -> Path:

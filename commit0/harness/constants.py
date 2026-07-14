@@ -15,6 +15,19 @@ DEFAULT_PYTHON_VERSION = "3.12"
 # Path to the directory containing per-version Dockerfile templates
 DOCKERFILES_DIR = Path(__file__).parent / "dockerfiles"
 
+# N28: centralized exit codes emitted by coreutils `timeout` (used by every
+# language's eval script). Previously every language module (evaluate_rust.py,
+# evaluate_go.py, etc.) inlined these numbers; centralize so a change to the
+# timeout wrapper only edits one place.
+#   124 = command hit the --time limit and got SIGTERM.
+#   137 = 128 + 9 (SIGKILL, sent after --kill-after grace period).
+#   143 = 128 + 15 (SIGTERM surfaced through an intermediate shell wrapper on
+#         some configurations — same root cause as 124).
+TIMEOUT_EXIT_SIGTERM = 124
+TIMEOUT_EXIT_SIGKILL = 137
+TIMEOUT_EXIT_SIGTERM_SHELL = 143
+TIMEOUT_EXIT_CODES = (TIMEOUT_EXIT_SIGTERM, TIMEOUT_EXIT_SIGKILL, TIMEOUT_EXIT_SIGTERM_SHELL)
+
 
 class RepoInstance(BaseModel):
     instance_id: str

@@ -9,6 +9,7 @@ from commit0.harness.docker_build import build_repo_images
 from commit0.harness.health_check_ts import run_ts_health_checks
 from commit0.harness.spec_ts import Commit0TsSpec, make_ts_spec
 from commit0.harness.utils import load_dataset_from_config
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,8 @@ def main(
         logger.warning("No TS repos matched split '%s'. Nothing to build.", split)
         return
 
-    import docker
-
     logger.info("Building %d TS repo image(s) for split '%s'", len(specs), split)
-    client = docker.from_env()
+    client = docker_client()
 
     try:
         # Polymorphic reuse: get_specs_from_dataset() at spec.py:248 detects

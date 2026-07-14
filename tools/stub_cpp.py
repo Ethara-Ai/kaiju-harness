@@ -45,7 +45,7 @@ CPP_EXTENSIONS = {".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".c++", ".h++"}
 
 SKIP_DIRS = {".git", "build", "cmake-build-debug", "cmake-build-release",
              "builddir", "third_party", "3rdparty", "vendor", "extern",
-             "node_modules", ".cache", "test", "tests"}
+             "bundled", "node_modules", ".cache", "test", "tests"}
 
 try:
     import tree_sitter

@@ -102,11 +102,12 @@ class TestGetDockerfileRepo:
         assert '"pandas"' in result
         assert "pip install --no-cache-dir" in result
 
-    def test_with_install_cmd_uv_replaced(self) -> None:
+    def test_with_install_cmd_uses_uv_primary_pip_fallback(self) -> None:
+        # Python installs now prefer uv (fast) with a pip fallback. A `uv pip
+        # install` install_cmd is normalized and run as `uv … || pip …`.
         result = get_dockerfile_repo("img:tag", install_cmd="uv pip install -e .")
-        assert "pip install" in result
-        assert "-e ." in result
-        assert "uv" not in result
+        assert "uv pip install --system -e ." in result
+        assert "pip install --no-cache-dir -e ." in result
 
     def test_with_install_cmd_pip_gets_no_cache(self) -> None:
         result = get_dockerfile_repo("img:tag", install_cmd="pip install -e .")
@@ -131,7 +132,8 @@ class TestGetDockerfileRepo:
         assert '"flask"' in result
         assert "pip install" in result
         assert "-e .[dev]" in result
-        assert "uv" not in result
+        # uv is now the primary python installer (with a pip fallback).
+        assert "uv pip install --system" in result
         assert "pytest pytest-cov coverage pytest-json-report" in result
         assert "WORKDIR /testbed/" in result
 

@@ -976,7 +976,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output",
-        default="dataset_entries.json",
+        default="dataset_entries_rust.json",
         help="Output JSON file (default: dataset_entries.json)",
     )
     parser.add_argument(

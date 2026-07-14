@@ -1257,14 +1257,14 @@ class TestDoctestInventoryRegex:
     """The inventory doctest filter must drop the NO-ITEM-NAME rustdoc form."""
 
     def test_drops_noname_doctest(self):
-        from commit0.harness.evaluate_rust import _DOCTEST_INVENTORY_RE
+        from commit0.harness.evaluate_rust import _DOCTEST_ID_RE
         # rustdoc lists a module-level (`//!`) doctest with no item name.
-        assert _DOCTEST_INVENTORY_RE.search("src/lib.rs - (line 5)")
+        assert _DOCTEST_ID_RE.search("src/lib.rs - (line 5)")
 
     def test_drops_named_doctest(self):
-        from commit0.harness.evaluate_rust import _DOCTEST_INVENTORY_RE
-        assert _DOCTEST_INVENTORY_RE.search("src/lib.rs - foo::bar (line 12)")
+        from commit0.harness.evaluate_rust import _DOCTEST_ID_RE
+        assert _DOCTEST_ID_RE.search("src/lib.rs - foo::bar (line 12)")
 
     def test_keeps_unit_test_id(self):
-        from commit0.harness.evaluate_rust import _DOCTEST_INVENTORY_RE
-        assert not _DOCTEST_INVENTORY_RE.search("queue::tests::add_buffers")
+        from commit0.harness.evaluate_rust import _DOCTEST_ID_RE
+        assert not _DOCTEST_ID_RE.search("queue::tests::add_buffers")

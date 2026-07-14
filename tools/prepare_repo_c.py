@@ -881,6 +881,12 @@ def main() -> None:
         rej_path.write_text(json.dumps(rejected, indent=2))
         logger.info("Wrote %d rejections to %s", len(rejected), rej_path)
 
+    # Exit non-zero when nothing was prepared so batch drivers / CI keying on the
+    # exit code don't treat a total prepare failure as success (parity B4).
+    if not entries:
+        logger.error("Prepared 0 entries — nothing to build. Exiting non-zero.")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

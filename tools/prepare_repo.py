@@ -247,7 +247,7 @@ def create_stubbed_branch(
     full_name: str,
     src_dir: str | None,
     branch_name: str | None = None,
-    removal_mode: str = "combined",
+    removal_mode: str = "all",
 ) -> tuple[str, str]:
     """Create the commit0 branch with stubbed code.
 
@@ -705,6 +705,39 @@ def _write_kaiju_breadcrumb(
 
 
 
+# A quoted, UPPER_SNAKE env-var name in setup.py that toggles OFF native/Cython
+# extensions (e.g. BlackSheep's BLACKSHEEP_NO_EXTENSIONS). Used to keep the base
+# pure-Python — see _detect_extension_skip_env.
+_EXT_SKIP_ENV_RE = re.compile(
+    r"""["']([A-Z][A-Z0-9_]*"""
+    r"""(?:NO_EXTENSION|NO_CYTHON|DISABLE_EXT|SKIP_CYTHON|WITHOUT_CYTHON|PURE_PYTHON)"""
+    r"""[A-Z0-9_]*)["']"""
+)
+
+
+def _detect_extension_skip_env(setup_py: "Path") -> str | None:
+    """Return the env-var name setup.py uses to SKIP native/Cython extensions, if any.
+
+    Cython repos (e.g. BlackSheep) ship pure-Python ``.py`` modules AND compiled
+    ``.pyx``/``.c`` siblings. Building the extensions (a) FAILS when the generated
+    ``.c`` files aren't committed (``<mod>.c: No such file or directory``) and,
+    worse, (b) the compiled ``.so`` SHADOWS the stubbed ``.py`` at import time, so
+    tests would run the ORIGINAL compiled code, not the agent's stub — a silent
+    cheat. Many such repos expose an env switch (for PyPy) to disable extensions
+    and fall back to the ``.py`` modules; setting it makes the stubbed source
+    authoritative and the build succeed.
+    """
+    try:
+        text = setup_py.read_text(errors="replace")
+    except OSError:
+        return None
+    # Only treat it as a skip switch if the file actually builds extensions.
+    if "Extension(" not in text and "ext_modules" not in text and "cythonize" not in text:
+        return None
+    m = _EXT_SKIP_ENV_RE.search(text)
+    return m.group(1) if m else None
+
+
 def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
     """Generate the 'setup' dict for a RepoInstance.
 
@@ -793,6 +826,21 @@ def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
         if req_files:
             setup["install"] = " && ".join(f"pip install -r {f}" for f in req_files)
         setup["pip_packages"] = extract_test_dependencies(repo_dir)
+
+    # Cython/native-extension repos: if setup.py can disable extensions via an env
+    # var, PREFIX the install with it so (1) the build doesn't fail on missing
+    # generated .c files and (2) the compiled .so doesn't shadow the stubbed .py at
+    # import time (which would test the ORIGINAL code — a silent cheat). The prefix
+    # rides on setup["install"], so it applies at BOTH docker-build and eval time.
+    if setup_py.exists() and setup.get("install"):
+        _skip_var = _detect_extension_skip_env(setup_py)
+        if _skip_var:
+            setup["install"] = f"{_skip_var}=1 {setup['install']}"
+            logger.info(
+                "  Native-extension repo: disabling extensions via %s=1 so the "
+                "stubbed pure-Python source is authoritative (not the compiled "
+                "original) and the build doesn't need generated .c files.", _skip_var,
+            )
 
     from commit0.harness.dockerfiles import detect_system_dependencies
 
@@ -1022,7 +1070,7 @@ def prepare_repos(
     org: str = DEFAULT_ORG,
     dry_run: bool = False,
     max_repos: int | None = None,
-    removal_mode: str = "combined",
+    removal_mode: str = "all",
     specs_dir: str = "./specs",
 ) -> list[dict]:
     """Prepare repos for the dataset."""
@@ -1420,8 +1468,11 @@ def main() -> None:
         "--removal-mode",
         type=str,
         choices=["all", "docstring", "combined"],
-        default="combined",
-        help="Stub removal mode: all (replace all bodies), docstring (only functions with docstrings), combined (stub documented + remove undocumented). Default: combined",
+        default="all",
+        help="Stub removal mode: all (replace ALL function bodies with a stub, keep every "
+        "signature — DEFAULT; keeps the base structurally complete), docstring (only "
+        "functions with docstrings), combined (stub documented + REMOVE undocumented "
+        "functions entirely — commit0-paper methodology; can break the base).",
     )
     parser.add_argument(
         "--specs-dir",

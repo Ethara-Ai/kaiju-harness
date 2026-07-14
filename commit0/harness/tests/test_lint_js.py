@@ -93,8 +93,36 @@ class TestYarnEslintInvocation:
 
 
 class TestRunEslintNoConfig:
-    def test_no_config_emits_marker_and_skips(self, tmp_path: Path) -> None:
-        rc, output, skipped = run_eslint(str(tmp_path))
+    def test_no_config_uses_default_ruleset(self, tmp_path: Path) -> None:
+        # Parity with rust/go/python: a repo with no ESLint config is linted with
+        # the bundled default flat config via the GLOBAL eslint (not skipped).
+        captured: dict = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        with patch("commit0.harness.lint_js.subprocess.run", _fake_run):
+            rc, output, skipped = run_eslint(str(tmp_path))
+        assert skipped is False
+        cmd = captured["cmd"]
+        assert cmd[0] == "eslint"  # global, not an npx/pnpm exec prefix
+        assert "--no-config-lookup" in cmd
+        assert "--config" in cmd
+        assert str(lint_js._DEFAULT_ESLINT_CONFIG) in cmd
+
+    def test_no_eslint_binary_degrades_to_marker(self, tmp_path: Path) -> None:
+        # If no eslint binary exists (base image predates the global install),
+        # degrade gracefully to the legacy opt-in marker instead of crashing.
+        def _boom(*a, **k):
+            raise FileNotFoundError("eslint")
+
+        with patch("commit0.harness.lint_js.subprocess.run", _boom):
+            rc, output, skipped = run_eslint(str(tmp_path))
         assert rc == 0
         assert skipped is True
         assert output == LINT_NO_CONFIG_MARKER

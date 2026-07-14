@@ -28,6 +28,7 @@ from commit0.harness.docker_build import (
     _get_image_created_timestamp,
 )
 from commit0.harness.dockerfiles.__init__rust import get_dockerfile_base_rust
+from commit0.harness.constants_rust import RUST_BASE_IMAGE_TAG
 from commit0.harness.spec_rust import get_rust_specs_from_dataset
 
 _logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ def build_base_images_rust(
     mitm_ca_cert: Optional[Path] = None,
 ) -> None:
     """Build the single Rust base image if it does not already exist."""
-    image_name = "commit0.base.rust:latest"
+    image_name = RUST_BASE_IMAGE_TAG
     dockerfile = get_dockerfile_base_rust()
 
     oci_key = image_name.replace(":", "__")
@@ -101,7 +102,7 @@ def get_rust_repo_configs_to_build(
     test_specs = get_rust_specs_from_dataset(dataset, absolute=True)
     image_scripts: dict[str, Any] = {}
 
-    base_image_key = "commit0.base.rust:latest"
+    base_image_key = RUST_BASE_IMAGE_TAG
     try:
         client.images.get(base_image_key)
     except docker.errors.ImageNotFound as e:

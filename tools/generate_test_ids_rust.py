@@ -62,22 +62,86 @@ _CONTAINER_WORKDIR = "/testbed"
 # ---------------------------------------------------------------------------
 
 
+_LIST_SUMMARY_RE = re.compile(r"^\s*(\d+)\s+tests?,\s*(\d+)\s+benchmarks?\s*$")
+
+
 def _parse_cargo_test_list(stdout: str) -> list[str]:
     """Parse `cargo test -- --list` output into test IDs.
 
     Each line of the listing has the format:
         module::path::test_name: test
         module::path::bench_name: bench
+        module::path::example: test
 
-    Only lines ending with `: test` are included (benchmarks are skipped).
+    Only lines ending with ``: test`` are included; benchmarks are dropped
+    (the eval never runs ``-bench``). Cargo status lines (``Running``,
+    ``Compiling``, ``Finished``, blank, dep-graph noise) are ignored.
 
-    Returns test IDs without the `: test` suffix.
+    Also parses the trailing ``N tests, M benchmarks`` summary line, when
+    present, as a soft cross-check: an inventory that doesn't match the
+    reported count is logged as WARNING so a format drift or partial-listing
+    failure is visible instead of silently returning fewer IDs.
+
+    Returns test IDs without the ``: test`` suffix. When zero lines match a
+    non-empty stdout, warns — that combination usually means the output
+    schema changed (libtest → nextest → something else) and the collector
+    needs a fallback.
     """
     test_ids: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
+    bench_count = 0
+    summary_tests: int | None = None
+    summary_benches: int | None = None
+    saw_non_empty = False
+
+    # Skip cargo build/status lines that appear on stderr merged into stdout.
+    _skip_prefixes = (
+        "Running ", "Compiling ", "Finished ", "Warning:", "warning:",
+        "Downloading ", "Downloaded ", "Fresh ", "error:", "error[",
+    )
+
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        saw_non_empty = True
+
+        if line.startswith(_skip_prefixes):
+            continue
+
+        summary_match = _LIST_SUMMARY_RE.match(line)
+        if summary_match:
+            summary_tests = int(summary_match.group(1))
+            summary_benches = int(summary_match.group(2))
+            continue
+
+        # Format: "<name>: test" or "<name>: bench" (also handles trailing ws).
         if line.endswith(": test"):
-            test_ids.append(line[: -len(": test")])
+            test_ids.append(line[: -len(": test")].rstrip())
+            continue
+        if line.endswith(": bench"):
+            bench_count += 1
+            continue
+        # An unrecognized line with content is not fatal (cargo emits misc
+        # notes), but we DON'T silently guess — leave it out and rely on the
+        # summary cross-check below to surface a real format drift.
+
+    if summary_tests is not None and summary_tests != len(test_ids):
+        logger.warning(
+            "cargo test --list: parsed %d test IDs but summary claims %d "
+            "(possible format drift or truncated output)",
+            len(test_ids), summary_tests,
+        )
+    if summary_benches is not None and summary_benches != bench_count:
+        logger.debug(
+            "cargo test --list: parsed %d bench lines but summary claims %d",
+            bench_count, summary_benches,
+        )
+    if saw_non_empty and not test_ids:
+        logger.warning(
+            "cargo test --list: non-empty output but 0 test IDs extracted — "
+            "the listing schema likely changed (e.g. libtest → nextest); "
+            "denominator will collapse to 0. Update _parse_cargo_test_list."
+        )
 
     return test_ids
 
@@ -494,7 +558,9 @@ def main() -> None:
         )
 
         if args.install:
-            installed = install_test_ids(args.output_dir)
+            installed = install_test_ids(
+                args.output_dir, repo_names=list(results.keys()) or None
+            )
             logger.info("Installed %d files into commit0 data directory", installed)
     else:
         parser.error("Provide either input_file or --repo-dir")

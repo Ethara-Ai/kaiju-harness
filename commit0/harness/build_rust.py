@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import docker
+from commit0.harness.docker_utils import docker_client  # context-aware client (B10)
 
 from commit0.harness.docker_build_rust import build_rust_repo_images
 
@@ -62,7 +63,7 @@ def main(
 
     logger.info("Loaded %d Rust repo instance(s) total", len(instances))
 
-    client = docker.from_env()
+    client = docker_client()
     successful, failed = build_rust_repo_images(
         client, instances, max_workers=num_workers, verbose=verbose
     )

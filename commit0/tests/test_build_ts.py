@@ -42,7 +42,7 @@ def _run_main(
             f"{MODULE}.load_dataset_from_config", return_value=list(dataset)
         ) as m_load,
         patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel) as m_spec,
-        patch("docker.from_env", return_value=mock_client),
+        patch("commit0.harness.build_ts.docker_client", return_value=mock_client),
         patch(f"{MODULE}.build_repo_images", return_value=build_return) as m_build,
         patch(f"{MODULE}.run_ts_health_checks", return_value=health_return) as m_health,
         patch(f"{MODULE}.sys") as m_sys,
@@ -107,7 +107,7 @@ class TestBuildExecution:
         with (
             patch(f"{MODULE}.load_dataset_from_config", return_value=list(examples)),
             patch(f"{MODULE}.make_ts_spec", return_value=MagicMock()),
-            patch("docker.from_env", return_value=MagicMock()) as m_docker,
+            patch("commit0.harness.build_ts.docker_client", return_value=MagicMock()) as m_docker,
             patch(f"{MODULE}.build_repo_images", return_value=(["img"], [])),
             patch(f"{MODULE}.run_ts_health_checks", return_value=[]),
             patch(f"{MODULE}.sys"),
@@ -144,7 +144,7 @@ class TestHealthChecks:
                 f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
-            patch("docker.from_env", return_value=MagicMock()),
+            patch("commit0.harness.build_ts.docker_client", return_value=MagicMock()),
             patch(
                 f"{MODULE}.build_repo_images",
                 return_value=([], ["commit0.repo.test.abc:v0"]),
@@ -261,7 +261,7 @@ class TestClientClose:
                 f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
-            patch("docker.from_env", return_value=mock_client),
+            patch("commit0.harness.build_ts.docker_client", return_value=mock_client),
             patch(f"{MODULE}.build_repo_images", return_value=(["img"], [])),
             patch(f"{MODULE}.run_ts_health_checks", return_value=[]),
             patch(f"{MODULE}.sys"),
@@ -283,7 +283,7 @@ class TestClientClose:
                 f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
-            patch("docker.from_env", return_value=mock_client),
+            patch("commit0.harness.build_ts.docker_client", return_value=mock_client),
             patch(
                 f"{MODULE}.build_repo_images",
                 return_value=([], ["commit0.repo.test.abc:v0"]),
@@ -308,7 +308,7 @@ class TestClientClose:
                 f"{MODULE}.load_dataset_from_config", return_value=[_ts_example()]
             ),
             patch(f"{MODULE}.make_ts_spec", return_value=spec_sentinel),
-            patch("docker.from_env", return_value=mock_client),
+            patch("commit0.harness.build_ts.docker_client", return_value=mock_client),
             patch(f"{MODULE}.build_repo_images", side_effect=RuntimeError("boom")),
             patch(f"{MODULE}.run_ts_health_checks", return_value=[]),
             patch(f"{MODULE}.sys"),

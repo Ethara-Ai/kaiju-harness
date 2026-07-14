@@ -1053,6 +1053,7 @@ run_evaluate() {
         --branch "$branch"
         --timeout "$EVAL_TIMEOUT"
         --num-workers 1
+        --backend "$BACKEND"
     )
 
     : "${LOG_BASE:?LOG_BASE must be set before run_evaluate()}"

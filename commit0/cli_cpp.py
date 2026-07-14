@@ -123,6 +123,7 @@ def evaluate(
     branch: Optional[str] = typer.Option(None, help="Evaluate from git branch"),
     timeout: int = typer.Option(7200, help="Evaluation timeout in seconds"),
     num_workers: int = typer.Option(4, help="Parallel evaluation workers"),
+    backend: Optional[str] = typer.Option(None, help="Backend override (local/local_inplace/modal). Defaults to config value."),
 ) -> None:
     """Evaluate C++ patches."""
     from pathlib import Path as _Path
@@ -136,7 +137,7 @@ def evaluate(
             repo_split=config.get("repo_split", "all"),
             base_dir=config.get("base_dir", "repos/cpp"),
             branch=branch,
-            backend=config.get("backend", "local"),
+            backend=backend or config.get("backend", "local"),
             timeout=timeout,
             num_cpus=config.get("num_cpus", 1),
             num_workers=num_workers,

@@ -77,7 +77,7 @@ DEFAULT_ORG = "Zahgon"
 
 _CPP_EXTENSIONS = {".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++", ".h"}
 _SKIP_DIRS = {"build", "cmake-build-debug", "cmake-build-release", "builddir",
-              ".cache", "_deps", "third_party", "vendor", "extern", ".git"}
+              ".cache", "_deps", "third_party", "vendor", "extern", "bundled", ".git"}
 
 
 
@@ -154,7 +154,7 @@ def _build_system_at(d: Path) -> str | None:
 
 _NESTED_BUILD_SKIP = {
     "build", "cmake-build-debug", "cmake-build-release", "builddir",
-    ".cache", "_deps", "third_party", "vendor", "extern", ".git",
+    ".cache", "_deps", "third_party", "vendor", "extern", "bundled", ".git",
     "test", "tests", "unittest", "unittests", "examples", "sample",
     "samples", "benchmark", "benchmarks", "bench", "fuzz", "fuzzing",
     "doc", "docs", ".github", ".vscode", ".idea", "python", "bindings",
@@ -452,7 +452,7 @@ def _collect_cpp_files(directory: Path) -> list[str]:
     CPP_EXTS = {".cpp", ".cc", ".cxx", ".c++",
                 ".hpp", ".hh", ".hxx", ".h++", ".h"}
     SKIP_DIRS = {"build", "cmake-build-debug", "cmake-build-release", "builddir",
-                 ".cache", "_deps", "third_party", "vendor", "extern", ".git", "test", "tests"}
+                 ".cache", "_deps", "third_party", "vendor", "extern", "bundled", ".git", "test", "tests"}
     result = []
     for root, dirs, files in os.walk(directory):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
@@ -634,6 +634,102 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
     return ok, fail
 
 
+_TEST_TARGET_MARKERS = (
+    "test", "example", "bench", "benchmark", "perf-sanity", "perf_sanity",
+    "sanity", "sample", "demo", "fuzz", "tutorial",
+)
+_CMAKE_UTILITY_TARGETS = frozenset({
+    "all", "clean", "depend", "edit_cache", "install", "install/local",
+    "install/strip", "list_install_components", "package", "package_source",
+    "rebuild_cache", "help", "gtest", "gmock", "catch2", "doctest",
+})
+
+
+def _detect_cmake_library_targets(repo_dir: Path) -> list[str]:
+    """Discover CMake library targets, excluding tests/examples/benchmarks/utility.
+
+    Repo-named targets (e.g. Google's ``benchmark`` library) are preserved even
+    when they contain a filter substring, since that's the actual library name.
+    """
+    build_dir = repo_dir / "build"
+    if not build_dir.exists():
+        return []
+    try:
+        result = subprocess.run(
+            ["cmake", "--build", "build", "--target", "help"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    repo_basename = repo_dir.name.lower()
+    repo_variants = {
+        repo_basename,
+        repo_basename.replace("-", "_"),
+        repo_basename.replace("_", "-"),
+        f"lib{repo_basename}",
+        f"lib{repo_basename}".replace("-", "_"),
+    }
+    libs: list[str] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("..."):
+            continue
+        target = line[3:].strip()
+        if not target or " " in target:
+            continue
+        if target.endswith((".o", ".i", ".s", ".obj")):
+            continue
+        if "/" in target or "\\" in target:
+            continue
+        low = target.lower()
+        if low in repo_variants:
+            libs.append(target)
+            continue
+        if target in _CMAKE_UTILITY_TARGETS:
+            continue
+        if any(m in low for m in _TEST_TARGET_MARKERS):
+            continue
+        libs.append(target)
+    return libs
+
+
+def _detect_meson_library_targets(repo_dir: Path) -> list[str]:
+    """Discover Meson library targets, excluding tests/examples/benchmarks."""
+    build_dir = repo_dir / "builddir"
+    if not build_dir.exists():
+        return []
+    try:
+        result = subprocess.run(
+            ["meson", "introspect", "--targets", str(build_dir)],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        targets = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError):
+        return []
+    repo_basename = repo_dir.name.lower()
+    libs: list[str] = []
+    for t in targets:
+        name = t.get("name", "")
+        ttype = t.get("type", "")
+        if ttype not in {"static library", "shared library", "both libraries", "shared module"}:
+            continue
+        low = name.lower()
+        if low == repo_basename:
+            libs.append(name)
+            continue
+        if any(m in low for m in _TEST_TARGET_MARKERS):
+            continue
+        libs.append(name)
+    return libs
+
+
 def verify_compiles(
     repo_dir: Path,
     build_system: str,
@@ -652,10 +748,29 @@ def verify_compiles(
                 cmake_options, reconfigure.stderr[:500],
             )
 
+    library_targets: list[str] = []
     if build_system == "cmake":
-        cmd = ["cmake", "--build", "build", "-j4"]
+        library_targets = _detect_cmake_library_targets(repo_dir)
+        if library_targets:
+            logger.info(
+                "Compile check: building library targets only (excluding tests): %s",
+                library_targets,
+            )
+            cmd = ["cmake", "--build", "build", "-j4", "--target", *library_targets]
+        else:
+            logger.warning("Compile check: could not detect library targets, falling back to full build")
+            cmd = ["cmake", "--build", "build", "-j4"]
     elif build_system == "meson":
-        cmd = ["ninja", "-C", "builddir"]
+        library_targets = _detect_meson_library_targets(repo_dir)
+        if library_targets:
+            logger.info(
+                "Compile check: building meson library targets only: %s",
+                library_targets,
+            )
+            cmd = ["ninja", "-C", "builddir", *library_targets]
+        else:
+            logger.warning("Compile check: could not detect meson library targets, falling back to full build")
+            cmd = ["ninja", "-C", "builddir"]
     elif build_system in ("autotools", "make"):
         cmd = ["make", "-j4"]
     else:
@@ -747,7 +862,7 @@ def save_test_ids(repo_name: str, test_ids: list[str]) -> Path | None:
 _CPP_EXT = (".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".ipp", ".tpp")
 _CPP_SKIP_RE = re.compile(
     r"(^|/)(build|builddir|cmake-build[^/]*|third[_-]?party|external|extern|"
-    r"vendor|deps|_deps|subprojects|googletest|gtest|catch2|Catch2|doctest|"
+    r"bundled|vendor|deps|_deps|subprojects|googletest|gtest|catch2|Catch2|doctest|"
     r"benchmark|examples?|tests?)(/|$)",
     re.I,
 )
@@ -1090,7 +1205,7 @@ _SRC_DIR_CANDIDATES = ("src", "source", "sources", "lib")
 _SRC_DIR_SKIP = {
     "build", "cmake-build-debug", "cmake-build-release", "builddir",
     "test", "tests", "testing", "third_party", "3rdparty", "vendor", "extern",
-    "external", "deps", "examples", "example", "doc", "docs", "benchmark",
+    "bundled", "external", "deps", "examples", "example", "doc", "docs", "benchmark",
     "benchmarks", "bench", "tools", "scripts", ".git",
 }
 
@@ -1174,10 +1289,16 @@ def prepare_cpp_repo(
     if dry_run:
         fork_name = f"{org}/{repo_name}"
         logger.info("[DRY RUN] Would fork %s to %s", upstream, org)
+        # The fork doesn't exist in dry-run (fork_repo was skipped), so clone the
+        # UPSTREAM instead — cloning fork_name here would fail with git exit 128.
+        # clone_repo derives the local dir from the repo's basename, which is
+        # identical for upstream and fork, so repo_dir is unchanged.
+        clone_source = upstream
     else:
         fork_name = fork_repo(upstream, org)
+        clone_source = fork_name
 
-    repo_dir = clone_repo(fork_name, clone_dir)
+    repo_dir = clone_repo(clone_source, clone_dir)
 
     reference_commit = get_head_sha(repo_dir)
     logger.info("Reference commit: %s", reference_commit[:12])

@@ -59,7 +59,7 @@ def _bridge_base_url() -> Optional[str]:
         host = urlparse(base).hostname or ""
     except Exception:  # noqa: BLE001
         return None
-    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local"):
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal", "gateway.docker.internal") or host.endswith(".local") or host.endswith(".internal"):
         return base.rstrip("/")
     return None
 
