@@ -886,30 +886,47 @@ def build_app(provider: ProviderLike | None = None) -> FastAPI:
                 info["accounts"] = prov.snapshot()
         return info
 
+    # C1 audit fix: cache /quota responses briefly so 100+ modules simultaneously
+    # hitting a cap don't stampede the provider snapshot lock. TTL is short (2s)
+    # so recovery.py's next_reset polling still gets fresh data on the next tick.
+    # State is per-app (per-process), never persisted — safe to lose on restart.
+    _quota_cache: dict[str, tuple[float, dict]] = {}
+    _quota_cache_ttl_sec = float(os.environ.get("KAIJU_CC_QUOTA_CACHE_TTL_SEC", "2.0"))
+
     @app.get("/quota")
     async def quota(request: Request):
         """Pipeline introspection: per-account exhaustion + soonest reset.
 
         recovery.py needs the reset time without coordinating a secret, so this
         stays reachable; but the per-account token_prefix is redacted unless the
-        caller is authorized (M1)."""
+        caller is authorized (M1). Responses are cached briefly (KAIJU_CC_QUOTA_CACHE_TTL_SEC,
+        default 2s) so parallel modules querying during a cap don't stampede the
+        provider snapshot lock."""
         _auth = _authorized(request)
+        cache_key = "auth" if _auth else "noauth"
+        _now = time.time()
+        _entry = _quota_cache.get(cache_key)
+        if _entry is not None and (_now - _entry[0]) < _quota_cache_ttl_sec:
+            return _entry[1]
         if isinstance(prov, MultiAccountCredentialProvider):
             snap = prov.snapshot()
             if not _auth:
                 for s in snap:
                     s.pop("token_prefix", None)
-            return {
+            payload = {
                 "multi_account": True,
                 "accounts": snap,
                 "next_reset_at_unix": prov.next_reset_at(),
             }
-        # B5: surface the most recent observed cap reset for the single account
-        # so recovery can wait the real duration instead of a 300s fallback.
-        _reset = getattr(prov, "last_cap_reset_at", None)
-        if _reset is not None and _reset <= time.time():
-            _reset = None  # already reset
-        return {"multi_account": False, "accounts": [], "next_reset_at_unix": _reset}
+        else:
+            # B5: surface the most recent observed cap reset for the single account
+            # so recovery can wait the real duration instead of a 300s fallback.
+            _reset = getattr(prov, "last_cap_reset_at", None)
+            if _reset is not None and _reset <= _now:
+                _reset = None  # already reset
+            payload = {"multi_account": False, "accounts": [], "next_reset_at_unix": _reset}
+        _quota_cache[cache_key] = (_now, payload)
+        return payload
 
     @app.api_route(
         "/{path:path}",

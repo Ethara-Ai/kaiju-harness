@@ -221,7 +221,33 @@ _reap_container() {
   docker ps -aq --filter "name=$pat" 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
   echo "== interrupted: reaped container(s) matching $pat (data safe on host mount) =="
 }
-trap '_reap_container; exit 130' INT TERM HUP
+_cleanup_bridge_if_owned() {
+  # B1 audit fix: stop the bridge THIS run started so it doesn't leak across runs
+  # (was: line 523 told operator to pkill manually — easy to forget in batches).
+  # No-op paths:
+  #   --reuse-bridge — caller opted into shared bridge; other runs may still need it.
+  #   BRIDGE=none    — model uses direct host creds (vertex/bedrock/gemini), no bridge.
+  # For cc: use the dedicated stop script (tears down monitor + bridge cleanly).
+  # For codex: reuse _force_free_port (bare-python bridge has no stop script;
+  #   port free is sufficient because bridge is single-process, no watchdog).
+  [[ "${REUSE_BRIDGE:-0}" == "1" ]] && return 0
+  [[ "${BRIDGE:-none}" == "none" ]] && return 0
+  case "$BRIDGE" in
+    codex)
+      [[ -n "${BPORT:-}" ]] && _force_free_port "$BPORT" >/dev/null 2>&1 || true
+      echo "== codex bridge stopped (port $BPORT freed) =="
+      ;;
+    cc)
+      KAIJU_CC_BRIDGE_HOST=0.0.0.0 bash scripts/claude_code_bridge.sh stop >/dev/null 2>&1 || true
+      echo "== claude_code bridge stopped =="
+      ;;
+  esac
+}
+# INT/TERM/HUP: reap container + stop bridge, exit with signal-equivalent code.
+trap '_reap_container; _cleanup_bridge_if_owned; exit 130' INT TERM HUP
+# EXIT: always stop bridge (covers normal + error exit paths). Idempotent with
+# the interrupt trap because both bridge stop paths tolerate re-invocation.
+trap '_cleanup_bridge_if_owned' EXIT
 
 # --iter is sugar: inject --max-iteration only if the pipeline bucket doesn't already set one.
 case " $PIPELINE_ARGS " in
@@ -349,10 +375,36 @@ _force_free_port() {  # $1=port
   sleep 0.5
 }
 
+# B2 audit fix: verify a REUSED bridge actually accepts OUR secret before proceeding.
+# Without this, a stale bridge (started with a different KAIJU_*_BRIDGE_SECRET,
+# e.g. from a prior operator's session) passes /healthz but rejects every request
+# from our container with 401 — surfacing only at model-preflight time (~120s in).
+# Sends a POST with our secret; expects NOT-401 (400/404/422/etc all mean auth OK).
+_bridge_secret_matches() {  # $1=port, $2=bridge kind (cc|codex), $3=secret
+  local port="$1" kind="$2" secret="$3" path code
+  case "$kind" in
+    cc)    path="/v1/messages" ;;
+    codex) path="/v1/responses" ;;
+    *)     return 1 ;;
+  esac
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST \
+    -H "Authorization: Bearer $secret" \
+    -H "Content-Type: application/json" \
+    -d '{}' \
+    "http://127.0.0.1:$port$path" 2>/dev/null) || return 1
+  # 401 = auth failed. Any other response (including 400/422 malformed body) means
+  # the bridge accepted our secret and is proceeding to validate the request body.
+  # 000 = no response / connection refused — treat as mismatch to force restart.
+  [[ "$code" != "401" && "$code" != "000" ]]
+}
+
 if [ "$BRIDGE" = "codex" ]; then
   # Reuse only if the caller opted in AND the bridge actually answers /healthz.
-  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT"; then
-    echo "   reusing healthy codex bridge on $BPORT (--reuse-bridge)"
+  # B2 audit fix: reuse ONLY if bridge answers /healthz AND accepts our secret.
+  # A stale bridge (different secret from prior operator's session) passes /healthz
+  # but 401s our requests — detect that now, not 120s later at model preflight.
+  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT" && _bridge_secret_matches "$BPORT" "codex" "$KAIJU_CODEX_BRIDGE_SECRET"; then
+    echo "   reusing healthy codex bridge on $BPORT (--reuse-bridge; secret matches)"
   else
     # Default path (or --reuse-bridge but the bridge is unhealthy): (re)start so
     # the bridge uses OUR secret — a stale one may hold a different secret the
@@ -368,8 +420,8 @@ if [ "$BRIDGE" = "codex" ]; then
   fi
   _bridge_healthy "$BPORT" && echo "   codex bridge healthy on $BPORT (secret matches container)" || { echo "ERROR: bridge not answering /healthz on $BPORT (see /tmp/codex_bridge.log)"; exit 1; }
 elif [ "$BRIDGE" = "cc" ]; then
-  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT"; then
-    echo "   reusing healthy cc bridge on $BPORT (--reuse-bridge)"
+  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT" && _bridge_secret_matches "$BPORT" "cc" "$KAIJU_CC_BRIDGE_SECRET"; then
+    echo "   reusing healthy cc bridge on $BPORT (--reuse-bridge; secret matches)"
   else
     if lsof -i :$BPORT 2>/dev/null | grep -q LISTEN; then
       echo "   replacing bridge on $BPORT (forced restart or failed health check)"
@@ -520,4 +572,8 @@ else:
 print("   turns.jsonl files:", len(glob.glob(f"outputs/{uuid}/runs/*/agent/run_1/**/turns.jsonl", recursive=True)))
 print("   ATIF trajectory files:", len(glob.glob(f"Harbor_Data/Trajectory/**/*{split}*/trajectory.json", recursive=True)))
 PY
-echo "== done. outputs/$UUID  (bridge left running; 'pkill -f openai_codex' or 'bash scripts/claude_code_bridge.sh stop') =="
+if [[ "${REUSE_BRIDGE:-0}" == "1" ]]; then
+  echo "== done. outputs/$UUID  (bridge LEFT RUNNING per --reuse-bridge; stop manually with 'bash scripts/claude_code_bridge.sh stop' or 'pkill -f openai_codex') =="
+else
+  echo "== done. outputs/$UUID  (bridge cleanup via EXIT trap; use --reuse-bridge to keep it alive for subsequent runs) =="
+fi

@@ -6,6 +6,7 @@ import logging
 from aider.coders import Coder
 from aider.models import Model
 from agent.guarded_io import GuardedInputOutput
+from agent._source_pool import derive_source_pool
 import re
 import os
 from typing import Any, Optional
@@ -848,6 +849,13 @@ class AiderAgents(Agents):
         spec_summary_max_tokens: int = 4000,
         test_files_readonly: Optional[list[str]] = None,
         inject_test_files_readonly: bool = True,
+        # Fix 1 audit: extra read-scope for aider's "Add file to chat?" prompts.
+        # `fnames` restricts EDITS to the target stub; this param widens the READ
+        # scope so aider can pull sibling source files (util.rs, header.h, .d.ts,
+        # etc.) needed for cross-module signatures/imports. Test files stay blocked
+        # via protected_paths (takes precedence over allowed_add_paths). When None,
+        # `derive_source_pool(fnames)` auto-computes the pool from fnames[0]'s tree.
+        allowed_add_paths_extra: Optional[list[str]] = None,
     ) -> AgentReturn:
         """Start aider agent"""
         if test_cmd:
@@ -879,6 +887,10 @@ class AiderAgents(Agents):
             handle_logging("httpx", log_file)
             handle_logging("backoff", log_file)
 
+            # Fix 1 audit: auto-derive read-scope pool if runner didn't pass one.
+            # Runners can override by passing an explicit list to run().
+            if allowed_add_paths_extra is None:
+                allowed_add_paths_extra = derive_source_pool(fnames)
             io = GuardedInputOutput(
                 yes=True,
                 input_history_file=input_history_file,
@@ -889,7 +901,7 @@ class AiderAgents(Agents):
                 # prompt for a path outside fnames is refused, so a run stays
                 # scoped to its module. Test files stay hard-blocked via
                 # protected_paths (which takes precedence over the allowlist).
-                allowed_add_paths=fnames,
+                allowed_add_paths=list(fnames) + list(allowed_add_paths_extra or []),
                 protected_paths=set(test_files_readonly or []),
             )
             io.llm_history_file = str(log_dir / "llm_history.txt")

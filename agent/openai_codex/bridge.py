@@ -340,8 +340,20 @@ def build_app(provider=None) -> FastAPI:
     CredentialProvider reading ~/.codex/auth.json."""
     provider = provider or _default_provider()
     app = FastAPI(title="codex-bridge")
-    # Long-lived async client with generous timeouts (reasoning turns are slow).
-    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=1800.0, write=60.0, pool=15.0))
+    # Long-lived async client tuned for 100+ parallel modules (B3 audit fix).
+    # - max_connections=200: comfortably above 100 concurrent modules;
+    #   default 100 was tight for large batches (see docs/BRIDGE_QC.md).
+    # - max_keepalive_connections=100: keep sockets warm for burst re-use.
+    # - pool timeout 60s (was 15s): under contention, brief waits are safer than
+    #   failing the request. Read timeout stays 1800s for reasoning turns.
+    _pool_limits = httpx.Limits(
+        max_connections=int(os.environ.get("KAIJU_CODEX_HTTP_MAX_CONN", "200")),
+        max_keepalive_connections=int(os.environ.get("KAIJU_CODEX_HTTP_MAX_KEEPALIVE", "100")),
+    )
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=15.0, read=1800.0, write=60.0, pool=60.0),
+        limits=_pool_limits,
+    )
 
     if not _bridge_secret():
         _LOG.warning(

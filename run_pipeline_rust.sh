@@ -78,6 +78,10 @@ STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
 GO_CRAZY="false"
+# B5 audit fix: tunable model-preflight probe timeout (default 120s). Bump to
+# 300+ for slow-start bridges (multi-account pool, cold Docker network) so
+# preflight doesn't abort the whole run on transient upstream slowness.
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-120}"
 STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
@@ -156,6 +160,7 @@ while [[ $# -gt 0 ]]; do
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --go-crazy) GO_CRAZY="true"; shift ;;
+        --preflight-timeout) [[ $# -lt 2 ]] && { echo "Error: --preflight-timeout requires a value (seconds)"; exit 1; }; PROBE_TIMEOUT="$2"; shift 2 ;;
         --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --no-unit-tests-info) USE_UNIT_TESTS_INFO="false"; shift ;;
@@ -192,6 +197,7 @@ done
 
 # Propagate strict-blocking toggle (--go-crazy) to all subprocesses.
 export KAIJU_GO_CRAZY="$GO_CRAZY"
+export PROBE_TIMEOUT
 
 if [[ -z "$MODEL_ARG" ]]; then
     echo "Error: --model is required"
@@ -1757,6 +1763,7 @@ init_results() {
     RESULTS_JSON=$(jq -n \
         --arg model "$MODEL_SHORT" \
         --arg model_short "$MODEL_SHORT" \
+        --arg model_name "$MODEL_NAME" \
         --arg branch "$BRANCH_NAME" \
         --arg backend "$BACKEND" \
         --arg repo_split "$REPO_SPLIT" \
@@ -1769,6 +1776,7 @@ init_results() {
         '{
             model: $model,
             model_short: $model_short,
+            model_name: $model_name,
             branch: $branch,
             backend: $backend,
             repo_split: $repo_split,
