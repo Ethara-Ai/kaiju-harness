@@ -71,6 +71,24 @@ resolve_model() {
             CACHE_PROMPTS="false"
             return 0
             ;;
+        gpt56sol|gpt-5.6-sol)
+            MODEL_NAME="openai/gpt-5.6-sol"
+            MODEL_SHORT="gpt-5.6-sol"
+            CACHE_PROMPTS="false"
+            return 0
+            ;;
+        gpt56terra|gpt-5.6-terra)
+            MODEL_NAME="openai/gpt-5.6-terra"
+            MODEL_SHORT="gpt-5.6-terra"
+            CACHE_PROMPTS="false"
+            return 0
+            ;;
+        gpt56luna|gpt-5.6-luna)
+            MODEL_NAME="openai/gpt-5.6-luna"
+            MODEL_SHORT="gpt-5.6-luna"
+            CACHE_PROMPTS="false"
+            return 0
+            ;;
         gemini|gemini31|gemini-3.1-pro)
             MODEL_NAME="vertex_ai/gemini-3.1-pro-preview"
             MODEL_SHORT="gemini-3.1-pro"

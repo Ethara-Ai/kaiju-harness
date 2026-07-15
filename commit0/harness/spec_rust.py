@@ -82,6 +82,7 @@ class RustSpec(Spec):
             # may still resolve at build/test time), but we record the failure to
             # a log so it's diagnosable rather than silently swallowed by `|| true`.
             "timeout 600 cargo fetch 2>cargo_fetch.log || echo 'CARGO_FETCH_FAILED (setup-time; see cargo_fetch.log)' >> cargo_fetch.log",
+            'cargo metadata --format-version 1 --offline >/dev/null 2>&1 || (echo "INSTALL_VERIFICATION_FAILED: cargo metadata cannot resolve deps from local cache (cargo fetch likely failed; see cargo_fetch.log)" >&2; exit 1)',
         ]
 
     def make_eval_script_list(self) -> list[str]:

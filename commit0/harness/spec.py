@@ -160,6 +160,7 @@ class Commit0Spec(Spec):
             "git submodule update --init --recursive 2>/dev/null || true",
             "git remote remove origin",
             f"git reset --hard {base_commit}",
+            'command -v python >/dev/null 2>&1 && command -v pip >/dev/null 2>&1 && python --version >/dev/null 2>&1 && pip --version >/dev/null 2>&1 || (echo "INSTALL_VERIFICATION_FAILED: python or pip executable missing from image (Dockerfile-layer install failed silently)" >&2; exit 1)',
         ]
         return setup_commands
 

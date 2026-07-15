@@ -87,6 +87,22 @@ class Commit0JsSpec(Spec):
             "git submodule update --init --recursive 2>/dev/null || true",
             "rm -rf node_modules .nyc_output coverage dist build .next .turbo .cache",
             self._install_cmd(),
+            # Post-install verification (mirrors spec_ts.py): catches silent partial
+            # installs. Yarn Berry PnP mode leaves NO node_modules dir (only .pnp.cjs);
+            # --ignore-scripts can skip lockfile write on some yarn/pnpm builds. Without
+            # this, node_modules is silently absent at agent-run time producing cryptic
+            # 'findPackageLocation' / 'Cannot find module' errors that look like agent
+            # bugs but are harness bugs.
+            (
+                'if [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ]; then '
+                'echo "OK: node_modules populated"; '
+                'elif [ -f .pnp.cjs ]; then '
+                'echo "OK: yarn berry PnP mode (.pnp.cjs present)"; '
+                'else '
+                'echo "INSTALL_VERIFICATION_FAILED: no node_modules and no .pnp.cjs after install" >&2; '
+                'exit 1; '
+                'fi'
+            ),
             f"git reset --hard {base_sha}",
         ]
 

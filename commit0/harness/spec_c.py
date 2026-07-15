@@ -114,6 +114,16 @@ class Commit0CSpec(Spec):
         )
         setup_commands.append(f"git reset --hard {base_commit}")
         setup_commands.append("rm -rf build")
+
+        # F3 install verification (parity with 6 other langs). The CMAKE_SETUP_FAILED
+        # gate above catches BUILD failures; this gate catches missing BASE TOOLS
+        # (cmake, ninja, gcc) so image build fails loudly with the standard sentinel
+        # instead of downstream evals silently failing. Grepable across all langs.
+        setup_commands.append(
+            'if ! (command -v cmake && command -v ninja && command -v gcc) >/dev/null 2>&1; then '
+            'echo "INSTALL_VERIFICATION_FAILED: required C tools (cmake/ninja/gcc) missing from base image" >&2; '
+            'exit 1; fi'
+        )
         return setup_commands
 
     def make_eval_script_list(self) -> list[str]:

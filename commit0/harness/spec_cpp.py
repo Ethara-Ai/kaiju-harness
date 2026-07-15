@@ -96,6 +96,25 @@ class CppSpec(Spec):
             scripts.append(f"{configure_cmd} 2>/dev/null || true")
         scripts.append(f"{build_cmd} 2>/dev/null || true")
 
+        # F3 install verification: pre-build is best-effort (silenced) since
+        # eval.sh runs the real configure+build with proper error capture. But
+        # if BASE TOOLS are missing (cmake/ninja/make/gcc/g++), the base image
+        # itself is broken and every downstream eval would fail cryptically. Verify
+        # tools are on PATH so a missing-tool bug fails image build LOUDLY here
+        # instead of silently at eval time. INSTALL_VERIFICATION_FAILED is the
+        # grepable sentinel used across all languages for build-time install checks.
+        tool_probe = {
+            "cmake": "command -v cmake",
+            "meson": "command -v ninja && command -v meson",
+            "autotools": "command -v make && command -v autoconf",
+            "make": "command -v make",
+        }.get(build_system, "command -v make")
+        scripts.append(
+            f'if ! ({tool_probe}) >/dev/null 2>&1; then '
+            f'echo "INSTALL_VERIFICATION_FAILED: required {build_system} tools missing from base image" >&2; '
+            'exit 1; fi'
+        )
+
         return scripts
 
     def make_eval_script_list(self) -> list[str]:

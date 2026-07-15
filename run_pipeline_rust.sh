@@ -1790,6 +1790,23 @@ init_results() {
 }
 
 save_results() {
+    # G8 audit fix: best-effort warnings aggregation. Scans LOG_BASE for grep-able
+    # warning markers (F2/F4/INSTALL_VERIFICATION_FAILED/PREP_WARN:*) and merges
+    # a histogram into RESULTS_JSON.warnings_by_type so operators can spot silent
+    # failures in a large batch without per-repo log grep. Non-fatal: any failure
+    # (missing venv, jq error, timeout) leaves RESULTS_JSON untouched.
+    if [[ -n "${LOG_BASE:-}" ]] && [[ -x "${VENV_PYTHON:-python3}" ]]; then
+        local _wagg
+        _wagg=$("${VENV_PYTHON:-python3}" -m agent.warnings_aggregator "$LOG_BASE" 2>/dev/null || echo '')
+        if [[ -n "$_wagg" ]]; then
+            local _merged
+            _merged=$(echo "$RESULTS_JSON" | jq --argjson w "$_wagg" \
+                '. + {warnings_by_type: ($w.counts // {}), warning_scan_stats: {files_scanned: ($w.files_scanned // 0), bytes_scanned: ($w.bytes_scanned // 0)}}' 2>/dev/null || echo '')
+            if [[ -n "$_merged" ]]; then
+                RESULTS_JSON="$_merged"
+            fi
+        fi
+    fi
     mkdir -p "$(dirname "$PIPELINE_LOG")"
     # C8: atomic write. `> "$PIPELINE_LOG"` truncates the file BEFORE jq produces
     # output, so a killed/failed jq (or invalid RESULTS_JSON) leaves a 0-byte or

@@ -338,6 +338,57 @@ exec > >(tee -a "$LOG_BASE/pipeline.log") 2>&1
 # Preflight Checks
 # ============================================================
 
+
+# Fix 3 audit: defensive node_modules check for TS repos. spec_ts.py runs
+# `install_cmd --ignore-scripts` at image build time PLUS a post-install
+# verification (Fix 2: checks node_modules populated OR .pnp.cjs present for
+# Yarn Berry PnP mode). But image-cache staleness OR a volume mount masking
+# node_modules can leave it absent at agent-run time despite a successful build.
+# Detect + auto-heal by re-running the correct install command based on the
+# committed lockfile. Hard-fail only if the heal itself fails, so operators
+# see a real error instead of cryptic tsc/vitest "Cannot find module" traces.
+_ensure_node_modules_ready_ts() {
+    local repos_list="$1"
+    [[ -z "$repos_list" ]] && return 0
+    local repo repo_dir install_cmd healed=0 hard_fail=0
+    while IFS= read -r repo; do
+        [[ -z "$repo" ]] && continue
+        repo_dir="${REPO_BASE_TS}/${repo}"
+        [[ -d "$repo_dir" ]] || continue
+        if [[ -d "${repo_dir}/node_modules" ]] && [[ -n "$(ls -A "${repo_dir}/node_modules" 2>/dev/null || true)" ]]; then
+            continue
+        fi
+        [[ -f "${repo_dir}/.pnp.cjs" ]] && continue
+        echo "WARN: node_modules missing for ${repo}; attempting defensive re-install"
+        if [[ -f "${repo_dir}/yarn.lock" ]]; then
+            install_cmd="yarn install --immutable --ignore-scripts"
+        elif [[ -f "${repo_dir}/pnpm-lock.yaml" ]]; then
+            install_cmd="pnpm install --frozen-lockfile --ignore-scripts"
+        elif [[ -f "${repo_dir}/package-lock.json" ]]; then
+            install_cmd="npm ci --ignore-scripts"
+        else
+            install_cmd="npm install --ignore-scripts"
+        fi
+        if ( cd "$repo_dir" && bash -c "$install_cmd" ) >/dev/null 2>&1; then
+            if [[ -d "${repo_dir}/node_modules" && -n "$(ls -A "${repo_dir}/node_modules" 2>/dev/null || true)" ]] \
+                || [[ -f "${repo_dir}/.pnp.cjs" ]]; then
+                echo "OK: healed ${repo} via '${install_cmd}'"
+                healed=$((healed + 1))
+                continue
+            fi
+        fi
+        echo "ERROR: node_modules missing for ${repo} and '${install_cmd}' failed to restore it"
+        echo "       (rebuild the repo image with --rebuild, or verify dataset's setup.install command)"
+        hard_fail=$((hard_fail + 1))
+    done <<< "$repos_list"
+    [[ $healed -gt 0 ]] && echo "Info: defensively re-installed node_modules for $healed repo(s)"
+    if [[ $hard_fail -gt 0 ]]; then
+        echo "Preflight: $hard_fail repo(s) still missing node_modules after heal attempt"
+        return 1
+    fi
+    return 0
+}
+
 preflight() {
     local errors=0
 
@@ -418,6 +469,10 @@ for item in data:
                 fi
             done <<< "$repos_in_dataset"
         fi
+    fi
+
+    if [[ -n "$repos_in_dataset" ]]; then
+        _ensure_node_modules_ready_ts "$repos_in_dataset" || errors=$((errors + 1))
     fi
 
     if [[ "$errors" -gt 0 ]]; then
@@ -1376,6 +1431,23 @@ init_results() {
 }
 
 save_results() {
+    # G8 audit fix: best-effort warnings aggregation. Scans LOG_BASE for grep-able
+    # warning markers (F2/F4/INSTALL_VERIFICATION_FAILED/PREP_WARN:*) and merges
+    # a histogram into RESULTS_JSON.warnings_by_type so operators can spot silent
+    # failures in a large batch without per-repo log grep. Non-fatal: any failure
+    # (missing venv, jq error, timeout) leaves RESULTS_JSON untouched.
+    if [[ -n "${LOG_BASE:-}" ]] && [[ -x "${VENV_PYTHON:-python3}" ]]; then
+        local _wagg
+        _wagg=$("${VENV_PYTHON:-python3}" -m agent.warnings_aggregator "$LOG_BASE" 2>/dev/null || echo '')
+        if [[ -n "$_wagg" ]]; then
+            local _merged
+            _merged=$(echo "$RESULTS_JSON" | jq --argjson w "$_wagg" \
+                '. + {warnings_by_type: ($w.counts // {}), warning_scan_stats: {files_scanned: ($w.files_scanned // 0), bytes_scanned: ($w.bytes_scanned // 0)}}' 2>/dev/null || echo '')
+            if [[ -n "$_merged" ]]; then
+                RESULTS_JSON="$_merged"
+            fi
+        fi
+    fi
     mkdir -p "$(dirname "$PIPELINE_LOG")"
     echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
 }

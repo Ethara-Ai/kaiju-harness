@@ -117,6 +117,22 @@ class Commit0TsSpec(Spec):
         steps.extend(
             [
                 f"{install_cmd} --ignore-scripts || {install_cmd} --ignore-scripts || (echo 'INSTALL_FAILED' >&2; exit 1)",
+                # Post-install verification: catches silent partial installs.
+                # Yarn Berry PnP mode leaves NO node_modules dir (only .pnp.cjs);
+                # --ignore-scripts can skip lockfile write on some yarn/pnpm builds.
+                # Without this, node_modules is silently absent at agent-run time,
+                # producing cryptic 'findPackageLocation' / 'Cannot find module' errors
+                # from tsc / vitest / aider that look like agent bugs but are harness bugs.
+                (
+                    'if [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ]; then '
+                    'echo "OK: node_modules populated"; '
+                    'elif [ -f .pnp.cjs ]; then '
+                    'echo "OK: yarn berry PnP mode (.pnp.cjs present)"; '
+                    'else '
+                    'echo "INSTALL_VERIFICATION_FAILED: no node_modules and no .pnp.cjs after install" >&2; '
+                    'exit 1; '
+                    'fi'
+                ),
                 f"{prefix}{' --yes' if prefix == 'npx' else ''} node-gyp rebuild 2>/dev/null || true",
                 f"git reset --hard {shlex.quote(base_commit)}",
             ]

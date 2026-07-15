@@ -94,6 +94,12 @@ class StubReport:
     libclang_functions_stubbed: int = 0
     treesitter_functions_stubbed: int = 0
     treesitter_fallback_used: bool = False
+    # G6 audit fix: per-file counter for silent no-op detection. A file with
+    # declared functions but zero stubs applied (all skipped for benign reasons
+    # OR silently dropped due to parser edge cases) is a real correctness risk
+    # that the aggregate function_decl_count / functions_stubbed can mask.
+    # Surfaced at caller level so prep can WARN with grep-able marker.
+    files_with_decls_but_no_stubs: int = 0
 
     def skip(self, reason: str, name: str) -> None:
         self.functions_skipped.setdefault(reason, []).append(name)
@@ -106,6 +112,7 @@ class StubReport:
             "libclang_functions_stubbed": self.libclang_functions_stubbed,
             "treesitter_functions_stubbed": self.treesitter_functions_stubbed,
             "treesitter_fallback_used": self.treesitter_fallback_used,
+            "files_with_decls_but_no_stubs": self.files_with_decls_but_no_stubs,
             "function_decl_count": self.function_decl_count,
             "functions_skipped": self.functions_skipped,
             "compile_commands_loaded": self.compile_commands_loaded,
@@ -445,6 +452,9 @@ def stub_file(
 
     # Collect targets sorted by offset DESCENDING so rewrites don't shift later ones.
     targets: List[Tuple[int, int, str]] = []  # (open, close, func_name)
+    # G6 audit fix: track declarations LOCAL to this file so we can detect
+    # "has functions but produced zero stubs" silent no-op at end-of-file.
+    file_local_decls = 0
     for cursor in tu.cursor.walk_preorder():
         if cursor.kind != cindex.CursorKind.FUNCTION_DECL:
             continue
@@ -453,6 +463,7 @@ def stub_file(
         if file_attr is None or os.path.realpath(file_attr.name) != src_abs:
             continue
         report.function_decl_count += 1
+        file_local_decls += 1
 
         skip_reason = _function_should_skip(
             cursor, cindex, str(source_path), keep_re, skip_dir_re, report
@@ -489,6 +500,12 @@ def stub_file(
         targets.append((open_brace, close_brace, cursor.spelling or "<anonymous>"))
 
     if not targets:
+        if file_local_decls > 0:
+            # Grep-able marker for observability: this file HAD functions but
+            # produced no stubs. Legitimate causes exist (all functions already
+            # stubbed, all bodies in headers, all excluded by keep_re) — hence
+            # WARNING not ERROR — but the counter makes aggregation possible.
+            report.files_with_decls_but_no_stubs += 1
         return False
 
     # Apply rewrites from highest offset to lowest.
@@ -549,6 +566,21 @@ def _ts_indent(source: bytes, open_byte: int) -> str:
     prefix = source[line_start:open_byte].decode("utf-8", errors="replace")
     m = re.match(r"[ \t]*", prefix)
     return m.group(0) if m else ""
+
+
+def _count_error_nodes(node: Any) -> int:
+    """Recursively count ERROR and MISSING nodes in a tree-sitter tree.
+
+    Used by the post-write corruption gate in ``_stub_file_treesitter`` (mirrors
+    ``tools/stub_cpp.py:_count_error_nodes``). A NET INCREASE from old to new
+    parse tree proves at least one replacement corrupted the file; the caller
+    reverts rather than persist broken output that downstream compilers would
+    reject with cryptic errors.
+    """
+    acc = 1 if (node.type == "ERROR" or node.is_missing) else 0
+    for c in node.children:
+        acc += _count_error_nodes(c)
+    return acc
 
 
 def _stub_file_treesitter(
@@ -614,6 +646,17 @@ def _stub_file_treesitter(
     new_bytes = bytes(result)
     if inject_include and STUB_INCLUDE_LINE.encode() not in new_bytes:
         new_bytes = (STUB_INCLUDE_LINE + "\n").encode() + new_bytes
+
+    new_tree = parser.parse(new_bytes)
+    old_err = _count_error_nodes(tree.root_node)
+    new_err = _count_error_nodes(new_tree.root_node)
+    if new_err > old_err:
+        logger.warning(
+            "  %s: stubbing introduced parse errors (%d -> %d); reverting file",
+            source_path, old_err, new_err,
+        )
+        report.skip("corruption_reverted", str(source_path))
+        return 0
 
     source_path.write_bytes(new_bytes)
     return len(targets)

@@ -190,6 +190,7 @@ class Commit0JavaSpec(Spec):
             *self._wrapper_preamble(),
             *self._toolchains_xml_commands(),
             self._get_dependency_install_cmd(),
+            'find ~/.m2/repository ~/.gradle/caches -name "*.jar" 2>/dev/null | head -1 | grep -q . || (echo "INSTALL_VERIFICATION_FAILED: neither ~/.m2 nor ~/.gradle contains any .jar after dependency resolve (network/registry issue)" >&2; exit 1)',
         ]
 
     @staticmethod

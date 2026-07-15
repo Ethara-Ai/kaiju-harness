@@ -24,6 +24,7 @@ import os
 import hashlib
 import re
 import shutil
+import time
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -286,12 +287,12 @@ def _generate_pdf(page: Any, url: str, output_dir: str) -> str:
     pdf_path = ""
     try:
         try:
-            response = page.goto(url, wait_until="networkidle", timeout=30000)
+            response = page.goto(url, wait_until="networkidle", timeout=_PLAYWRIGHT_NETWORKIDLE_TIMEOUT_MS)
         except Exception:
             logger.debug(
                 "  networkidle timeout for %s, retrying with domcontentloaded", url
             )
-            response = page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=_PLAYWRIGHT_DOMCONTENT_TIMEOUT_MS)
 
         if response and response.status >= 400:
             logger.debug(
@@ -317,6 +318,121 @@ def _generate_pdf(page: Any, url: str, output_dir: str) -> str:
     return pdf_path
 
 
+# F1/F5 audit: shared transient-retry policy. `_is_transient_scrape_error` runs
+# BEFORE any README fallback so a single-attempt HTTP 429 / 5xx / connect-timeout
+# on a large batch doesn't silently degrade the spec (measured ~30-40% degradation
+# at 1-2% transient rate). Parse errors (PDF corruption, HTML decode, exhausted
+# generator) are NOT retryable and short-circuit to fallback immediately. Tunable
+# via env for old-repo backends with slow docs mirrors.
+_SCRAPE_MAX_RETRIES = int(os.environ.get("KAIJU_SCRAPE_MAX_RETRIES", "3"))
+_SCRAPE_INITIAL_BACKOFF_SEC = float(os.environ.get("KAIJU_SCRAPE_INITIAL_BACKOFF_SEC", "2.0"))
+_SCRAPE_MAX_BACKOFF_SEC = float(os.environ.get("KAIJU_SCRAPE_MAX_BACKOFF_SEC", "30.0"))
+_SCRAPE_TRANSIENT_HTTP_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529})
+# Substrings that identify TRANSIENT network conditions in exception messages.
+# Kept narrow so ordinary parse-error text ("invalid", "malformed", etc.) does not
+# false-positive into an infinite retry loop.
+_SCRAPE_TRANSIENT_MSG_MARKERS: tuple[str, ...] = (
+    "timeout", "timed out", "timeouterror",
+    "connection reset", "connection refused", "connection aborted",
+    "remote end closed", "read timed out", "dial tcp",
+    "temporary failure in name resolution", "getaddrinfo",
+    "maxretryerror", "newconnectionerror", "connecterror",
+    "broken pipe", "eof occurred", "ssleoferror",
+    "cloudflare", "rate limit", "too many requests",
+)
+# Substrings that identify NON-transient parse/format errors. Explicit list so
+# short-circuiting is a positive assertion, not a fallthrough.
+_SCRAPE_PARSE_ERR_MARKERS: tuple[str, ...] = (
+    "invalid pdf", "pdf parse", "pdfreaderror", "pdfreadwarning", "pdfmergererror",
+    "cannot read", "invalid document", "corrupt", "malformed",
+    "encoding", "decode", "decoding", "unicodeerror",
+    "invalid start byte", "invalid continuation byte",
+    "empty file", "not a pdf",
+)
+
+
+def _is_transient_scrape_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient network/upstream condition worth retrying.
+
+    Order of checks:
+      1. HTTP status codes on requests exceptions (positive assertion).
+      2. Playwright TimeoutError class name (positive assertion).
+      3. Parse-error markers in message (positive REJECT — never retry these).
+      4. Transient markers in message (positive assertion).
+      5. Default False."""
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status_code, int) and status_code in _SCRAPE_TRANSIENT_HTTP_CODES:
+        return True
+    cls_name = type(exc).__name__.lower()
+    if "timeout" in cls_name and "parse" not in cls_name:
+        return True
+    msg = str(exc).lower()
+    if any(m in msg for m in _SCRAPE_PARSE_ERR_MARKERS):
+        return False
+    return any(m in msg for m in _SCRAPE_TRANSIENT_MSG_MARKERS)
+
+
+def _scrape_backoff_delay(attempt: int) -> float:
+    """Exponential backoff with cap. attempt is 0-indexed (attempt 0 = first retry)."""
+    delay = _SCRAPE_INITIAL_BACKOFF_SEC * (2 ** attempt)
+    return min(delay, _SCRAPE_MAX_BACKOFF_SEC)
+
+
+# F4 audit: minimum-content threshold for merged specs. Partial crawls (a
+# handful of pages out of the site's real total) used to sail through as long
+# as ANY page was scraped. Reject specs with fewer than
+# `KAIJU_SCRAPE_MIN_PAGES` pages so an operator investigates before a broken
+# spec propagates into a dataset entry. Kept modest (10) to avoid rejecting
+# genuinely-small libs; tune via env for stricter batches.
+_SCRAPE_MIN_PAGES = int(os.environ.get("KAIJU_SCRAPE_MIN_PAGES", "10"))
+
+
+# F8 audit: Playwright page.goto() timeouts. Previously hardcoded 30000/15000ms
+# in _generate_pdf; slow-mirror docs sites (older docs.rs, JS libs with heavy
+# first-paint) can legitimately exceed 30s on first request. Bump via env when
+# a batch shows systematic goto timeouts.
+_PLAYWRIGHT_NETWORKIDLE_TIMEOUT_MS = int(os.environ.get("KAIJU_SCRAPE_PLAYWRIGHT_NETWORKIDLE_MS", "30000"))
+_PLAYWRIGHT_DOMCONTENT_TIMEOUT_MS = int(os.environ.get("KAIJU_SCRAPE_PLAYWRIGHT_DOMCONTENT_MS", "15000"))
+
+# F7 audit: minimum decompressed size for compressed specs. bz2.open(...,"wb")
+# does NOT verify the round-trip; a truncated or corrupt-on-write blob compresses
+# without error but fails at agent read time with an opaque bz2.OSError. We
+# re-open the compressed file and stream-read it fully to catch this at prep
+# time. Threshold intentionally modest (5KB) — anything smaller is almost
+# certainly a failed compression artifact, not a legitimate spec.
+_MIN_DECOMPRESSED_SPEC_BYTES = int(os.environ.get("KAIJU_SPEC_MIN_DECOMPRESSED_BYTES", "5120"))
+
+
+# Issue-2 audit: silent-failure accumulation. When spec_source becomes "none"
+# (crawl failed AND README fallback failed), current behavior logs WARNING and
+# continues — lets an entire batch build a dataset with no-spec entries. With
+# KAIJU_STRICT_SPEC=1, elevate the WARNING into a hard RuntimeError so operators
+# discover the missing-doc regression at prep time (not at agent-run time).
+# Default off for backward compatibility.
+def enforce_strict_spec_mode(spec_source: str, repo_name: str) -> None:
+    """Raise RuntimeError when strict-spec mode is on and spec is missing.
+
+    Call from each prepare_repo_*.py AFTER the scrape+README fallback chain
+    finishes. Non-strict (default) logs a WARNING and returns — preserves the
+    current forgiving behavior. Strict raises so the batch stops before
+    writing a degraded dataset entry.
+    """
+    if spec_source not in ("none", ""):
+        return
+    strict = os.environ.get("KAIJU_STRICT_SPEC", "").lower() in ("1", "true", "yes")
+    if strict:
+        raise RuntimeError(
+            f"Spec scraping failed for {repo_name} (spec_source={spec_source!r}) "
+            f"and KAIJU_STRICT_SPEC is enabled. Unset KAIJU_STRICT_SPEC to continue "
+            f"with the README/no-spec fallback (dataset quality will degrade)."
+        )
+    logger.warning(
+        "Spec missing for %s (spec_source=%s). Enable KAIJU_STRICT_SPEC=1 to fail-fast "
+        "instead of silently proceeding with a no-spec dataset entry.",
+        repo_name, spec_source,
+    )
+
+
 def _crawl_website(
     browser: Any, base_url: str, output_dir: str, max_pages: int = 500
 ) -> list[str]:
@@ -339,16 +455,45 @@ def _crawl_website(
         logger.info("  Crawling: %s", current_url)
         visited.add(current_url)
 
+        _attempt = 0
+        _fetched = False
+        while _attempt <= _SCRAPE_MAX_RETRIES:
+            try:
+                response = page.goto(
+                    current_url, wait_until="domcontentloaded", timeout=30000
+                )
+                if response and response.status >= 400:
+                    if response.status in _SCRAPE_TRANSIENT_HTTP_CODES and _attempt < _SCRAPE_MAX_RETRIES:
+                        _delay = _scrape_backoff_delay(_attempt)
+                        logger.info(
+                            "  HTTP %d on %s (attempt %d/%d) — retrying in %.1fs",
+                            response.status, current_url, _attempt + 1, _SCRAPE_MAX_RETRIES + 1, _delay,
+                        )
+                        time.sleep(_delay)
+                        _attempt += 1
+                        continue
+                    logger.debug("  HTTP %d: %s", response.status, current_url)
+                    break
+
+                content = page.content()
+                _fetched = True
+                break
+            except Exception as e:
+                if _is_transient_scrape_error(e) and _attempt < _SCRAPE_MAX_RETRIES:
+                    _delay = _scrape_backoff_delay(_attempt)
+                    logger.info(
+                        "  Transient error on %s (attempt %d/%d): %s — retrying in %.1fs",
+                        current_url, _attempt + 1, _SCRAPE_MAX_RETRIES + 1, e, _delay,
+                    )
+                    time.sleep(_delay)
+                    _attempt += 1
+                    continue
+                logger.warning("  Error crawling %s (non-transient or retries exhausted): %s", current_url, e)
+                break
+        if not _fetched:
+            continue
+
         try:
-            response = page.goto(
-                current_url, wait_until="domcontentloaded", timeout=30000
-            )
-            if response and response.status >= 400:
-                logger.debug("  HTTP %d: %s", response.status, current_url)
-                continue
-
-            content = page.content()
-
             if _is_cloudflare_challenge(content):
                 logger.warning("  Cloudflare challenge detected, aborting crawl: %s", current_url)
                 break
@@ -375,7 +520,7 @@ def _crawl_website(
                 sequence.append(pdf)
             pages_scraped += 1
         except Exception as e:
-            logger.warning("  Error crawling %s: %s", current_url, e)
+            logger.warning("  Parse/render error on %s (non-transient): %s", current_url, e)
 
     page.close()
     return sequence
@@ -395,10 +540,40 @@ def _merge_pdfs(docs: list[str], output_filename: str) -> None:
         merger.close()
 
 
+def _bz2_integrity_check(path: str) -> None:
+    """Re-open compressed file, stream-decompress, verify size threshold.
+
+    Raises RuntimeError if the file cannot be decompressed or decompresses to
+    less than KAIJU_SPEC_MIN_DECOMPRESSED_BYTES bytes — catches corrupt or
+    empty-crawl artifacts at prep time so they never ship in a dataset.
+    Chunk-reads to avoid loading giant PDFs into memory."""
+    try:
+        _size = 0
+        with bz2.open(path, "rb") as f_check:
+            while True:
+                _chunk = f_check.read(1 << 16)
+                if not _chunk:
+                    break
+                _size += len(_chunk)
+    except OSError as e:
+        raise RuntimeError(
+            f"bz2 integrity check failed for {path}: decompression raised {e!r}. "
+            f"File is corrupt — remove it and re-scrape."
+        ) from e
+    if _size < _MIN_DECOMPRESSED_SPEC_BYTES:
+        raise RuntimeError(
+            f"bz2 integrity check failed for {path}: decompresses to {_size} bytes "
+            f"(threshold={_MIN_DECOMPRESSED_SPEC_BYTES}, override via "
+            f"KAIJU_SPEC_MIN_DECOMPRESSED_BYTES). Likely a failed compression run "
+            f"or an empty-crawl artifact."
+        )
+
+
 def _compress_bz2(input_path: str, output_path: str) -> None:
     with open(input_path, "rb") as f_in:
         with bz2.open(output_path, "wb") as f_out:
             f_out.writelines(f_in)
+    _bz2_integrity_check(output_path)
 
 
 def scrape_spec(
@@ -423,13 +598,29 @@ def scrape_spec(
     url_parts = [x for x in base_url.split("/") if x]
     if url_parts and url_parts[-1] == "pdf":
         logger.info("  Direct PDF download: %s", base_url)
-        try:
-            response = requests_lib.get(base_url, timeout=60)
-            response.raise_for_status()
-            with open(final_pdf, "wb") as f:
-                f.write(response.content)
-        except Exception as e:
-            logger.error("  Failed to download PDF: %s", e)
+        _attempt = 0
+        _downloaded = False
+        while _attempt <= _SCRAPE_MAX_RETRIES:
+            try:
+                response = requests_lib.get(base_url, timeout=60)
+                response.raise_for_status()
+                with open(final_pdf, "wb") as f:
+                    f.write(response.content)
+                _downloaded = True
+                break
+            except Exception as e:
+                if _is_transient_scrape_error(e) and _attempt < _SCRAPE_MAX_RETRIES:
+                    _delay = _scrape_backoff_delay(_attempt)
+                    logger.info(
+                        "  Transient error downloading %s (attempt %d/%d): %s — retrying in %.1fs",
+                        base_url, _attempt + 1, _SCRAPE_MAX_RETRIES + 1, e, _delay,
+                    )
+                    time.sleep(_delay)
+                    _attempt += 1
+                    continue
+                logger.error("  Failed to download PDF (non-transient or retries exhausted): %s", e)
+                return None
+        if not _downloaded:
             return None
     else:
         with sync_playwright() as p:
@@ -452,9 +643,18 @@ def scrape_spec(
         return None
     try:
         _rdr = PdfReader(final_pdf)
-        if len(_rdr.pages) == 0:
+        _page_count = len(_rdr.pages)
+        if _page_count == 0:
             os.remove(final_pdf)
             logger.warning("  All pages filtered out — no valid content for %s", name)
+            return None
+        if _page_count < _SCRAPE_MIN_PAGES:
+            os.remove(final_pdf)
+            logger.warning(
+                "  F4 min-content reject: only %d page(s) for %s (threshold=%d, override via KAIJU_SCRAPE_MIN_PAGES). "
+                "Likely a partial crawl — falling back to README so dataset entry is honest.",
+                _page_count, name, _SCRAPE_MIN_PAGES,
+            )
             return None
     except Exception as _pdf_e:
         logger.warning("  Cannot validate merged PDF for %s: %s", name, _pdf_e)

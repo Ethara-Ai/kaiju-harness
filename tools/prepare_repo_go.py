@@ -471,8 +471,20 @@ def _stubbed_base_compiles_go(repo_dir: Path, timeout: int = 900) -> "bool | Non
     deps, warming the module cache for the test-id capture that follows.
     """
     if shutil.which("go") is None:
-        logger.info("A11: go not on PATH; skipping stubbed-base compile check.")
-        return None
+        # F2c: fail-fast — prep host is expected to have go (bootstrap_ec2.sh
+        # installs it). Silently skipping shipped un-verified stubs to the dataset.
+        # Escape hatch preserves old behavior for dev machines that lack the toolchain.
+        import os as _os
+        if _os.environ.get("KAIJU_PREPARE_ALLOW_MISSING_TOOLCHAIN") == "1":
+            logger.warning("A11: go not on PATH; SKIPPING stubbed-base compile check "
+                           "(KAIJU_PREPARE_ALLOW_MISSING_TOOLCHAIN=1). The dataset may "
+                           "contain uncompilable stubs — do NOT ship to production.")
+            return None
+        raise RuntimeError(
+            "prepare_repo_go: go not on PATH. Prep host must have the Go toolchain "
+            "installed to verify stubbed base compiles. Install via scripts/bootstrap_ec2.sh, "
+            "or set KAIJU_PREPARE_ALLOW_MISSING_TOOLCHAIN=1 to skip (dataset quality will degrade)."
+        )
     try:
         proc = subprocess.run(
             ["go", "build", "./..."],
@@ -738,6 +750,10 @@ def prepare_single_repo(
                     spec_path = str(readme_spec_path)
                 except Exception as commit_err:
                     logger.warning("  README spec commit failed: %s", commit_err)
+
+        _final_spec_source = "docs" if spec_path else "none"
+        from tools.scrape_pdf import enforce_strict_spec_mode as _enforce_strict_spec
+        _enforce_strict_spec(_final_spec_source, full_name.split("/")[-1])
 
         repo_name = full_name.split("/")[-1]
         entry = {

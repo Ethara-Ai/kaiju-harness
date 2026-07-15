@@ -59,6 +59,129 @@ except ImportError as _e:
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
+# F1/F5 audit backport (mirror tools/scrape_pdf.py:321-378): Rust's dedicated
+# crawler used to lack any transient retry logic, so a single HTTP 429 / 5xx /
+# connect-timeout would cascade to README fallback on a large batch (~30-40%
+# quality degradation at 1-2% transient rate). Env vars share names with
+# tools/scrape_pdf.py for operator consistency.
+_SCRAPE_MAX_RETRIES = int(os.environ.get("KAIJU_SCRAPE_MAX_RETRIES", "3"))
+_SCRAPE_INITIAL_BACKOFF_SEC = float(os.environ.get("KAIJU_SCRAPE_INITIAL_BACKOFF_SEC", "2.0"))
+_SCRAPE_MAX_BACKOFF_SEC = float(os.environ.get("KAIJU_SCRAPE_MAX_BACKOFF_SEC", "30.0"))
+_SCRAPE_TRANSIENT_HTTP_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529})
+_SCRAPE_TRANSIENT_MSG_MARKERS: tuple[str, ...] = (
+    "timeout", "timed out", "timeouterror",
+    "connection reset", "connection refused", "connection aborted",
+    "remote end closed", "read timed out", "dial tcp",
+    "temporary failure in name resolution", "getaddrinfo",
+    "maxretryerror", "newconnectionerror", "connecterror",
+    "broken pipe", "eof occurred", "ssleoferror",
+    "cloudflare", "rate limit", "too many requests",
+)
+_SCRAPE_PARSE_ERR_MARKERS: tuple[str, ...] = (
+    "invalid pdf", "pdf parse", "pdfreaderror", "pdfreadwarning", "pdfmergererror",
+    "cannot read", "invalid document", "corrupt", "malformed",
+    "encoding", "decode", "decoding", "unicodeerror",
+    "invalid start byte", "invalid continuation byte",
+    "empty file", "not a pdf",
+)
+
+
+def _is_transient_scrape_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient network/upstream condition worth retrying."""
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status_code, int) and status_code in _SCRAPE_TRANSIENT_HTTP_CODES:
+        return True
+    cls_name = type(exc).__name__.lower()
+    if "timeout" in cls_name and "parse" not in cls_name:
+        return True
+    msg = str(exc).lower()
+    if any(m in msg for m in _SCRAPE_PARSE_ERR_MARKERS):
+        return False
+    return any(m in msg for m in _SCRAPE_TRANSIENT_MSG_MARKERS)
+
+
+def _scrape_backoff_delay(attempt: int) -> float:
+    delay = _SCRAPE_INITIAL_BACKOFF_SEC * (2 ** attempt)
+    return min(delay, _SCRAPE_MAX_BACKOFF_SEC)
+
+
+# F4 audit: minimum page count for accepted specs. Partial crawls of a handful
+# of pages out of the site's real total used to sail through as long as ANY page
+# was scraped. Reject so an operator investigates before the broken spec
+# propagates. Modest default so genuinely-small crates aren't rejected.
+_SCRAPE_MIN_PAGES = int(os.environ.get("KAIJU_SCRAPE_MIN_PAGES", "10"))
+
+
+def _page_goto_with_retry(
+    page: Any,
+    url: str,
+    *,
+    wait_until: str = "domcontentloaded",
+    timeout: int = 30000,
+    fallback_wait_until: str | None = "commit",
+    fallback_timeout: int = 15000,
+) -> Any:
+    """page.goto with load-strategy fallback AND transient outer retry."""
+    import time as _time
+    last_exc: BaseException | None = None
+    for _attempt in range(_SCRAPE_MAX_RETRIES + 1):
+        try:
+            try:
+                return page.goto(url, wait_until=wait_until, timeout=timeout)
+            except Exception as e:
+                if fallback_wait_until is None or not _is_transient_scrape_error(e):
+                    raise
+                logger.debug(
+                    "  %s timeout for %s, retrying same-attempt with %s",
+                    wait_until, url, fallback_wait_until,
+                )
+                return page.goto(url, wait_until=fallback_wait_until, timeout=fallback_timeout)
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            if not _is_transient_scrape_error(e) or _attempt >= _SCRAPE_MAX_RETRIES:
+                raise
+            _delay = _scrape_backoff_delay(_attempt)
+            logger.warning(
+                "  transient error on %s (attempt %d/%d): %s — sleeping %.1fs",
+                url, _attempt + 1, _SCRAPE_MAX_RETRIES + 1, e, _delay,
+            )
+            _time.sleep(_delay)
+    if last_exc is not None:
+        raise last_exc
+    return None
+
+
+def _requests_get_with_retry(url: str, *, headers: dict | None = None, timeout: int = 15) -> Any:
+    """requests_lib.get with transient retry + exponential backoff."""
+    import time as _time
+    last_exc: BaseException | None = None
+    for _attempt in range(_SCRAPE_MAX_RETRIES + 1):
+        try:
+            resp = requests_lib.get(url, headers=headers, timeout=timeout)
+            if resp.status_code in _SCRAPE_TRANSIENT_HTTP_CODES and _attempt < _SCRAPE_MAX_RETRIES:
+                _delay = _scrape_backoff_delay(_attempt)
+                logger.warning(
+                    "  HTTP %d on %s (attempt %d/%d) — sleeping %.1fs",
+                    resp.status_code, url, _attempt + 1, _SCRAPE_MAX_RETRIES + 1, _delay,
+                )
+                _time.sleep(_delay)
+                continue
+            return resp
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            if not _is_transient_scrape_error(e) or _attempt >= _SCRAPE_MAX_RETRIES:
+                raise
+            _delay = _scrape_backoff_delay(_attempt)
+            logger.warning(
+                "  transient error on %s (attempt %d/%d): %s — sleeping %.1fs",
+                url, _attempt + 1, _SCRAPE_MAX_RETRIES + 1, e, _delay,
+            )
+            _time.sleep(_delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"unreachable: retry loop exited without response for {url}")
+
 _DOCSRS_SOURCE_PATTERN = re.compile(r"/src/[^/]+/")
 
 _DOCSRS_HIDE_CHROME_CSS = """
@@ -135,7 +258,7 @@ def _detect_site_type(page: Any, url: str) -> str:
 def resolve_crate_docs_url(crate_name: str) -> str:
     api_url = f"https://crates.io/api/v1/crates/{crate_name}"
     headers = {"User-Agent": "scrape_rust_pdf/1.0 (spec-generation tool)"}
-    resp = requests_lib.get(api_url, headers=headers, timeout=15)
+    resp = _requests_get_with_retry(api_url, headers=headers, timeout=15)
     resp.raise_for_status()
     data = resp.json()
 
@@ -215,11 +338,7 @@ def _generate_pdf(
 ) -> str:
     pdf_path = ""
     try:
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            logger.debug("  domcontentloaded timeout for %s, retrying with commit", url)
-            page.goto(url, wait_until="commit", timeout=15000)
+        _page_goto_with_retry(page, url)
 
         if extra_css:
             page.add_style_tag(content=extra_css)
@@ -264,7 +383,7 @@ def _discover_docsrs_urls(page: Any, base_url: str) -> list[str]:
     urls: list[str] = [base_url]
 
     try:
-        page.goto(all_url, wait_until="domcontentloaded", timeout=30000)
+        _page_goto_with_retry(page, all_url)
         content = page.content()
         soup = BeautifulSoup(content, "html.parser")
 
@@ -307,7 +426,7 @@ def _crawl_docsrs(
 
     seen = {_normalize_url(u) for u in urls}
     try:
-        page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        _page_goto_with_retry(page, base_url)
         content = page.content()
         soup = BeautifulSoup(content, "html.parser")
         for a_tag in soup.find_all("a", href=True):
@@ -358,7 +477,7 @@ def _crawl_mdbook(
     logger.info("  mdBook detected, rendering print.html: %s", print_url)
 
     try:
-        page.goto(print_url, wait_until="domcontentloaded", timeout=60000)
+        _page_goto_with_retry(page, print_url, timeout=60000)
         page.add_style_tag(content=_MDBOOK_PRINT_CSS)
 
         pdf_path = os.path.join(output_dir, "print.pdf")
@@ -433,9 +552,7 @@ def _crawl_generic(
         visited.add(current_url)
 
         try:
-            response = page.goto(
-                current_url, wait_until="domcontentloaded", timeout=30000
-            )
+            response = _page_goto_with_retry(page, current_url)
             if response and response.status == 404:
                 logger.debug("  404: %s", current_url)
                 continue
@@ -489,7 +606,7 @@ def scrape_rust_spec(
     if url_parts and url_parts[-1].endswith(".pdf"):
         logger.info("  Direct PDF download: %s", base_url)
         try:
-            response = requests_lib.get(base_url, timeout=60)
+            response = _requests_get_with_retry(base_url, timeout=60)
             response.raise_for_status()
             with open(final_pdf, "wb") as f:
                 f.write(response.content)
@@ -504,9 +621,7 @@ def scrape_rust_spec(
 
                 detection_page = browser.new_page()
                 try:
-                    detection_page.goto(
-                        base_url, wait_until="domcontentloaded", timeout=30000
-                    )
+                    _page_goto_with_retry(detection_page, base_url)
                     site_type = _detect_site_type(detection_page, base_url)
                 finally:
                     detection_page.close()
@@ -522,6 +637,15 @@ def scrape_rust_spec(
 
                 if not pdfs:
                     logger.warning("  No pages crawled for %s", name)
+                    return None
+
+                if len(pdfs) < _SCRAPE_MIN_PAGES:
+                    logger.warning(
+                        "  F4 min-content reject: only %d page(s) for %s (threshold=%d, override via "
+                        "KAIJU_SCRAPE_MIN_PAGES). Likely a partial crawl — returning None so caller "
+                        "can fall back to README instead of shipping a partial PDF.",
+                        len(pdfs), name, _SCRAPE_MIN_PAGES,
+                    )
                     return None
 
                 _clean_pdf_directory(pdfs)

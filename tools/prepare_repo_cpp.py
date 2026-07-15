@@ -587,13 +587,14 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
             for candidate in sorted(Path("/opt/homebrew/opt/llvm/lib/clang").glob("*/include/stdarg.h"), reverse=True):
                 extra_args.append(f"--extra-arg=-resource-dir={candidate.parent.parent}")
                 break
+        _cps_timeout = int(os.environ.get("KAIJU_CPPSTUBBER_PER_FILE_TIMEOUT_SEC", "60"))
         for cf in cpp_files:
             cf_abs = str(Path(cf).resolve())
             cmd = [str(CPPSTUBBER), "-p", str(compdb_dir.resolve()), "--in-place",
                    *extra_args, cf_abs]
             try:
                 r = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=60, cwd=repo_dir,
+                    cmd, capture_output=True, text=True, timeout=_cps_timeout, cwd=repo_dir,
                 )
                 if r.stdout:
                     aggregated_stdout.append(r.stdout)
@@ -603,7 +604,7 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, build_system: str) ->
                 elif r.stderr and r.returncode != 0:
                     aggregated_stderr.append(f"{Path(cf).name}: {r.stderr[:150]}")
             except subprocess.TimeoutExpired:
-                aggregated_stderr.append(f"{Path(cf).name}: TIMEOUT after 60s")
+                aggregated_stderr.append(f"{Path(cf).name}: TIMEOUT after {_cps_timeout}s (override via KAIJU_CPPSTUBBER_PER_FILE_TIMEOUT_SEC)")
         if aggregated_stderr:
             logger.info("cppstubber issues (first 3 of %d): %s",
                         len(aggregated_stderr), aggregated_stderr[:3])
@@ -1421,6 +1422,25 @@ def prepare_cpp_repo(
     if ok == 0:
         logger.error("No files/functions were stubbed across any of %s. Aborting.", src_dirs)
         return None
+    # F2 audit: low-count sanity check. A stubber can succeed with a suspiciously
+    # low stub-to-file ratio (external binary silently mis-parses a subset of files,
+    # macros escape tree-sitter, etc.). Warn LOUDLY so an operator investigates before
+    # a dataset built on partial stubs leaks answers. Threshold: <1 stub per file on
+    # average across scanned dirs. Non-fatal (some tiny libs legitimately have few
+    # functions) but visible in prep logs and CI grep-able as "F2 low-stub warning".
+    _total_cpp_files = 0
+    for _sd in src_dirs:
+        try:
+            _total_cpp_files += len(_collect_cpp_files(repo_dir / _sd))
+        except (OSError, ValueError):
+            pass
+    if _total_cpp_files > 0 and ok < _total_cpp_files:
+        logger.warning(
+            "F2 low-stub warning: only %d stub(s) across %d C++ source file(s) in %s (ratio=%.2f). "
+            "Expected ≥1 stub per file on average. Investigate whether the stubber "
+            "silently mis-parsed some files or the codebase legitimately has few functions.",
+            ok, _total_cpp_files, src_dirs, ok / _total_cpp_files,
+        )
 
     cleaned = 0
     for sd in src_dirs:
@@ -1467,6 +1487,10 @@ def prepare_cpp_repo(
                     logger.info("  README spec committed")
                 except Exception as e:
                     logger.warning("  README spec fallback failed: %s", e)
+
+    _final_spec_source = "docs" if (repo_dir / "spec.pdf.bz2").exists() else "none"
+    from tools.scrape_pdf import enforce_strict_spec_mode as _enforce_strict_spec
+    _enforce_strict_spec(_final_spec_source, repo_name)
 
     base_commit = get_head_sha(repo_dir)
     logger.info("Base commit: %s", base_commit[:12])

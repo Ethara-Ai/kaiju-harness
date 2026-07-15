@@ -474,6 +474,34 @@ def create_stubbed_branch(
 
     logger.info("  Base commit (stubbed): %s", base_commit[:12])
 
+    # F2b: batch py_compile gate on the whole stubbed src tree. Per-file
+    # ast.parse already gated syntax BEFORE writing each stub above. This is a
+    # batch-level defense that catches (a) rare edge cases where sibling files
+    # interact badly, (b) files added by non-stubber paths (spec, gitignore) that
+    # accidentally contain invalid syntax, (c) mismatches between the interpreter
+    # running prep vs the interpreter that will run the batch. Logs WARNING but
+    # does NOT abort — the per-file gate is authoritative; this is diagnostic
+    # signal for the operator so a degraded dataset row is visible in prep logs.
+    _abs_src = repo_dir / src_dir if not (repo_dir / src_dir).is_absolute() else Path(src_dir)
+    if _abs_src.exists() and any(_abs_src.rglob("*.py")):
+        try:
+            _proc = subprocess.run(
+                [sys.executable, "-m", "compileall", "-q", "-j", "0", str(_abs_src)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if _proc.returncode != 0:
+                _tail = (_proc.stderr or _proc.stdout or "").strip().splitlines()[-20:]
+                logger.warning(
+                    "  F2b batch py_compile FAILED for %s (rc=%d). Per-file ast.parse "
+                    "gate passed, but batch compileall rejected the tree — investigate "
+                    "the following files before shipping this dataset row:\n    %s",
+                    full_name, _proc.returncode, "\n    ".join(_tail),
+                )
+            else:
+                logger.info("  F2b batch py_compile OK (whole stubbed tree compiles).")
+        except (subprocess.TimeoutExpired, OSError) as _e:
+            logger.warning("  F2b batch py_compile could not run: %s", _e)
+
     return base_commit, reference_commit
 
 
@@ -1276,6 +1304,10 @@ def prepare_repos(
                     logger.info("  README spec committed: %s", base_commit[:12])
                 except Exception as e:
                     logger.warning("  README spec fallback failed: %s", e)
+
+        _final_spec_source = "docs" if spec_path else ("readme" if 'readme_spec_path' in locals() and readme_spec_path else "none")
+        from tools.scrape_pdf import enforce_strict_spec_mode as _enforce_strict_spec
+        _enforce_strict_spec(_final_spec_source, full_name.split("/")[-1])
 
         # Push to fork
         if not dry_run:

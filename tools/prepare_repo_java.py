@@ -298,6 +298,183 @@ def validate_stubbed_java_tree(repo_dir: Path, src_dirs: list[Path]) -> tuple[in
     return validated, errors
 
 
+# ── F2a: real javac compile-check ────────────────────────────────────────────
+
+
+_JAVAC_SYNTAX_ERR_MARKERS: tuple[str, ...] = (
+    "';' expected",
+    "'{' expected",
+    "'}' expected",
+    "')' expected",
+    "'(' expected",
+    "class, interface, enum, or record expected",
+    "class, interface, or enum expected",
+    "reached end of file while parsing",
+    "illegal start of expression",
+    "illegal start of type",
+    "illegal character",
+    "unclosed string literal",
+    "unclosed character literal",
+    "unclosed comment",
+    "identifier expected",
+)
+
+
+_JAVAC_SEMANTIC_ERR_MARKERS: tuple[str, ...] = (
+    "cannot find symbol",
+    "package ",
+    "cannot access",
+    "cannot resolve",
+    "does not exist",
+    "not a statement",
+    "incompatible types",
+    "method does not override",
+)
+
+
+def _classify_javac_output(output: str) -> tuple[int, int, int]:
+    """Return (syntax_err_count, semantic_err_count, other_err_count).
+
+    javac prints one error per line with pattern `path:line: error: <msg>`.
+    We count how many contain SYNTAX markers vs SEMANTIC markers so the caller
+    can distinguish 'stubber corrupted the file' (syntax) from 'the stubbed base
+    needs external deps we don't have on the prep host' (semantic).
+    """
+    syn = 0
+    sem = 0
+    other = 0
+    for line in output.splitlines():
+        if ": error:" not in line:
+            continue
+        lower = line.lower()
+        if any(m.lower() in lower for m in _JAVAC_SYNTAX_ERR_MARKERS):
+            syn += 1
+        elif any(m.lower() in lower for m in _JAVAC_SEMANTIC_ERR_MARKERS):
+            sem += 1
+        else:
+            other += 1
+    return syn, sem, other
+
+
+def _stubbed_base_javac_check(
+    repo_dir: Path, src_dirs: list[Path], timeout: int = 600,
+) -> "bool | None":
+    """A11 (java): does the STUBBED base actually javac-compile?
+
+    Complements :func:`_stubbed_base_compiles_java` (which only balance-checks
+    braces). This runs the real javac front-end to catch bugs the structural
+    gate misses:
+
+      * missing semicolons at statement end (balance-ok, javac-fail)
+      * invalid identifier syntax (balance-ok, javac-fail)
+      * reserved-word misuse (balance-ok, javac-fail)
+      * Java-version-specific syntax the target JDK doesn't accept
+
+    Selection chain (best-signal-first):
+
+      1. Maven (pom.xml present): ``mvn -q -DskipTests -B compile``
+         Compiles against RESOLVED deps — the strongest gate.
+      2. Gradle (build.gradle{,.kts} present): ``gradle compileJava --no-daemon -q -x test``
+      3. Bare javac (no build system on PATH): ``javac -nowarn -Xlint:none <all .java>``
+         Syntax + type gate without deps — most 'cannot find symbol' errors are
+         missing external classes, so we distinguish those from real syntax bugs
+         via :func:`_classify_javac_output`.
+
+    Returns True (compiles cleanly / only semantic errors from missing deps),
+    False (real syntax errors — stubber corrupted at least one file), or None
+    (couldn't determine — no tool on PATH + no build file, or timeout).
+    """
+    import shutil as _shutil
+
+    if (repo_dir / "pom.xml").exists() and _shutil.which("mvn") is not None:
+        logger.info("A11: running `mvn -q -DskipTests -B compile` (real dep-resolved gate)")
+        try:
+            proc = subprocess.run(
+                ["mvn", "-q", "-DskipTests", "-B", "compile"],
+                cwd=str(repo_dir), capture_output=True, text=True, timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("A11: mvn compile could not run (%s); recording unknown.", e)
+            return None
+        if proc.returncode == 0:
+            return True
+        tail = ((proc.stderr or "") + (proc.stdout or ""))[-4000:]
+        logger.warning("A11: mvn compile FAILED (rc=%d). Tail:\n%s", proc.returncode, tail)
+        return False
+
+    if ((repo_dir / "build.gradle").exists() or (repo_dir / "build.gradle.kts").exists()) \
+            and _shutil.which("gradle") is not None:
+        wrapper = repo_dir / "gradlew"
+        cmd = [str(wrapper) if wrapper.exists() else "gradle",
+               "compileJava", "--no-daemon", "-q", "-x", "test"]
+        logger.info("A11: running `%s` (real dep-resolved gate)", " ".join(cmd))
+        try:
+            proc = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("A11: gradle compile could not run (%s); recording unknown.", e)
+            return None
+        if proc.returncode == 0:
+            return True
+        tail = ((proc.stderr or "") + (proc.stdout or ""))[-4000:]
+        logger.warning("A11: gradle compile FAILED (rc=%d). Tail:\n%s", proc.returncode, tail)
+        return False
+
+    if _shutil.which("javac") is None:
+        logger.info("A11: neither mvn/gradle nor javac on PATH; skipping javac check.")
+        return None
+
+    all_java: list[str] = []
+    for src_dir in src_dirs:
+        if not src_dir.exists():
+            continue
+        for f in src_dir.rglob("*.java"):
+            if "test" in f.name.lower():
+                continue
+            all_java.append(str(f))
+    if not all_java:
+        logger.info("A11: no .java files under src_dirs to javac-check.")
+        return None
+
+    tmpdir = repo_dir / ".kaiju_javac_out"
+    tmpdir.mkdir(exist_ok=True)
+    try:
+        logger.info(
+            "A11: running bare `javac -nowarn -Xlint:none` on %d files "
+            "(dep-free syntax gate)", len(all_java),
+        )
+        try:
+            proc = subprocess.run(
+                ["javac", "-nowarn", "-Xlint:none", "-d", str(tmpdir), *all_java],
+                cwd=str(repo_dir), capture_output=True, text=True, timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("A11: bare javac could not run (%s); recording unknown.", e)
+            return None
+        if proc.returncode == 0:
+            return True
+        syn, sem, other = _classify_javac_output((proc.stderr or "") + (proc.stdout or ""))
+        if syn > 0 or other > 0:
+            tail = ((proc.stderr or "") + (proc.stdout or ""))[-4000:]
+            logger.warning(
+                "A11: bare javac SYNTAX/OTHER errors detected "
+                "(syntax=%d, other=%d, semantic=%d — semantic errors are expected "
+                "without deps). Tail:\n%s",
+                syn, other, sem, tail,
+            )
+            return False
+        logger.info(
+            "A11: bare javac saw only SEMANTIC errors (%d) — expected without deps; "
+            "structural stub gate passed, so treating as compile-ok.", sem,
+        )
+        return True
+    finally:
+        import shutil as _sh
+        try:
+            _sh.rmtree(tmpdir)
+        except OSError:
+            pass
+
+
 def _stubbed_base_compiles_java(errors: int, validated: int) -> "bool | None":
     """A11 (java): provenance for whether the STUBBED base is sound.
 
@@ -399,12 +576,43 @@ def create_stubbed_branch(
     if total_stubs == 0:
         raise RuntimeError(f"No stubs generated for {full_name}")
 
+    # F2 audit: low-count sanity check. JavaStubber JAR emits per-file stub counts
+    # via JSON on stdout; a silent JSON-parse degradation (see stub_java.py:87-96)
+    # yields 0 stubs per file without error. Even after the total==0 check above,
+    # a partial JSON degradation can produce a suspiciously low ratio (e.g. 3 stubs
+    # across 40 files) that still passes total>0 but leaks most answers. Warn LOUDLY
+    # so an operator investigates before the dataset is built on partial stubs.
+    # Non-fatal (rare small libs legitimately have few methods) but visible in prep
+    # logs and CI grep-able as "F2 low-stub warning".
+    if total_files > 0 and total_stubs < total_files:
+        logger.warning(
+            "F2 low-stub warning: only %d stub(s) across %d Java source file(s) in %s (ratio=%.2f). "
+            "Expected ≥1 stub per file on average. Investigate whether JavaStubber "
+            "silently degraded on some files (non-JSON stdout → 0 stubs) or the codebase "
+            "legitimately has few methods.",
+            total_stubs, total_files, full_name, total_stubs / total_files,
+        )
+
     # A11 stub-output validation (mirrors python's ast.parse gate): the JavaStubber
     # JAR writes in place, so validate its OUTPUT before committing the base. A
     # structurally-broken stub is reverted to the original and counted as an error
     # so it never lands in Commit 0.
     validated, errors = validate_stubbed_java_tree(repo_dir, src_dirs)
     base_compiles = _stubbed_base_compiles_java(errors, validated)
+
+    # F2a: real javac gate (Maven/Gradle/bare-javac chain). Catches
+    # semantic/syntax bugs the structural balance check misses. Strict AND:
+    # if javac says False, override structural True with False. If javac is
+    # unavailable (None), keep the structural verdict as-is.
+    _javac_verdict = _stubbed_base_javac_check(repo_dir, src_dirs)
+    if _javac_verdict is False:
+        if base_compiles is not False:
+            logger.warning(
+                "A11: javac disagrees with structural balance check for %s "
+                "(structural=%s, javac=False). Deferring to javac \u2014 the tree DOES NOT compile.",
+                full_name, base_compiles,
+            )
+        base_compiles = False
     if base_compiles is False:
         logger.warning(
             "A11: %d stubbed file(s) were structurally invalid for %s and were "
@@ -644,6 +852,10 @@ def prepare_java_repos(
                     logger.info("  README spec committed")
                 except Exception as e:
                     logger.warning("  README spec fallback failed: %s", e)
+
+        _final_spec_source = "readme" if readme_spec_url else ("docs" if (repo_dir / "spec.pdf.bz2").exists() else "none")
+        from tools.scrape_pdf import enforce_strict_spec_mode as _enforce_strict_spec
+        _enforce_strict_spec(_final_spec_source, full_name.split("/")[-1])
 
         base_commit = get_head_sha(repo_dir)
 

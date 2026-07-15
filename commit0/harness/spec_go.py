@@ -150,6 +150,7 @@ class Commit0GoSpec(Spec):
                 "go mod download >/tmp/kaiju_go_mod_download.log 2>&1 || true",
                 "go build ./... >/tmp/kaiju_go_build.log 2>&1 || true",
                 f"git reset --hard {base_commit}",
+                'go list -m 2>/dev/null | head -1 | grep -q . || (echo "INSTALL_VERIFICATION_FAILED: go list -m failed after go mod download (module graph invalid; see /tmp/kaiju_go_mod_download.log)" >&2; exit 1)',
             ]
         )
 

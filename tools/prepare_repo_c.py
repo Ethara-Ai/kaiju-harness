@@ -633,6 +633,19 @@ def prepare_one(
         )
         return None
 
+    # G6 audit fix: per-file no-op observability. cstubber's aggregate ratio
+    # check above catches "most functions unstubbed across the tree", but
+    # doesn't surface the shape "file X has 5 functions, all silently skipped
+    # for benign parser reasons". Prep continues (skips are non-fatal), but
+    # a grep-able WARNING makes it visible in aggregator/log-scan tooling.
+    if getattr(report, "files_with_decls_but_no_stubs", 0) > 0:
+        logger.warning(
+            "PREP_WARN:c_zero_stub_files %s: %d file(s) had declared functions "
+            "but produced 0 stubs (all skipped as already_stubbed / no_compound_stmt / "
+            "body_in_different_file / etc.). Full skip breakdown in report.functions_skipped.",
+            slug, report.files_with_decls_but_no_stubs,
+        )
+
     _maybe_clang_format(repo_path)
 
     restored = _restore_test_files(repo_path, reference_commit)

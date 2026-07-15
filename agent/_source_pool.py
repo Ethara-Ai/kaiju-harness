@@ -32,14 +32,17 @@ EXTENSION_MAP: dict[str, tuple[str, ...]] = {
     ".java": (".java",),
     ".c":    (".c", ".h"),
     ".h":    (".c", ".h"),
-    ".cpp":  (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"),
-    ".cc":   (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"),
-    ".hpp":  (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"),
-    ".js":   (".js", ".mjs", ".cjs"),
-    ".mjs":  (".js", ".mjs", ".cjs"),
-    ".cjs":  (".js", ".mjs", ".cjs"),
-    ".ts":   (".ts", ".tsx"),
-    ".tsx":  (".ts", ".tsx"),
+    ".cpp":  (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".tpp", ".txx", ".ipp", ".inl"),
+    ".cc":   (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".tpp", ".txx", ".ipp", ".inl"),
+    ".hpp":  (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".tpp", ".txx", ".ipp", ".inl"),
+    ".js":   (".js", ".mjs", ".cjs", ".jsx"),
+    ".mjs":  (".js", ".mjs", ".cjs", ".jsx"),
+    ".cjs":  (".js", ".mjs", ".cjs", ".jsx"),
+    ".jsx":  (".js", ".mjs", ".cjs", ".jsx"),
+    ".ts":   (".ts", ".tsx", ".mts", ".cts"),
+    ".tsx":  (".ts", ".tsx", ".mts", ".cts"),
+    ".mts":  (".ts", ".tsx", ".mts", ".cts"),
+    ".cts":  (".ts", ".tsx", ".mts", ".cts"),
 }
 
 EXCLUDE_DIR_SEGMENTS: frozenset[str] = frozenset({
@@ -52,11 +55,22 @@ EXCLUDE_DIR_SEGMENTS: frozenset[str] = frozenset({
     "coverage", "htmlcov",
     ".idea", ".vscode",
     "generated", "gen",
+    ".gradle", ".mvn",
+    ".next", ".nuxt", ".output", ".turbo", ".svelte-kit",
+    ".cache", ".parcel-cache",
+    ".pnpm", ".pnpm-store",
 })
 
 TEST_DIR_SEGMENTS: frozenset[str] = frozenset({
     "tests", "test", "__tests__", "spec", "specs",
+    "it", "e2e", "integration", "functional", "testing",
 })
+
+TEST_FILENAME_SUFFIXES: tuple[str, ...] = (
+    "Test.java",
+    "Tests.java",
+    "IT.java",
+)
 
 TEST_FILENAME_PATTERNS: tuple[str, ...] = (
     "_test.",
@@ -64,6 +78,9 @@ TEST_FILENAME_PATTERNS: tuple[str, ...] = (
     ".spec.",
     "test_",
     "_spec.",
+    "-test.",
+    "-spec.",
+    ".bench.",
 )
 
 
@@ -88,8 +105,11 @@ def _is_test_path(path: Path, repo_root: Path) -> bool:
     parts = set(rel.parts)
     if parts & TEST_DIR_SEGMENTS:
         return True
-    name = path.name.lower()
-    return any(pat in name for pat in TEST_FILENAME_PATTERNS)
+    original_name = path.name
+    if any(original_name.endswith(suf) for suf in TEST_FILENAME_SUFFIXES):
+        return True
+    lowered = original_name.lower()
+    return any(pat in lowered for pat in TEST_FILENAME_PATTERNS)
 
 
 def _is_excluded(path: Path, repo_root: Path) -> bool:

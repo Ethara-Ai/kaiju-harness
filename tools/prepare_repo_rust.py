@@ -223,15 +223,16 @@ def stub_source_dir(repo_dir: Path, src_dir_relative: str, strip_docs: bool = Tr
 
     docs_before = _doc_comment_count(src_dir) if strip_docs else 0
 
+    _rss_timeout = int(os.environ.get("KAIJU_RUSTSTUBBER_TIMEOUT_SEC", "120"))
     try:
         result = subprocess.run(
             [str(RUSTSTUBBER), "--input-dir", str(src_dir), "--in-place"] + ([] if strip_docs else ["--keep-docs"]),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_rss_timeout,
         )
     except subprocess.TimeoutExpired:
-        logger.error("ruststubber timed out on %s", src_dir_relative)
+        logger.error("ruststubber timed out after %ds on %s (override via KAIJU_RUSTSTUBBER_TIMEOUT_SEC)", _rss_timeout, src_dir_relative)
         return 0, 1
 
     ok, fail = 0, 0
@@ -320,8 +321,21 @@ def _stubbed_base_compiles(repo_dir: Path, timeout: int = 600) -> "bool | None":
     import shutil as _shutil
     import os as _os
     if _shutil.which("cargo") is None:
-        logger.info("A11: cargo not on PATH; skipping stubbed-base compile check.")
-        return None
+        # F2c: fail-fast — prep host is expected to have cargo (bootstrap_ec2.sh
+        # installs it). Silently skipping shipped un-verified stubs to the dataset,
+        # which downstream agents then fail on cryptically. Escape hatch preserves
+        # old behavior for one-off dev machines that intentionally lack the toolchain.
+        if _os.environ.get("KAIJU_PREPARE_ALLOW_MISSING_TOOLCHAIN") == "1":
+            logger.warning("A11: cargo not on PATH; SKIPPING stubbed-base compile check "
+                           "(KAIJU_PREPARE_ALLOW_MISSING_TOOLCHAIN=1). The dataset may "
+                           "contain uncompilable stubs — do NOT ship to production.")
+            return None
+        raise RuntimeError(
+            "prepare_repo_rust: cargo not on PATH. Prep host must have the Rust "
+            "toolchain installed to verify stubbed base compiles. Install via "
+            "scripts/bootstrap_ec2.sh, or set KAIJU_PREPARE_ALLOW_MISSING_TOOLCHAIN=1 "
+            "to skip (dataset quality will degrade)."
+        )
     # Downgrade deny/forbid lints to warnings so a legitimately doc-stripped stub
     # isn't branded broken by a `deny(missing_docs)`-style lint (append so we don't
     # clobber operator-set RUSTFLAGS).
@@ -365,99 +379,44 @@ def _stubbed_base_compiles(repo_dir: Path, timeout: int = 600) -> "bool | None":
 # ─── Spec Scraping ───────────────────────────────────────────────────────────
 
 
-def _ensure_spec_scrape_deps(auto_install: bool = True) -> bool:
-    """Verify spec-scrape dependencies are present; auto-install when missing.
-
-    Spec scraping requires Playwright + PyMuPDF + PyPDF2 + beautifulsoup4. On a
-    fresh kaiju-harness checkout these aren't in the venv. Without this helper,
-    every prep run silently falls through to 'Skipping spec generation' and the
-    agent's Stage 1 receives only the README fallback instead of full API docs.
-
-    Behaviour:
-      * Try to import scrape_rust_pdf (project-root module).
-      * On ImportError: pip-install the Python deps + `playwright install chromium`,
-        then retry the import.
-      * Honours env var SPEC_DEPS_AUTO_INSTALL=false (or 0/no) to opt out.
-
-    Returns True if scrape_rust_pdf is importable after this call, False otherwise.
-    """
-    try:
-        import scrape_rust_pdf  # noqa: F401
-        return True
-    except ImportError:
-        pass
-
-    env_setting = os.environ.get("SPEC_DEPS_AUTO_INSTALL", "").lower()
-    if env_setting in ("false", "0", "no"):
-        logger.warning(
-            "Spec-scrape deps missing and SPEC_DEPS_AUTO_INSTALL=%s; spec will be skipped",
-            env_setting,
-        )
-        return False
-    if not auto_install:
-        return False
-
-    logger.info(
-        "Spec-scrape deps missing; auto-installing playwright + PyMuPDF + PyPDF2 + "
-        "beautifulsoup4 (set SPEC_DEPS_AUTO_INSTALL=false to opt out)"
-    )
-    pip_pkgs = ["playwright", "PyMuPDF", "PyPDF2", "beautifulsoup4"]
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", *pip_pkgs],
-            check=True,
-            timeout=600,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.warning("Failed to pip-install spec-scrape deps: %s", exc)
-        return False
-
-    logger.info("Installing Chromium for Playwright (~250 MB, one-time)")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True,
-            timeout=900,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.warning("Failed to install Playwright Chromium: %s", exc)
-        return False
-
-    try:
-        import scrape_rust_pdf  # noqa: F401
-        return True
-    except ImportError:
-        logger.warning("scrape_rust_pdf still not importable after install")
-        return False
-
-
 def scrape_spec(crate: str, repo_dir: Path) -> Path | None:
     """Scrape docs.rs documentation for a crate into a compressed PDF.
 
-    Places <crate>.pdf.bz2 at the repo root. Returns the path on success, None on failure.
+    Places spec.pdf.bz2 at the repo root. Returns the path on success, None
+    on failure. Delegates to the shared tools.scrape_pdf crawler, which has
+    Fixes 1/4/5 applied (transient-error retry, min-page threshold,
+    parse-vs-network error classification). Deps (playwright + PyMuPDF +
+    PyPDF2 + beautifulsoup4) must be pre-installed via
+    ``scripts/bootstrap_ec2.sh`` or ``uv sync``; a missing dep surfaces as
+    an ImportError, which is the correct fail-fast behavior for a batch
+    where the operator needs to know infrastructure is broken (rather than
+    silently proceeding with README fallback and degrading dataset quality).
     """
-    if not _ensure_spec_scrape_deps():
-        return None
-    from scrape_rust_pdf import scrape_rust_spec  # type: ignore
+    from tools.scrape_pdf import scrape_spec as _shared_scrape_spec
 
     tmp_specs = repo_dir / "_spec_tmp"
     try:
-        result = scrape_rust_spec(
+        result = _shared_scrape_spec(
             base_url=f"https://docs.rs/{crate}/latest/{crate}/",
             name=crate,
             output_dir=str(tmp_specs),
             compress=True,
-            max_pages=500,
         )
         if not result:
             logger.warning("Spec scraping produced no output for %s", crate)
             return None
 
         src_path = Path(result)
-        dest_path = repo_dir / "spec.pdf.bz2"  # always agent-canonical name
+        dest_path = repo_dir / "spec.pdf.bz2"
         shutil.move(str(src_path), str(dest_path))
         logger.info("Spec placed at repo root: %s", dest_path.name)
         return dest_path
+    except ImportError as e:
+        logger.error(
+            "Spec-scrape deps missing (%s). Run `scripts/bootstrap_ec2.sh` "
+            "or `uv sync` to install playwright/PyMuPDF/PyPDF2/beautifulsoup4.", e,
+        )
+        return None
     except Exception as e:
         logger.warning("Spec scraping failed for %s: %s", crate, e)
         return None
@@ -857,6 +816,10 @@ def prepare_rust_repo(
     # Step 9: Test ID collection removed — use tools/generate_test_ids_rust.py separately
 
     # Step 10: Create dataset entry
+    _final_spec_source = "readme" if readme_spec_url else ("docs.rs" if spec_path else "none")
+    from tools.scrape_pdf import enforce_strict_spec_mode as _enforce_strict_spec
+    _enforce_strict_spec(_final_spec_source, crate)
+
     entry = create_dataset_entry(
         upstream=upstream,
         fork_name=fork_name,
