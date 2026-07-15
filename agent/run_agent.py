@@ -65,6 +65,14 @@ def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+        # F3 audit fix: also emit a full error.log with the currently-being-handled
+        # exception's traceback so post-mortem tooling can machine-parse the failure
+        # (was missing in 8/9 runners; only cpp draft had partial coverage).
+        import traceback as _tb
+        try:
+            (log_dir / "error.log").write_text(f"{err}\n\n{_tb.format_exc()}", encoding="utf-8")
+        except OSError:
+            pass
     except Exception:  # noqa: BLE001
         pass
     logger.error("Module %s failed after retries (%s) — skipping so the repo "
@@ -240,6 +248,32 @@ def _run_agent_for_repo_impl(
         agent_config.use_topo_sort_dependencies,
     )
     logger.info("Found %d target edit files for %s", len(target_edit_files), repo_name)
+
+    # Stage 2/3 safety net: `get_target_edit_files` scans the CURRENT working tree
+    # for `    pass` bodies. Stage 1 fills those stubs, so on stages 2/3 the scan
+    # returns 0 files and the entire refine stage silently does nothing (0/N score).
+    # Fall back to a base_commit stub scan (`raise NotImplementedError`) which is
+    # deterministic across all 3 stages — mirrors JS/C/Go/CPP/Rust behavior.
+    if not target_edit_files:
+        try:
+            from agent.agent_utils import files_stubbed_at_commit, _find_files_to_edit
+            from commit0.harness.constants import PYTHON_STUB_MARKER
+            _all_files, _ = _find_files_to_edit(
+                str(local_repo.working_dir),
+                example["src_dir"],
+                example["test"]["test_dir"],
+            )
+            _base_stubbed = files_stubbed_at_commit(
+                local_repo, _all_files, example["base_commit"], PYTHON_STUB_MARKER,
+            )
+            if _base_stubbed:
+                target_edit_files = sorted(_base_stubbed)
+                logger.info(
+                    "stage 2/3 recovery: target_edit_files rebuilt from base_commit %s: %d files",
+                    example["base_commit"][:8], len(target_edit_files),
+                )
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("base_commit stub scan for target_edit_files failed: %s", _e)
 
     lint_files = get_changed_files_from_commits(
         local_repo, "HEAD", example["base_commit"]

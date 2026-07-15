@@ -118,6 +118,14 @@ def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+        # F3 audit fix: also emit a full error.log with the currently-being-handled
+        # exception's traceback so post-mortem tooling can machine-parse the failure
+        # (was missing in 8/9 runners; only cpp draft had partial coverage).
+        import traceback as _tb
+        try:
+            (log_dir / "error.log").write_text(f"{err}\n\n{_tb.format_exc()}", encoding="utf-8")
+        except OSError:
+            pass
     except Exception:  # noqa: BLE001
         pass
     logger.error("Module %s failed after retries (%s) — skipping so the repo "
@@ -811,6 +819,53 @@ def run_java_agent(
 
     if thinking_capture is not None:
         try:
+            # IDEMPOTENT BACKSTOP (parity with go/c/js/ts): output.json is written
+            # per-module inside each stage loop the moment the module finishes, so a
+            # worker killed mid-run keeps output.json for every completed module. This
+            # backstop only fills output.json for a turn-bearing module that STILL
+            # lacks one — the one real gap the in-loop write can't cover:
+            #   * a module marked `.done` by a PRIOR run (which predates the in-loop
+            #     write, or was killed between `_mark_module_done` and the in-loop
+            #     `write_module_output_json`) is skipped by `_is_module_done` before
+            #     its in-loop write can run on resume, leaving it `.done` but
+            #     output.json-less on resume.
+            # It NEVER touches a module that already has output.json, so it cannot
+            # double-write or double-count metrics.
+            _modules_seen: set[str] = set()
+            for _turn in thinking_capture.turns:
+                if _turn.module and _turn.module not in _modules_seen:
+                    _modules_seen.add(_turn.module)
+            _edit_targets_bs = [os.path.relpath(f, repo_path) for f in stubbed_files]
+            for _module_name in _modules_seen:
+                _module_log_dir = experiment_log_dir / _module_name
+                if (_module_log_dir / "output.json").exists():
+                    continue  # already written in-loop; don't rewrite / double-count
+                _module_turns = thinking_capture.get_module_turns(_module_name)
+                if not _module_turns:
+                    continue
+                _module_log_dir.mkdir(parents=True, exist_ok=True)
+                _stage = _module_turns[0].stage or "unknown"
+                # Best-effort cumulative diff (stub_base → HEAD) scoped to the same
+                # stubbed source files the in-loop write uses. Overcounts co-modified
+                # files vs a per-module pre/post window but preserves scoring data.
+                try:
+                    _module_patch_bs = module_file_patch(
+                        local_repo, stub_base, "HEAD", _edit_targets_bs, logger=logger,
+                    )
+                except Exception:
+                    _module_patch_bs = ""
+                write_module_output_json(
+                    output_dir=str(_module_log_dir),
+                    module_turns=_module_turns,
+                    module=_module_name,
+                    instance_id=f"{instance_id}__{_module_name}",
+                    git_patch=_module_patch_bs,
+                    instruction="",
+                    metadata=metadata,
+                    metrics=thinking_capture.get_module_metrics(_module_name),
+                    stage=_stage,
+                )
+
             logger.info(
                 "Thinking capture: %d turns, %d thinking tokens",
                 len(thinking_capture.turns),

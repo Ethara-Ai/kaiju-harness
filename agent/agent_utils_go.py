@@ -163,8 +163,15 @@ def get_target_edit_files(
     src_dir: str,
     branch: str,
     reference_commit: str,
+    base_commit: str | None = None,
 ) -> list[str]:
     """Find Go files containing stub markers that differ from the reference commit.
+
+    When ``base_commit`` is provided, membership is derived from the BLOBS at
+    ``base_commit`` rather than the current working tree. This is the fix for
+    the stage-2/3 empty-target bug: after stage 1 fills the stubs, a working-tree
+    scan finds zero stubs and returns all Go files — the refine stages then
+    iterate every non-stub file. Mirrors ``agent_utils_js.get_target_edit_files_js``.
 
     Unlike Python's topological sort approach, Go files are returned in
     filesystem order since Go has no equivalent of import_deps.ModuleSet.
@@ -172,7 +179,24 @@ def get_target_edit_files(
     repo = git.Repo(local_repo)
     all_go_files = _find_go_files_to_edit(local_repo, src_dir)
 
-    stubbed_files = []
+    stubbed_files: list[str] = []
+    if base_commit:
+        for fpath in all_go_files:
+            rel_path = os.path.relpath(fpath, local_repo)
+            try:
+                content = repo.git.show(f"{base_commit}:{rel_path}")
+            except Exception:  # noqa: BLE001
+                continue
+            if GO_STUB_MARKER in content:
+                stubbed_files.append(fpath)
+        # If base_commit yielded stubs, that is the canonical target set —
+        # deterministic across all 3 stages regardless of working-tree state.
+        if stubbed_files:
+            return stubbed_files
+
+    # No base_commit (or base blob unreadable): fall back to a working-tree scan.
+    # If stage 1 already filled the stubs, this list will be empty — the caller
+    # should treat that as "nothing to edit", not "try every Go file".
     for fpath in all_go_files:
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
@@ -183,14 +207,14 @@ def get_target_edit_files(
             continue
 
     if not stubbed_files:
-        return all_go_files
+        return []
 
     try:
         ref_tree = repo.commit(reference_commit).tree
     except Exception:
         return stubbed_files
 
-    target_files = []
+    target_files: list[str] = []
     for fpath in stubbed_files:
         rel_path = os.path.relpath(fpath, local_repo)
         try:

@@ -77,6 +77,7 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
+GO_CRAZY="false"
 STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
@@ -154,6 +155,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --go-crazy) GO_CRAZY="true"; shift ;;
         --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --no-unit-tests-info) USE_UNIT_TESTS_INFO="false"; shift ;;
@@ -187,6 +189,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Propagate strict-blocking toggle (--go-crazy) to all subprocesses.
+export KAIJU_GO_CRAZY="$GO_CRAZY"
 
 if [[ -z "$MODEL_ARG" ]]; then
     echo "Error: --model is required"
@@ -1250,6 +1255,13 @@ _auto_resume_agent() {
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
         log "  WARNING: ${_nr} module(s) STILL .needs_retry after ${_amax} auto-resume round(s) — genuinely persistent (not a passing transient); run INCOMPLETE."
+        # STRICT-BLOCKING: fail loudly unless --go-crazy was passed. Enforces the
+        # "no proceeding past .needs_retry orphans" contract so batch scores stay
+        # meaningful (a silent skip lets unimplementable modules dilute the result).
+        if [[ "${GO_CRAZY:-false}" != "true" ]]; then
+            log "  FATAL (strict-blocking): halting stage. Pass --go-crazy to bypass and continue anyway."
+            exit 1
+        fi
     elif [[ "$_auto" -gt 0 ]]; then
         log "  AUTO-RESUME succeeded: all modules completed after ${_auto} round(s); run COMPLETE (no manual --resume needed)."
     fi

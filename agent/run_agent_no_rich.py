@@ -183,33 +183,49 @@ def _run_agent_for_repo_impl(
         agent_config.use_topo_sort_dependencies,
     )
 
-    if agent_config.strip_non_stubs:
-        _base = example["base_commit"]
-        _stubbed_at_base: set[str] = set()
-        try:
-            _ls = subprocess.run(
-                ["git", "ls-tree", "-r", "--name-only", _base],
-                cwd=repo_path, capture_output=True, text=True, check=True,
+    # Compute base_commit stub set (files that had `raise NotImplementedError` at base).
+    # This is used both for the `strip_non_stubs` intersection (stage 1) AND as a
+    # stage 2/3 safety net when `get_target_edit_files` returns 0 files because
+    # stage 1 already filled the stubs and the working-tree scan finds nothing.
+    _base = example["base_commit"]
+    _stubbed_at_base: set[str] = set()
+    _base_scan_ok = False
+    try:
+        _ls = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", _base],
+            cwd=repo_path, capture_output=True, text=True, check=True,
+        )
+        for _rel in _ls.stdout.splitlines():
+            if not _rel.endswith(".py"):
+                continue
+            _show = subprocess.run(
+                ["git", "show", f"{_base}:{_rel}"],
+                cwd=repo_path, capture_output=True, text=True,
             )
-            for _rel in _ls.stdout.splitlines():
-                if not _rel.endswith(".py"):
-                    continue
-                _show = subprocess.run(
-                    ["git", "show", f"{_base}:{_rel}"],
-                    cwd=repo_path, capture_output=True, text=True,
-                )
-                if _show.returncode == 0 and "raise NotImplementedError" in _show.stdout:
-                    _stubbed_at_base.add(_rel)
-            target_edit_files = [f for f in target_edit_files if f in _stubbed_at_base]
-            logger.info(
-                "strip_non_stubs: kept %d/%d target files (filtered against base_commit %s)",
-                len(target_edit_files), len(_stubbed_at_base), _base[:8],
-            )
-        except (subprocess.CalledProcessError, OSError) as _e:
-            logger.warning(
-                "strip_non_stubs: failed to compute base-commit stub list (%s). Keeping all target files.",
-                _e,
-            )
+            if _show.returncode == 0 and "raise NotImplementedError" in _show.stdout:
+                _stubbed_at_base.add(_rel)
+        _base_scan_ok = True
+    except (subprocess.CalledProcessError, OSError) as _e:
+        logger.warning(
+            "base_commit stub scan failed (%s). Falling back to working-tree target_edit_files.",
+            _e,
+        )
+
+    # Stage 2/3 safety net: if working-tree scan came up empty (stage 1 filled all
+    # stubs) but base_commit has stubs, use the base-derived list as authoritative.
+    if not target_edit_files and _stubbed_at_base:
+        target_edit_files = sorted(_stubbed_at_base)
+        logger.info(
+            "stage 2/3 recovery: target_edit_files rebuilt from base_commit %s: %d files",
+            _base[:8], len(target_edit_files),
+        )
+    elif agent_config.strip_non_stubs and _base_scan_ok:
+        # Stage 1 case: intersect working-tree target list with base_commit stubs.
+        target_edit_files = [f for f in target_edit_files if f in _stubbed_at_base]
+        logger.info(
+            "strip_non_stubs: kept %d/%d target files (filtered against base_commit %s)",
+            len(target_edit_files), len(_stubbed_at_base), _base[:8],
+        )
 
     lint_files = get_changed_files_from_commits(
         local_repo, "HEAD", example["base_commit"]
@@ -592,6 +608,55 @@ def _run_agent_for_repo_impl(
     if thinking_capture is not None:
         try:
             from agent.trajectory_writer import write_trajectory_md
+
+            # IDEMPOTENT BACKSTOP (parity with go/c/js/ts): output.json is written
+            # per-module inside each stage loop the moment the module finishes, so a
+            # worker killed mid-run keeps output.json for every completed module. This
+            # backstop only fills output.json for a turn-bearing module that STILL
+            # lacks one — the one real gap the in-loop write can't cover:
+            #   * a module marked `.done` by a PRIOR run (which predates the in-loop
+            #     write, or was killed between `_mark_module_done` and the in-loop
+            #     `write_module_output_json`) is skipped by `_is_module_done` before
+            #     its in-loop write can run on resume, leaving it `.done` but
+            #     output.json-less on resume.
+            # It NEVER touches a module that already has output.json, so it cannot
+            # double-write or double-count metrics.
+            modules_seen: set[str] = set()
+            for _turn in thinking_capture.turns:
+                if _turn.module and _turn.module not in modules_seen:
+                    modules_seen.add(_turn.module)
+            for _module_name in modules_seen:
+                _module_log_dir = experiment_log_dir / _module_name
+                if (_module_log_dir / "output.json").exists():
+                    continue  # already written in-loop; don't rewrite / double-count
+                _module_turns = thinking_capture.get_module_turns(_module_name)
+                if not _module_turns:
+                    continue
+                _module_log_dir.mkdir(parents=True, exist_ok=True)
+                _stage = _module_turns[0].stage or "unknown"
+                # Best-effort cumulative diff (base_commit → HEAD) scoped to the
+                # working tree with tests protected — matches the in-loop write's
+                # pathspec set. Overcounts co-modified files vs a per-module pre/post
+                # window, but preserves scoring data for the orphaned module.
+                try:
+                    _bp = example["base_commit"] or "HEAD"
+                    _module_patch = local_repo.git.diff(
+                        "--no-renames", _bp, "HEAD", "--", ".", *_PROTECTED_TEST_PATHSPECS
+                    )
+                except Exception:
+                    _module_patch = ""
+                write_module_output_json(
+                    output_dir=str(_module_log_dir),
+                    module_turns=_module_turns,
+                    module=_module_name,
+                    instance_id=f"{instance_id}__{_module_name}" if instance_id else _module_name,
+                    git_patch=_module_patch,
+                    instruction="",
+                    metadata=metadata,
+                    metrics=thinking_capture.get_module_metrics(_module_name),
+                    stage=_stage,
+                )
+
 
             logger.info(
                 "Per-module output written: %d turns across %d modules",

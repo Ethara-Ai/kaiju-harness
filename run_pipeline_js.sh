@@ -52,6 +52,7 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
+GO_CRAZY="false"
 USE_SPEC_INFO="false"
 STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
@@ -121,6 +122,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --go-crazy) GO_CRAZY="true"; shift ;;
         --use-spec-info) USE_SPEC_INFO="true"; shift ;;
         --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
@@ -143,6 +145,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Propagate strict-blocking toggle (--go-crazy) to all subprocesses.
+export KAIJU_GO_CRAZY="$GO_CRAZY"
 
 if [[ -z "$MODEL_ARG" ]]; then
     echo "Error: --model is required"
@@ -898,6 +903,13 @@ _auto_resume_agent() {
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
         log "  WARNING: ${_nr} module(s) STILL .needs_retry after ${_amax} auto-resume round(s) — genuinely persistent (not a passing transient); run INCOMPLETE."
+        # STRICT-BLOCKING: fail loudly unless --go-crazy was passed. Enforces the
+        # "no proceeding past .needs_retry orphans" contract so batch scores stay
+        # meaningful (a silent skip lets unimplementable modules dilute the result).
+        if [[ "${GO_CRAZY:-false}" != "true" ]]; then
+            log "  FATAL (strict-blocking): halting stage. Pass --go-crazy to bypass and continue anyway."
+            exit 1
+        fi
     elif [[ "$_auto" -gt 0 ]]; then
         log "  AUTO-RESUME succeeded: all modules completed after ${_auto} round(s); run COMPLETE (no manual --resume needed)."
     fi
@@ -1100,6 +1112,23 @@ parse_eval_output() {
 # ============================================================
 # Cost Extraction (verbatim from run_pipeline_ts.sh)
 # ============================================================
+
+# Evaluate a bc expression and emit a JSON-safe number. bc drops the leading
+# zero on values < 1 (".3000", "-.08"), which jq <= 1.6 rejects via --argjson.
+# Re-add it so the result is always valid JSON. Propagates bc's exit status.
+bc_json() {
+    local _out
+    _out=$(echo "$1" | bc) || return 1
+    # bc exits 0 even on a SYNTAX error (writing the diagnostic to stderr and
+    # nothing / a partial value to stdout), so the caller's `|| return 1` guard
+    # never fires and an empty/garbage value flows into a jq argjson binding or
+    # shell arithmetic. Validate the result is a plain number before returning it.
+    if ! [[ "$_out" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
+        return 1
+    fi
+    printf '%s\n' "$_out" | sed -E 's/^(-?)\./\10./'
+}
+
 
 extract_all_stage_costs() {
     local log_dir="$1"
@@ -1361,7 +1390,7 @@ stage_2_lint_js() {
     s2_incremental="${_co%% *}"
     cost_source="${_co#* }"
     local total_cost
-    total_cost=$(echo "scale=4; $s1_cost + $s2_incremental" | bc) || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
+    total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental") || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
     log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost}) (source: ${cost_source})"
 
@@ -1428,7 +1457,7 @@ stage_3_test_js() {
     s3_incremental="${_co%% *}"
     cost_source="${_co#* }"
     local total_cost
-    total_cost=$(echo "scale=4; $s2_cumulative + $s3_incremental" | bc) || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
+    total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental") || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
     log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost}) (source: ${cost_source})"
 

@@ -124,6 +124,14 @@ def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+        # F3 audit fix: also emit a full error.log with the currently-being-handled
+        # exception's traceback so post-mortem tooling can machine-parse the failure
+        # (was missing in 8/9 runners; only cpp draft had partial coverage).
+        import traceback as _tb
+        try:
+            (log_dir / "error.log").write_text(f"{err}\n\n{_tb.format_exc()}", encoding="utf-8")
+        except OSError:
+            pass
     except Exception:  # noqa: BLE001
         pass
     logger.error("Module %s failed after retries (%s) — skipping so the repo "

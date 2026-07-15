@@ -187,12 +187,37 @@ def get_target_edit_files(
     src_dir: str,
     branch: str,
     reference_commit: str,
+    base_commit: str | None = None,
 ) -> list[str]:
-    """Files containing STUB_PANIC that differ from the reference commit."""
+    """Files containing STUB_PANIC that differ from the reference commit.
+
+    When ``base_commit`` is provided, membership is derived from the BLOBS at
+    ``base_commit`` rather than the current working tree. This is the fix for
+    the stage-2/3 empty-target bug: after stage 1 fills the stubs, a working-tree
+    scan finds zero stubs and either returns everything or nothing — either way
+    breaking the refine stages. Mirrors ``agent_utils_js.get_target_edit_files_js``.
+    """
     repo = git.Repo(local_repo)
     all_c_files = _find_c_files_to_edit(local_repo, src_dir)
 
     stubbed_files: list[str] = []
+    if base_commit:
+        for fpath in all_c_files:
+            rel_path = os.path.relpath(fpath, local_repo)
+            try:
+                content = repo.git.show(f"{base_commit}:{rel_path}")
+            except Exception:  # noqa: BLE001
+                continue
+            if C_STUB_MARKER in content:
+                stubbed_files.append(fpath)
+        # If base_commit yielded stubs, that is the canonical target set —
+        # deterministic across all 3 stages regardless of working-tree state.
+        if stubbed_files:
+            return stubbed_files
+
+    # No base_commit (or base blob unreadable): fall back to a working-tree scan.
+    # If stage 1 already filled the stubs, this list will be empty — the caller
+    # should treat that as "nothing to edit", not "try every C file".
     for fpath in all_c_files:
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
@@ -203,7 +228,7 @@ def get_target_edit_files(
             continue
 
     if not stubbed_files:
-        return all_c_files
+        return []
 
     try:
         ref_tree = repo.commit(reference_commit).tree

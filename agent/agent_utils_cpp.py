@@ -61,9 +61,39 @@ def find_cpp_files_to_edit(src_dir: str) -> list[str]:
     return cpp_files
 
 
-def get_target_edit_files_cpp(src_dir: str) -> list[str]:
+def get_target_edit_files_cpp(
+    src_dir: str,
+    local_repo: "git.Repo | None" = None,
+    base_commit: str | None = None,
+) -> list[str]:
+    """Return .cpp/.hpp files containing stub markers.
+
+    When ``local_repo`` and ``base_commit`` are provided, membership is derived
+    from the BLOBS at ``base_commit`` rather than the current working tree.
+    Stage-2/3 fix: after stage 1 fills the stubs, a working-tree scan returns
+    zero files and silently kills the refine stages. Mirrors JS/C/Go behavior.
+    """
     all_files = find_cpp_files_to_edit(src_dir)
-    target_files: list[str] = []
+
+    if local_repo is not None and base_commit:
+        target_dir = str(local_repo.working_dir)
+        target_files: list[str] = []
+        for file_path in all_files:
+            rel_path = os.path.relpath(file_path, target_dir)
+            try:
+                content = local_repo.git.show(f"{base_commit}:{rel_path}")
+            except Exception:  # noqa: BLE001
+                # File not in base_commit tree (added on branch) or unreadable.
+                continue
+            if any(marker in content for marker in _STUB_MARKERS):
+                target_files.append(file_path)
+        # If base_commit yielded stubs, that is the canonical target set —
+        # deterministic across all 3 stages regardless of working-tree state.
+        if target_files:
+            return target_files
+        # base scan returned 0 (base blob path drift): fall through to WT scan.
+
+    target_files = []
     for file_path in all_files:
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:

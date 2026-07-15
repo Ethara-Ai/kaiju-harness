@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 import uuid
@@ -1022,12 +1023,26 @@ def write_module_output_json(
         "error": error,
     }
 
+    # Atomic write: staging file + os.replace ensures that a SIGKILL/OOM/crash
+    # mid-serialization never leaves a truncated output.json on disk. Downstream
+    # eval scripts (and pipeline_results.json cost aggregation) parse this JSON,
+    # so a torn write would silently zero-score the module on resume. Writing to
+    # a per-pid staging path prevents concurrent writers (e.g. an in-loop write
+    # racing with the end-of-run idempotent backstop) from clobbering each other.
     output_path = out_dir / "output.json"
+    tmp_path = out_dir / f"output.json.tmp.{os.getpid()}"
     try:
-        with open(output_path, "w") as f:
+        with open(tmp_path, "w") as f:
             json.dump(record, f, indent=2, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, output_path)
     except OSError as e:
         logger.error("Failed to write module output to %s: %s", output_path, e)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
     if audit_mismatch is not None:

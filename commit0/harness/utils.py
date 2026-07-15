@@ -291,6 +291,53 @@ def extract_test_output(ss: str, pattern: str) -> str:
     return ""
 
 
+# Kaiju harness artifact prefixes that MUST NOT leak into stub / model_changes
+# commits when the pipeline runs `git add -A`. All 8 languages are exposed to
+# this bug because `.kaiju/*` breadcrumbs, `.rate_limit_paused` markers, and
+# `.done` / `.needs_retry` sentinel files may be written under the repo working
+# tree by the runtime. Historically only JS added these to ``.git/info/exclude``
+# (see ``setup_js.py``); a similar leak was documented for other languages via
+# user memory ``kaiju_breadcrumb_committed_leak``. Centralising here means
+# EVERY setup path benefits automatically because they all call ``clone_repo``.
+_KAIJU_GIT_EXCLUDE_ENTRIES: tuple[str, ...] = (
+    ".kaiju/",
+    ".kaiju_snap/",
+    ".kaiju_guard.py",
+    ".rate_limit_paused",
+    ".needs_retry",
+    ".done",
+    ".heartbeat",
+)
+
+
+def _ensure_kaiju_exclusions(clone_dir: str, logger: logging.Logger) -> None:
+    """Append kaiju harness artifact paths to ``.git/info/exclude`` (worktree-local).
+
+    Uses ``.git/info/exclude`` — NOT ``.gitignore`` — because writing to a tracked
+    ``.gitignore`` would change HEAD's tree and desync from the dataset's
+    ``base_commit``. Also idempotent: skips entries already present so re-runs
+    don't grow the file."""
+    try:
+        exclude_path = os.path.join(clone_dir, ".git", "info", "exclude")
+        os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
+        existing: list[str] = []
+        if os.path.exists(exclude_path):
+            with open(exclude_path, "r") as fh:
+                existing = fh.read().splitlines()
+        new_entries = [e for e in _KAIJU_GIT_EXCLUDE_ENTRIES if e not in existing]
+        if new_entries:
+            with open(exclude_path, "a") as fh:
+                for entry in new_entries:
+                    fh.write(f"\n{entry}")
+                fh.write("\n")
+            logger.debug(
+                "Added %d kaiju exclusion(s) to %s", len(new_entries), exclude_path,
+            )
+    except OSError as e:
+        logger.warning("Failed to update .git/info/exclude for %s: %s", clone_dir, e)
+
+
+
 def clone_repo(
     clone_url: str, clone_dir: str, branch: str, logger: logging.Logger
 ) -> git.Repo:
@@ -343,6 +390,12 @@ def clone_repo(
     except git.exc.GitCommandError as e:
         logger.error("Failed to check out branch %s in %s: %s", branch, clone_dir, e)
         raise RuntimeError(f"Failed to check out {branch}: {e}") from e
+
+    # F7 audit fix: append kaiju artifact paths to .git/info/exclude so a
+    # runtime `git add -A` (in stub or model_changes commit) can't leak a
+    # .kaiju/, .rate_limit_paused, .done, .needs_retry, or .heartbeat file into
+    # the resulting commit and desync the tree from the dataset's base_commit.
+    _ensure_kaiju_exclusions(clone_dir, logger)
 
     return repo
 

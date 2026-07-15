@@ -362,3 +362,12 @@ NON_TEST_EXTS = [
     ".yaml",
     ".toml",
 ]
+
+# Stub marker for Python — mirrors the per-language STUB_MARKER constants
+# (constants_c.py, constants_go.py, etc.). Used by base_commit stub scans to
+# derive `target_edit_files` deterministically across all 3 stages: stage 1
+# fills the stub, so a working-tree scan on stage 2/3 returns 0 files and
+# silently kills the run. `raise NotImplementedError` is the canonical explicit
+# stub form in Python commit0 repos (`pass` bodies are ambiguous with abstract
+# methods and intentional no-ops, so are NOT part of this marker).
+PYTHON_STUB_MARKER = "raise NotImplementedError"

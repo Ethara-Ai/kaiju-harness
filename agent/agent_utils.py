@@ -326,6 +326,50 @@ def topological_sort_based_on_dependencies(
     return import_dependencies_files, import_dependencies
 
 
+def files_stubbed_at_commit(
+    local_repo: git.Repo,
+    candidate_files: list[str],
+    base_commit: str,
+    stub_marker: str,
+) -> set[str]:
+    """Return the subset of ``candidate_files`` whose blob at ``base_commit``
+    contains ``stub_marker`` — i.e. the files that were stubbed BEFORE the agent
+    (or any earlier stage) touched them.
+
+    Stubbed-set membership is a fixed dataset property of the base commit, NOT a
+    fact about the current working tree. This helper enables ``target_edit_files``
+    to be derived deterministically across all 3 stages: stages 2/3 resume on top
+    of stage 1's implementation without resetting, so a working-tree scan would
+    return an empty list once stage 1 fills the stubs — crashing stage 2/3 with
+    "No target-edit source files" and yielding 0 score across every module.
+
+    Mirrors ``agent_utils_js.py:get_target_edit_files_js`` design; callers should
+    fall back to a working-tree scan if this returns an empty set (indicating the
+    base blob is inaccessible or path drift).
+
+    ``candidate_files`` may be absolute or repo-relative paths; the returned set
+    preserves the input path form.
+    """
+    target_dir = str(local_repo.working_dir)
+    stubbed: set[str] = set()
+    for file_path in candidate_files:
+        rel_path = (
+            os.path.relpath(file_path, target_dir)
+            if os.path.isabs(file_path)
+            else file_path
+        )
+        try:
+            content = local_repo.git.show(f"{base_commit}:{rel_path}")
+        except Exception:  # noqa: BLE001
+            # File didn't exist at base_commit (added by branch), or git blob
+            # unreadable — both mean "not a stub at base", skip.
+            continue
+        if stub_marker in content:
+            stubbed.add(file_path)
+    return stubbed
+
+
+
 def get_target_edit_files(
     local_repo: git.Repo,
     src_dir: str,

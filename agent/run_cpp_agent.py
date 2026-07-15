@@ -41,8 +41,7 @@ logger = logging.getLogger(__name__)
 # Rationale: if module A fails and we continue to B/C/D, on next AUTO-RESUME the
 # outer agent process restarts and starts over from A anyway — much cheaper to
 # retry A immediately with a short backoff. Skips only after this budget is spent.
-_INLINE_MODULE_MAX_RETRIES = int(os.environ.get("KAIJU_MODULE_INLINE_MAX_RETRIES", "3"))
-_INLINE_MODULE_WAIT_SEC = int(os.environ.get("KAIJU_MODULE_INLINE_WAIT_SEC", "60"))
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC  # noqa: E402
 
 
 def _make_blind_lint_cmd(base_cmd: str) -> str:
@@ -244,6 +243,14 @@ def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+        # F3 audit fix: also emit a full error.log with the currently-being-handled
+        # exception's traceback so post-mortem tooling can machine-parse the failure
+        # (was missing in 8/9 runners; only cpp draft had partial coverage).
+        import traceback as _tb
+        try:
+            (log_dir / "error.log").write_text(f"{err}\n\n{_tb.format_exc()}", encoding="utf-8")
+        except OSError:
+            pass
     except Exception:  # noqa: BLE001
         pass
     logger.error("Module %s failed after retries (%s) — skipping so the repo "
@@ -296,7 +303,17 @@ def run_cpp_agent_for_repo(
         logger.info("Skipping %s - already completed", repo_name)
         return
 
-    target_files = get_target_edit_files_cpp(repo_path)
+    # Derive target_files from base_commit blobs (deterministic across stages 1/2/3).
+    # Stage 1 fills the stubs, so a working-tree scan on stages 2/3 returns 0 files.
+    _base_commit_for_scan = example["base_commit"]
+    try:
+        _repo_for_scan = Repo(repo_path)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("C++ target-file scan: could not open repo for base scan (%s); using working-tree scan", _e)
+        _repo_for_scan = None
+    target_files = get_target_edit_files_cpp(
+        repo_path, local_repo=_repo_for_scan, base_commit=_base_commit_for_scan,
+    )
 
     if not target_files:
         logger.warning("No target files found for %s", repo_name)
@@ -304,21 +321,9 @@ def run_cpp_agent_for_repo(
         return
 
     if agent_config.strip_non_stubs:
-        _stub_marker = CPP_STUB_MARKER
-        _filtered: list[str] = []
-        for _tf in target_files:
-            _full = Path(repo_path) / _tf
-            try:
-                if _full.exists() and _stub_marker in _full.read_text(errors="replace"):
-                    _filtered.append(_tf)
-            except OSError:
-                pass
-        logger.info(
-            "strip_non_stubs: kept %d/%d target files",
-            len(_filtered), len(target_files),
-        )
-        target_files = _filtered
-
+        # ``get_target_edit_files_cpp`` already returns only base_commit stubs when
+        # ``base_commit`` is passed; log the same info for parity with other langs.
+        logger.info("strip_non_stubs: kept %d files (derived from base_commit)", len(target_files))
 
     try:
         local_repo = Repo(repo_path)
@@ -433,7 +438,7 @@ def run_cpp_agent_for_repo(
 
         if agent_config.run_tests:
             _module_ok = False
-            for _mret in range(_INLINE_MODULE_MAX_RETRIES):
+            for _mret in range(INLINE_MODULE_MAX_RETRIES):
                 try:
                     with capture_module_calls(
                         thinking_capture=thinking_capture,
@@ -464,28 +469,24 @@ def run_cpp_agent_for_repo(
                     _module_ok = True
                     break
                 except TransientLLMError as _tle:
-                    if _mret >= _INLINE_MODULE_MAX_RETRIES - 1:
+                    if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
                         _repo_had_skips = True
                         _skip_failed_module(file_log_dir, stem, _tle)
                         break
-                    _wait = _INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                    _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
                     logger.warning(
                         "Module %s (test) TransientLLMError attempt %d/%d — inline-retrying after %ds",
-                        stem, _mret + 1, _INLINE_MODULE_MAX_RETRIES, _wait,
+                        stem, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
                     )
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
                     time.sleep(_wait)
-                except Exception as e:
-                    logger.error("Agent failed for %s/%s: %s", repo_name, tf, e)
-                    (file_log_dir / "error.log").write_text(str(e))
-                    break
             if not _module_ok:
                 continue
 
         elif agent_config.use_lint_info:
             _module_ok = False
-            for _mret in range(_INLINE_MODULE_MAX_RETRIES):
+            for _mret in range(INLINE_MODULE_MAX_RETRIES):
                 try:
                     with capture_module_calls(
                         thinking_capture=thinking_capture,
@@ -509,28 +510,24 @@ def run_cpp_agent_for_repo(
                     _module_ok = True
                     break
                 except TransientLLMError as _tle:
-                    if _mret >= _INLINE_MODULE_MAX_RETRIES - 1:
+                    if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
                         _repo_had_skips = True
                         _skip_failed_module(file_log_dir, stem, _tle)
                         break
-                    _wait = _INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                    _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
                     logger.warning(
                         "Module %s (lint) TransientLLMError attempt %d/%d — inline-retrying after %ds",
-                        stem, _mret + 1, _INLINE_MODULE_MAX_RETRIES, _wait,
+                        stem, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
                     )
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
                     time.sleep(_wait)
-                except Exception as e:
-                    logger.error("Agent failed for %s/%s (lint mode): %s", repo_name, tf, e)
-                    (file_log_dir / "error.log").write_text(str(e))
-                    break
             if not _module_ok:
                 continue
 
         else:
             _module_ok = False
-            for _mret in range(_INLINE_MODULE_MAX_RETRIES):
+            for _mret in range(INLINE_MODULE_MAX_RETRIES):
                 try:
                     with capture_module_calls(
                         thinking_capture=thinking_capture,
@@ -553,24 +550,18 @@ def run_cpp_agent_for_repo(
                     _module_ok = True
                     break
                 except TransientLLMError as _tle:
-                    if _mret >= _INLINE_MODULE_MAX_RETRIES - 1:
+                    if _mret >= INLINE_MODULE_MAX_RETRIES - 1:
                         _repo_had_skips = True
                         _skip_failed_module(file_log_dir, stem, _tle)
                         break
-                    _wait = _INLINE_MODULE_WAIT_SEC * (_mret + 1)
+                    _wait = INLINE_MODULE_WAIT_SEC * (_mret + 1)
                     logger.warning(
                         "Module %s (draft) TransientLLMError attempt %d/%d — inline-retrying after %ds",
-                        stem, _mret + 1, _INLINE_MODULE_MAX_RETRIES, _wait,
+                        stem, _mret + 1, INLINE_MODULE_MAX_RETRIES, _wait,
                     )
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
                     time.sleep(_wait)
-                except Exception as e:
-                    import traceback as _tb
-                    tb_str = _tb.format_exc()
-                    logger.error("Agent failed for %s/%s (draft mode): %s\n%s", repo_name, tf, e, tb_str)
-                    (file_log_dir / "error.log").write_text(f"{e}\n\n{tb_str}")
-                    break
             if not _module_ok:
                 continue
 
@@ -621,6 +612,58 @@ def run_cpp_agent_for_repo(
     if thinking_capture is not None:
         try:
             from agent.trajectory_writer import write_trajectory_md
+
+            # IDEMPOTENT BACKSTOP (parity with go/c/js/ts): output.json is written
+            # per-module inside each stage loop the moment the module finishes, so a
+            # worker killed mid-run keeps output.json for every completed module. This
+            # backstop only fills output.json for a turn-bearing module that STILL
+            # lacks one — the one real gap the in-loop write can't cover:
+            #   * a module marked `.done` by a PRIOR run (which predates the in-loop
+            #     write, or was killed between `_mark_module_done` and the in-loop
+            #     `write_module_output_json`) is skipped by `_is_module_done` before
+            #     its in-loop write can run on resume, leaving it `.done` but
+            #     output.json-less on resume.
+            # It NEVER touches a module that already has output.json, so it cannot
+            # double-write or double-count metrics.
+            _modules_seen: set[str] = set()
+            for _turn in thinking_capture.turns:
+                if _turn.module and _turn.module not in _modules_seen:
+                    _modules_seen.add(_turn.module)
+            _edit_targets_bs = [
+                os.path.relpath(_tf, repo_path) if os.path.isabs(_tf) else _tf
+                for _tf in target_files
+            ]
+            for _module_name in _modules_seen:
+                _module_log_dir = stable_log_dir / _module_name
+                if (_module_log_dir / "output.json").exists():
+                    continue  # already written in-loop; don't rewrite / double-count
+                _module_turns = thinking_capture.get_module_turns(_module_name)
+                if not _module_turns:
+                    continue
+                _module_log_dir.mkdir(parents=True, exist_ok=True)
+                _stage_bs = _module_turns[0].stage or "unknown"
+                # Best-effort cumulative diff (base_commit → HEAD) scoped to all
+                # target edit files. Overcounts co-modified files vs a per-module
+                # pre/post window but preserves scoring data for the orphaned module.
+                try:
+                    _bp_bs = example["base_commit"] or "HEAD"
+                    _module_patch_bs = module_file_patch(
+                        local_repo, _bp_bs, "HEAD", _edit_targets_bs, logger=logger,
+                    )
+                except Exception:
+                    _module_patch_bs = ""
+                write_module_output_json(
+                    output_dir=str(_module_log_dir),
+                    module_turns=_module_turns,
+                    module=_module_name,
+                    instance_id=f"{instance_id}__{_module_name}",
+                    git_patch=_module_patch_bs,
+                    instruction="",
+                    metadata=metadata,
+                    metrics=thinking_capture.get_module_metrics(_module_name),
+                    stage=_stage_bs,
+                )
+
 
             if getattr(agent_config, "trajectory_md", True):
                 write_trajectory_md(

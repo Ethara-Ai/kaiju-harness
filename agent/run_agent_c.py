@@ -140,6 +140,14 @@ def _skip_failed_module(log_dir: Path, module_name: str, err: Exception) -> None
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / ".needs_retry").write_text(str(err)[:500], encoding="utf-8")
+        # F3 audit fix: also emit a full error.log with the currently-being-handled
+        # exception's traceback so post-mortem tooling can machine-parse the failure
+        # (was missing in 8/9 runners; only cpp draft had partial coverage).
+        import traceback as _tb
+        try:
+            (log_dir / "error.log").write_text(f"{err}\n\n{_tb.format_exc()}", encoding="utf-8")
+        except OSError:
+            pass
     except Exception:  # noqa: BLE001
         pass
     logger.error("Module %s failed after retries (%s) — skipping so the repo "
@@ -285,17 +293,14 @@ def run_agent_for_repo(
     reference_commit = example.get("reference_commit", "HEAD")
 
     target_edit_files = get_target_edit_files(
-        repo_path, src_dir, branch, reference_commit
+        repo_path, src_dir, branch, reference_commit,
+        base_commit=example["base_commit"],
     )
     target_edit_files_rel = [os.path.relpath(f, repo_path) for f in target_edit_files]
     if agent_config.strip_non_stubs:
-        orig_count = len(target_edit_files)
-        target_edit_files = [
-            f for f in target_edit_files
-            if Path(f).exists() and C_STUB_MARKER in Path(f).read_text(errors="replace")
-        ]
-        target_edit_files_rel = [os.path.relpath(f, repo_path) for f in target_edit_files]
-        logger.info("strip_non_stubs: kept %d/%d target files", len(target_edit_files), orig_count)
+        # ``get_target_edit_files`` already returns only base_commit stubs when
+        # ``base_commit`` is passed; log the same info for parity with other langs.
+        logger.info("strip_non_stubs: kept %d files (derived from base_commit)", len(target_edit_files))
     test_files = collect_c_test_files(repo_path)
     test_files_readonly = [os.path.join(repo_path, tf) for tf in test_files]
     logger.info(

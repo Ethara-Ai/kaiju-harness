@@ -49,6 +49,11 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
+GO_CRAZY="false"
+# A4/A8 audit fix: runtime toggle for spec.pdf/README injection into agent prompt.
+# Previously hardcoded to true; now controllable via --use-spec-info true/false for
+# ablation studies (mirrors Rust/CPP/JS/TS/Java pipelines).
+USE_SPEC_INFO="true"
 STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
@@ -104,6 +109,8 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";  shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";           shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --go-crazy) GO_CRAZY="true"; shift ;;
+        --use-spec-info) [[ $# -lt 2 ]] && { echo "Error: --use-spec-info requires true|false"; exit 1; }; USE_SPEC_INFO="$2"; shift 2 ;;
         --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
@@ -117,6 +124,9 @@ while [[ $# -gt 0 ]]; do
         *)             echo "Error: Unknown argument '$1'"; echo ""; print_usage ;;
     esac
 done
+
+# Propagate strict-blocking toggle (--go-crazy) to all subprocesses.
+export KAIJU_GO_CRAZY="$GO_CRAZY"
 
 [[ -z "$MODEL_ARG" ]] && { echo "Error: --model is required"; echo ""; print_usage; }
 [[ -z "$DATASET_ARG" ]] && { echo "Error: --dataset is required"; echo ""; print_usage; }
@@ -538,7 +548,7 @@ use_repo_info: false
 max_repo_info_length: 10000
 use_unit_tests_info: false
 max_unit_tests_info_length: 10000
-use_spec_info: true
+use_spec_info: ${USE_SPEC_INFO}
 max_spec_info_length: 10000
 spec_summary_max_tokens: 4000
 use_lint_info: ${use_lint_info}
@@ -1011,6 +1021,13 @@ _auto_resume_agent() {
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
         log "  WARNING: ${_nr} module(s) STILL .needs_retry after ${_amax} auto-resume round(s) — genuinely persistent (not a passing transient); run INCOMPLETE."
+        # STRICT-BLOCKING: fail loudly unless --go-crazy was passed. Enforces the
+        # "no proceeding past .needs_retry orphans" contract so batch scores stay
+        # meaningful (a silent skip lets unimplementable modules dilute the result).
+        if [[ "${GO_CRAZY:-false}" != "true" ]]; then
+            log "  FATAL (strict-blocking): halting stage. Pass --go-crazy to bypass and continue anyway."
+            exit 1
+        fi
     elif [[ "$_auto" -gt 0 ]]; then
         log "  AUTO-RESUME succeeded: all modules completed after ${_auto} round(s); run COMPLETE (no manual --resume needed)."
     fi

@@ -46,6 +46,7 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
+GO_CRAZY="false"
 USE_SPEC_INFO="true"
 STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
@@ -105,6 +106,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout) [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2"; shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2"; shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --go-crazy) GO_CRAZY="true"; shift ;;
         --use-spec-info) USE_SPEC_INFO="true"; shift ;;
         --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --no-strict-inventory) STRICT_INVENTORY="false"; shift ;;
@@ -124,6 +126,9 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown argument: $1"; print_usage ;;
     esac
 done
+
+# Propagate strict-blocking toggle (--go-crazy) to all subprocesses.
+export KAIJU_GO_CRAZY="$GO_CRAZY"
 
 [[ -z "$MODEL_ARG" ]] && { echo "Error: --model is required"; print_usage; }
 [[ -z "$DATASET_ARG" ]] && { echo "Error: --dataset is required"; print_usage; }
@@ -510,10 +515,12 @@ verify_inventory_c() {
 # Agent config writer (per-stage)
 # ------------------------------------------------------------
 write_agent_config() {
-    local stage="$1"           # draft | lint | test
+    # A1 audit fix: aligned with Python/Go/Rust/etc. — (run_tests, use_lint_info,
+    # run_entire_dir_lint) all booleans. Removed the unused `stage` string arg that
+    # was a maintenance-drift risk (C runner ignored it; only positional 2–4 mattered).
+    local run_tests="$1"       # true | false
     local lint_info="$2"       # true | false
-    local run_tests="$3"       # true | false
-    local run_dir_lint="$4"    # true | false
+    local run_dir_lint="$3"    # true | false
 
     local user_prompt
     user_prompt=$(cat <<'EOP'
@@ -649,6 +656,13 @@ run_agent_stage() {
 
     if [[ "${AGENT_NEEDS_RETRY:-0}" -gt 0 ]]; then
         log "  WARNING: ${AGENT_NEEDS_RETRY} module(s) STILL .needs_retry after ${_auto_max} auto-resume round(s) — GENUINELY persistent (not a passing transient); run is INCOMPLETE."
+        # STRICT-BLOCKING: fail loudly unless --go-crazy was passed. Enforces the
+        # "no proceeding past .needs_retry orphans" contract so batch scores stay
+        # meaningful (a silent skip lets unimplementable modules dilute the result).
+        if [[ "${GO_CRAZY:-false}" != "true" ]]; then
+            log "  FATAL (strict-blocking): halting stage. Pass --go-crazy to bypass and continue anyway."
+            exit 1
+        fi
     elif [[ "$_auto" -gt 0 ]]; then
         log "  AUTO-RESUME succeeded: all modules completed after ${_auto} round(s); run is COMPLETE (no manual --resume needed)."
     fi
@@ -1004,8 +1018,8 @@ stage_1_draft() {
     # (coder.run(message) with current_stage="draft"), NOT the lint branch.
     # (Was `true`, which forced run_entire_dir_lint -> the agent LINTED in the
     # draft stage and every turn was mislabeled stage=lint. Matches Go's draft
-    # call `write_agent_config "false" "false" "false" "false"`.)
-    write_agent_config "draft" false false false
+    # call `write_agent_config false false false`  # (run_tests, lint_info, run_dir_lint).)
+    write_agent_config false false false
     run_agent_stage "stage1_draft" "$AGENT_CONFIG"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
@@ -1051,7 +1065,7 @@ stage_1_draft() {
 
 stage_2_lint_refine() {
     log "===== Stage 2: Lint refine (clang-tidy + cppcheck) ====="
-    write_agent_config "lint" true false true
+    write_agent_config false true true
     run_agent_stage "stage2_lint" "$AGENT_CONFIG"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
@@ -1105,7 +1119,7 @@ stage_3_test_refine() {
     log "===== Stage 3: Test refine (run CTest, feed failures back) ====="
     local lint_info="true"
     [[ "$NO_STAGE3_LINT" == "true" ]] && lint_info="false"
-    write_agent_config "test" "$lint_info" true false
+    write_agent_config true "$lint_info" false
     run_agent_stage "stage3_test" "$AGENT_CONFIG"
     local elapsed="$AGENT_ELAPSED"
     local rc="$AGENT_RC"
