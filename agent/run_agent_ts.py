@@ -9,6 +9,7 @@ from git import Repo
 from agent.agent_utils import (
     create_branch,
     load_agent_config,
+    agent_test_timeout_sec,
 )
 from agent.agent_utils_ts import (
     get_target_edit_files_ts,
@@ -260,7 +261,7 @@ def run_agent_for_repo_ts(
                         f" --branch {shlex.quote(branch)}"
                         f" --backend {shlex.quote(backend)}"
                         f" --commit0-config-file {shlex.quote(commit0_config_file)}"
-                        f" --timeout 100"
+                        f" --timeout {agent_test_timeout_sec()}"
                     )
                     if agent_config.blind_tests:
                         test_cmd = _make_blind_test_cmd(test_cmd)

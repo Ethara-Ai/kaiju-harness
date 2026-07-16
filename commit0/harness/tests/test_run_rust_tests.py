@@ -683,14 +683,18 @@ def test_close_logger_called(tmp_path):
         close_mock.assert_called_once()
 
 
-def test_verbose_zero_no_print(tmp_path, capsys):
+def test_verbose_zero_still_prints_for_agent(tmp_path, capsys):
+    # F-A2 audit fix: on the SUCCESS path we now ALWAYS print test output to
+    # stdout — the agent-side CLI needs it regardless of --verbose (aider
+    # captures the subprocess stdout to refine against). Prior test enforced
+    # the pre-fix contract (silent when verbose=0), which starved the agent.
     _prep_log_dir(tmp_path)
     with ExitStack() as s:
         _apply_patches(s, tmp_path)
         with pytest.raises(SystemExit):
             _call_main(verbose=0)
         captured = capsys.readouterr()
-        assert "all tests passed" not in captured.out
+        assert "all tests passed" in captured.out
 
 
 def test_verbose_one_prints_output(tmp_path, capsys):

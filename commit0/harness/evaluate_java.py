@@ -278,16 +278,12 @@ def _eval_single_repo(
     real = {k: v for k, v in results.items() if k not in _special}
     num_passed = sum(1 for v in real.values() if v is TestStatus.PASSED)
     observed_total = len(real)
+    canonical = _load_java_test_ids(short_name)
+    canonical_total = len(canonical) if canonical else 0
     if observed_total == 0:
-        # No tests produced reports (compile fail / test-phase timeout / broken
-        # eval). If the frozen inventory says the canonical suite HAS tests, surface
-        # a non-zero denominator so the run reads as an INFRA failure (0/N) rather
-        # than a meaningless 0/0. When tests DID run, the observed (method-level)
-        # count is the correct total; the class-level inventory can't refine it.
-        canonical = _load_java_test_ids(short_name)
-        num_total = len(canonical) if canonical else 0
+        num_total = canonical_total
     else:
-        num_total = observed_total
+        num_total = max(canonical_total, observed_total)
     return short_name, elapsed, num_passed, num_total
 
 

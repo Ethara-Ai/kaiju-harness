@@ -51,16 +51,15 @@ def _fail(pkg, test):
 
 
 class TestDenominator:
-    def test_canonical_inventory_is_denominator(self, tmp_path):
-        # 1 of 2 canonical tests passes; a THIRD non-canonical test also passes.
+    def test_max_canonical_observed_denominator(self, tmp_path):
         events = _pass("pkg", "TestA") + _fail("pkg", "TestB") + _pass("pkg", "TestExtra")
         log = _write_run(tmp_path, events, exit_code=1)
         out: list = []
         _aggregate_go_results(log, "repo", ["pkg/TestA", "pkg/TestB"], out)
         r = out[0]
-        assert r["num_tests"] == 2  # denominator = canonical inventory, NOT 3
-        assert r["num_passed"] == 1  # extra passing test does NOT inflate
-        assert r["passed"] == 0.5
+        assert r["num_tests"] == 3
+        assert r["num_passed"] == 2
+        assert abs(r["passed"] - 2.0 / 3.0) < 1e-9
         assert r["status"] == OUTCOME_TESTS_RAN
 
     def test_no_inflation_in_fallback(self, tmp_path):

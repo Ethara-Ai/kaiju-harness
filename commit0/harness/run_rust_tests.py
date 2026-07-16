@@ -212,13 +212,36 @@ def main(
             )
             logger.info(output)
             if timed_out:
+                # F-A audit fix: flush test output to stdout BEFORE raising so
+                # the caller (aider captures the eval subprocess stdout) sees
+                # WHAT the tests produced before the timeout kill. Without this
+                # the agent only saw the "Test timed out after Ns" line and had
+                # zero signal to refine against.
+                try:
+                    _to = Path(log_dir / "test_output.txt")
+                    if _to.exists():
+                        print(_to.read_text(encoding="utf-8", errors="replace"))
+                    else:
+                        print(output or "(no test output captured before timeout)")
+                except OSError:
+                    pass
+                print(
+                    f"\n[TIMEOUT: test process killed after {timeout}s "
+                    f"(bump via KAIJU_AGENT_TEST_TIMEOUT_SEC or --timeout)]",
+                    file=sys.stderr,
+                )
                 raise EvaluationError(
                     repo_name,
                     f"Test timed out after {timeout} seconds.",
                     logger,
                     log_file=str(log_file),
                 )
-        if verbose > 0:
+        # F-A2 audit fix: always flush test output to stdout on the
+        # SUCCESS path — the agent-side commit0 CLI (which spawns this
+        # module) needs the test output regardless of --verbose. Prior
+        # `if verbose > 0:` gate starved aider when local_inplace or a
+        # subprocess call passed verbose=0.
+        if True:
             test_output = Path(log_dir / "test_output.txt")
             # cargo output can contain non-UTF8 bytes (panic payloads, locale
             # text); replace rather than raise UnicodeDecodeError.

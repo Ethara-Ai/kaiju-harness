@@ -5,6 +5,7 @@ copy into container, execute via /bin/bash, collect results.
 """
 import logging
 import traceback
+import sys as _sys  # F-A: emit timeout marker to stderr
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -97,6 +98,23 @@ def run_java_tests(
             test_logger.info(output)
 
             if timed_out:
+                # F-A audit fix: flush test output BEFORE returning so the caller
+                # (aider captures stdout) sees WHAT the tests produced before the
+                # timeout kill. Without this the agent only saw the log.error line
+                # and had no signal to refine against.
+                try:
+                    _to = log_path / "test_output.txt"
+                    if _to.exists():
+                        print(_to.read_text(encoding="utf-8", errors="replace"))
+                    else:
+                        print(output or "(no test output captured before timeout)")
+                except OSError:
+                    pass
+                print(
+                    f"\n[TIMEOUT: java test process killed after {elapsed:.1f}s "
+                    f"(bump via KAIJU_AGENT_TEST_TIMEOUT_SEC or --timeout)]",
+                    file=_sys.stderr,
+                )
                 test_logger.error(
                     f"Tests timed out for {repo_name} after {elapsed:.1f}s"
                 )

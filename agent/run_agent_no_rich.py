@@ -13,6 +13,7 @@ from agent.agent_utils import (
     update_message_with_dependencies,
     get_lint_cmd,
     load_agent_config,
+    agent_test_timeout_sec,
 )
 import subprocess
 import sys
@@ -309,7 +310,7 @@ def _run_agent_for_repo_impl(
                 if os.environ.get("KAIJU_DIRECT_PYTEST"):
                     test_cmd = f"{sys.executable} -m pytest {test_file} --tb=short --continue-on-collection-errors --no-header -q"
                 else:
-                    test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+                    test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout {agent_test_timeout_sec()}"
                 if agent_config.blind_tests:
                     test_cmd = _make_blind_test_cmd(test_cmd)
                 elif agent_config.names_only_tests:

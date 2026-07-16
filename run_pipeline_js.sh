@@ -550,20 +550,8 @@ _ensure_node_modules_ready_js() {
 preflight() {
     local errors=0
 
-    # S6: macOS Docker Desktop ships the CLI at a non-PATH location. Auto-add
-    # it so `command -v docker` succeeds without user intervention (matches
-    # run_pipeline_go.sh / run_pipeline_rust.sh).
-    if [[ "$(uname -s)" == "Darwin" ]] && ! command -v docker &>/dev/null; then
-        for _p in "/Applications/Docker.app/Contents/Resources/bin" "/usr/local/bin" "/opt/homebrew/bin"; do
-            if [[ -x "$_p/docker" ]]; then
-                export PATH="$_p:$PATH"
-                echo "Info: added Docker CLI at $_p to PATH"
-                break
-            fi
-        done
-    fi
-
-    for cmd in jq bc timeout docker node npm; do
+    # Always-required tools — present on the host AND inside the agent container.
+    for cmd in jq bc timeout node npm; do
         # S4: node/npm are required for build/test/eval; probing them here
         # surfaces missing toolchain BEFORE we spend LLM budget on the agent run.
         if ! command -v "$cmd" &>/dev/null; then
@@ -572,11 +560,32 @@ preflight() {
         fi
     done
 
-    # S5: docker CLI present but daemon unreachable is a common failure mode
-    # (Docker Desktop not started on macOS, service down on Linux). Fail fast
-    # so the pipeline doesn't crash mid-eval after the LLM budget is spent.
-    if command -v docker &>/dev/null; then
-        if ! docker info &>/dev/null; then
+    # docker is only needed on the HOST (docker image build + docker-backend
+    # eval). The in-container run uses local_inplace and has NO nested docker, so
+    # skip the whole docker preflight when KAIJU_IN_CONTAINER=1 — parity with
+    # run_pipeline_go.sh / run_pipeline_rust.sh / run_pipeline_c.sh. Without this
+    # guard the JS *container* run aborted preflight with "Required command
+    # 'docker' not found" before doing any work (docker was in the unconditional
+    # required list; JS was the only language that never checked KAIJU_IN_CONTAINER).
+    if [[ "${KAIJU_IN_CONTAINER:-0}" != "1" ]]; then
+        # S6: macOS Docker Desktop ships the CLI at a non-PATH location. Auto-add
+        # it so `command -v docker` succeeds without user intervention.
+        if [[ "$(uname -s)" == "Darwin" ]] && ! command -v docker &>/dev/null; then
+            for _p in "/Applications/Docker.app/Contents/Resources/bin" "/usr/local/bin" "/opt/homebrew/bin"; do
+                if [[ -x "$_p/docker" ]]; then
+                    export PATH="$_p:$PATH"
+                    echo "Info: added Docker CLI at $_p to PATH"
+                    break
+                fi
+            done
+        fi
+        if ! command -v docker &>/dev/null; then
+            echo "Error: Required command 'docker' not found"
+            errors=$((errors + 1))
+        # S5: docker CLI present but daemon unreachable is a common failure mode
+        # (Docker Desktop not started on macOS, service down on Linux). Fail fast
+        # so the pipeline doesn't crash mid-eval after the LLM budget is spent.
+        elif ! docker info &>/dev/null; then
             echo "Error: docker CLI is present but docker daemon is not reachable"
             echo "       (start Docker Desktop or the docker service and retry)"
             errors=$((errors + 1))

@@ -415,7 +415,10 @@ class TestRunEvalEdgeCases:
         cmd = mock_run.call_args[0][0]
         cmd_str = " ".join(cmd)
         assert "--timeout" in cmd_str
-        assert "100" in cmd_str
+        # Default agent_test_timeout_sec() is 300s (bumped from hardcoded 100s to
+        # give framework-full-suite runs enough time to produce output before the
+        # timeout starves the agent). Env override: KAIJU_AGENT_TEST_TIMEOUT_SEC.
+        assert "--timeout 300" in cmd_str
 
 
 class TestRunAgentForRepoModes:

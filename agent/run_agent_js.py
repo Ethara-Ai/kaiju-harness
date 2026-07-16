@@ -55,6 +55,7 @@ from commit0.harness.get_ts_test_ids import main as get_js_tests
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.utils import load_dataset_from_config
 from agent.claude_code.recovery import run_with_recovery
+from agent.agent_utils import agent_test_timeout_sec
 
 logger = logging.getLogger(__name__)
 
@@ -389,7 +390,7 @@ def _run_agent_for_repo_js_impl(
                         # did zero work.
                         f" --backend {shlex.quote(backend)}"
                         f" --commit0-config-file {shlex.quote(commit0_config_file)}"
-                        f" --timeout 100"
+                        f" --timeout {agent_test_timeout_sec()}"
                     )
                     lint_cmd = get_js_lint_cmd(
                         repo_name, agent_config.use_lint_info, commit0_config_file

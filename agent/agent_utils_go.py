@@ -475,5 +475,17 @@ def read_yaml_config(config_file: str) -> dict:
 
 def load_agent_config(config_file: str) -> AgentConfig:
     """Load and validate agent config from YAML file."""
+    import dataclasses
+
     raw = read_yaml_config(config_file)
-    return AgentConfig(**raw)
+    # The pipeline writes extra metadata into this YAML (e.g. `language: js`) that
+    # AgentConfig doesn't accept as a field; passing it straight to
+    # AgentConfig(**raw) raises `unexpected keyword argument`. Filter to known
+    # fields, mirroring the shared agent_utils.load_agent_config.
+    valid = {f.name for f in dataclasses.fields(AgentConfig)}
+    unknown = set(raw) - valid
+    if unknown:
+        logger.warning(
+            "Ignoring unknown agent-config keys in %s: %s", config_file, sorted(unknown)
+        )
+    return AgentConfig(**{k: v for k, v in raw.items() if k in valid})

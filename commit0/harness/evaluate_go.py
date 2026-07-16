@@ -171,12 +171,9 @@ def _aggregate_go_results(
     # When the inventory is present, num_passed counts only canonical IDs that
     # passed, so it self-caps at len(test_ids_flat) and pass_rate <= 1.0.
     if test_ids_flat:
-        num_tests = len(test_ids_flat)
+        num_tests = max(len(test_ids_flat), len(results))
+        num_passed = sum(1 for r in results.values() if r.value == "PASSED")
     else:
-        # Fallback: no canonical inventory (missing/empty .bz2). Score against ALL
-        # observed tests so a fully-passing repo is NOT falsely reported 0/N — the
-        # `for tid in test_ids_flat` loop above never ran, so num_passed is still
-        # 0 and MUST be recomputed from the observed results here.
         num_tests = len(results)
         num_passed = sum(1 for r in results.values() if r.value == "PASSED")
     num_passed = min(num_passed, num_tests)

@@ -10,7 +10,7 @@ from commit0.harness.constants import (
     RELATIVE_REPO_DIR,
     RepoInstance,
 )
-from commit0.harness.constants_go import GO_BASE_IMAGE_TAG, GoRepoInstance
+from commit0.harness.constants_go import GO_BASE_IMAGE_TAG, GO_VERSION, GoRepoInstance
 from commit0.harness.eval_hardening import (
     revert_and_clean_lines,
     guard_snapshot_lines,

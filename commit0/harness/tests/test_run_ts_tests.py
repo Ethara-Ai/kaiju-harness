@@ -903,7 +903,7 @@ class TestPostDockerExecution:
     @patch(f"{MODULE}.setup_logger")
     @patch(f"{MODULE}.make_ts_spec")
     @patch(f"{MODULE}.load_dataset_from_config")
-    def test_verbose_zero_no_print(
+    def test_verbose_zero_still_prints_for_agent(
         self,
         mock_load,
         mock_make_spec,
@@ -937,7 +937,12 @@ class TestPostDockerExecution:
 
             main(**_default_kwargs(verbose=0))
 
-        mock_print.assert_not_called()
+        # F-A2 audit fix: on the SUCCESS path we now ALWAYS print test output
+        # to stdout — the agent-side CLI needs it regardless of --verbose
+        # (aider captures the subprocess stdout to refine against). Prior test
+        # enforced the pre-fix contract (silent when verbose=0), which starved
+        # the agent.
+        mock_print.assert_called_once_with("test output content")
 
     @patch(f"{MODULE}.sys")
     @patch(f"{MODULE}.Docker")

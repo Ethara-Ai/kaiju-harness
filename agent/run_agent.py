@@ -11,6 +11,7 @@ from agent.agent_utils import (
     update_message_with_dependencies,
     get_lint_cmd,
     load_agent_config,
+    agent_test_timeout_sec,
 )
 import json
 import subprocess
@@ -144,7 +145,7 @@ def run_eval_after_each_commit(
     branch: str, backend: str, commit0_config_file: str
 ) -> str:
     """Run the eval command after each commit."""
-    eval_cmd = f"{sys.executable} -m commit0 evaluate --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+    eval_cmd = f"{sys.executable} -m commit0 evaluate --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout {agent_test_timeout_sec()}"
     try:
         result = subprocess.run(
             eval_cmd.split(), capture_output=True, text=True, check=True
@@ -340,7 +341,7 @@ def _run_agent_for_repo_impl(
             # when unit test feedback is available, iterate over test files
             for test_file in test_files:
                 update_queue.put(("set_current_file", (repo_name, test_file)))
-                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
+                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout {agent_test_timeout_sec()}"
                 test_file_name = test_file.replace(".py", "").replace("/", "__")
                 test_log_dir = experiment_log_dir / test_file_name
                 module_rel_files[test_file_name] = list(target_edit_files)

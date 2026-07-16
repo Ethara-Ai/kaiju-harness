@@ -221,17 +221,41 @@ _reap_container() {
   docker ps -aq --filter "name=$pat" 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
   echo "== interrupted: reaped container(s) matching $pat (data safe on host mount) =="
 }
-_cleanup_bridge_if_owned() {
-  # B1 audit fix: stop the bridge THIS run started so it doesn't leak across runs
-  # (was: line 523 told operator to pkill manually — easy to forget in batches).
-  # No-op paths:
-  #   --reuse-bridge — caller opted into shared bridge; other runs may still need it.
-  #   BRIDGE=none    — model uses direct host creds (vertex/bedrock/gemini), no bridge.
-  # For cc: use the dedicated stop script (tears down monitor + bridge cleanly).
-  # For codex: reuse _force_free_port (bare-python bridge has no stop script;
-  #   port free is sufficient because bridge is single-process, no watchdog).
-  [[ "${REUSE_BRIDGE:-0}" == "1" ]] && return 0
+# Bridge users are ref-counted via one PID file per run under this dir, so the
+# single shared bridge (fixed port per model family: codex 8788 / cc 8765) is
+# only torn down when the LAST concurrent run exits. Without this, two runs for
+# the same model (e.g. js + rust both on gpt55) each stopped the shared bridge on
+# exit, killing it out from under the still-running peer -> "Connection error" at
+# the peer's model preflight.
+_bridge_users_dir() { echo "${TMPDIR:-/tmp}/kaiju_bridge_${BPORT:-0}.users"; }
+
+_register_bridge_user() {
   [[ "${BRIDGE:-none}" == "none" ]] && return 0
+  local d; d="$(_bridge_users_dir)"
+  mkdir -p "$d" 2>/dev/null || true
+  touch "$d/$$" 2>/dev/null || true
+}
+
+_cleanup_bridge_if_owned() {
+  # Stop the shared bridge ONLY when no other live run is using it (ref-count).
+  # No-op paths:
+  #   --reuse-bridge — caller opted into a persistent shared bridge; leave it up.
+  #   BRIDGE=none    — model uses direct host creds (vertex/bedrock/gemini).
+  # For cc: dedicated stop script (tears down monitor + bridge). For codex:
+  #   _force_free_port (bare-python bridge, single-process, no watchdog).
+  [[ "${BRIDGE:-none}" == "none" ]] && return 0
+  local d; d="$(_bridge_users_dir)"
+  rm -f "$d/$$" 2>/dev/null || true
+  [[ "${REUSE_BRIDGE:-0}" == "1" ]] && return 0
+  # Any OTHER live user? Prune dead PID files; if a live one remains, keep the
+  # bridge up for it.
+  if [[ -d "$d" ]]; then
+    for _f in "$d"/*; do
+      [[ -e "$_f" ]] || continue
+      if kill -0 "$(basename "$_f")" 2>/dev/null; then return 0; fi
+      rm -f "$_f" 2>/dev/null || true
+    done
+  fi
   case "$BRIDGE" in
     codex)
       [[ -n "${BPORT:-}" ]] && _force_free_port "$BPORT" >/dev/null 2>&1 || true
@@ -403,8 +427,13 @@ if [ "$BRIDGE" = "codex" ]; then
   # B2 audit fix: reuse ONLY if bridge answers /healthz AND accepts our secret.
   # A stale bridge (different secret from prior operator's session) passes /healthz
   # but 401s our requests — detect that now, not 120s later at model preflight.
-  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT" && _bridge_secret_matches "$BPORT" "codex" "$KAIJU_CODEX_BRIDGE_SECRET"; then
-    echo "   reusing healthy codex bridge on $BPORT (--reuse-bridge; secret matches)"
+  # Reuse a healthy bridge whose secret ALREADY matches ours — regardless of
+  # --reuse-bridge. secret_matches guarantees the container can authenticate, so
+  # a needless force-restart here would only tear down a bridge a CONCURRENT run
+  # (same model, same fixed secret) is actively using. Force-restart is reserved
+  # for an unhealthy or stale-secret (401) bridge.
+  if _bridge_healthy "$BPORT" && _bridge_secret_matches "$BPORT" "codex" "$KAIJU_CODEX_BRIDGE_SECRET"; then
+    echo "   reusing healthy codex bridge on $BPORT (secret matches; shared-safe)"
   else
     # Default path (or --reuse-bridge but the bridge is unhealthy): (re)start so
     # the bridge uses OUR secret — a stale one may hold a different secret the
@@ -419,9 +448,12 @@ if [ "$BRIDGE" = "codex" ]; then
     for _i in $(seq 1 30); do _bridge_healthy "$BPORT" && break; sleep 1; done
   fi
   _bridge_healthy "$BPORT" && echo "   codex bridge healthy on $BPORT (secret matches container)" || { echo "ERROR: bridge not answering /healthz on $BPORT (see /tmp/codex_bridge.log)"; exit 1; }
+  _register_bridge_user
 elif [ "$BRIDGE" = "cc" ]; then
-  if [ "$REUSE_BRIDGE" = "1" ] && _bridge_healthy "$BPORT" && _bridge_secret_matches "$BPORT" "cc" "$KAIJU_CC_BRIDGE_SECRET"; then
-    echo "   reusing healthy cc bridge on $BPORT (--reuse-bridge; secret matches)"
+  # Reuse a healthy same-secret bridge regardless of --reuse-bridge (see codex
+  # note above): don't tear down a bridge a concurrent same-model run is using.
+  if _bridge_healthy "$BPORT" && _bridge_secret_matches "$BPORT" "cc" "$KAIJU_CC_BRIDGE_SECRET"; then
+    echo "   reusing healthy cc bridge on $BPORT (secret matches; shared-safe)"
   else
     if lsof -i :$BPORT 2>/dev/null | grep -q LISTEN; then
       echo "   replacing bridge on $BPORT (forced restart or failed health check)"
@@ -435,6 +467,7 @@ elif [ "$BRIDGE" = "cc" ]; then
     for _i in $(seq 1 30); do _bridge_healthy "$BPORT" && break; sleep 1; done
   fi
   _bridge_healthy "$BPORT" && echo "   cc bridge healthy on $BPORT (secret matches container)" || { echo "ERROR: bridge not answering /healthz on $BPORT"; exit 1; }
+  _register_bridge_user
   # Always (re)arm the self-healing watchdog. Covers --reuse-bridge (where we
   # skipped `start`, so no monitor would otherwise be attached) and re-arms a
   # monitor whose supervisor died — so a mid-run bridge crash is auto-restarted

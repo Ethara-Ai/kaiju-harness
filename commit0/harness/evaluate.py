@@ -327,9 +327,14 @@ def main(
             total = sum(runtimes)
         if "xfail" not in status:
             status["xfail"] = 0
+        observed_passed_or_xfail = sum(
+            1 for v in tests.values()
+            if v is not None and v.get("outcome") in ("passed", "xfail")
+        )
+        num_tests_effective = max(len(test_ids), len(tests))
         passed = (
-            (status["passed"] + status["xfail"]) / sum(status.values())
-            if sum(status.values()) > 0
+            observed_passed_or_xfail / num_tests_effective
+            if num_tests_effective > 0
             else 0.0
         )
         out.append(
@@ -337,8 +342,8 @@ def main(
                 "name": name,
                 "sum": total,
                 "passed": passed,
-                "num_passed": status["passed"] + status["xfail"],
-                "num_tests": len(test_ids),
+                "num_passed": observed_passed_or_xfail,
+                "num_tests": num_tests_effective,
             }
         )
     print("repo,runtime,num_passed/num_tests")

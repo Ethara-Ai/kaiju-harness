@@ -49,6 +49,7 @@ from commit0.harness.split_utils import resolve_split
 from commit0.harness.get_c_test_ids import main as get_c_test_ids
 from commit0.harness.utils import load_dataset_from_config
 from agent.claude_code.recovery import run_with_recovery
+from agent.agent_utils import agent_test_timeout_sec
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ def run_eval_after_each_commit(
     eval_cmd = (
         f"{sys.executable} {_CLI_C_PATH} evaluate "
         f"--branch {branch} --backend {backend} "
-        f"--commit0-config-file {commit0_config_file} --timeout 100"
+        f"--commit0-config-file {commit0_config_file} --timeout {agent_test_timeout_sec()}"
     )
     try:
         result = subprocess.run(
@@ -354,7 +355,7 @@ def run_agent_for_repo(
                 test_cmd = (
                     f"{sys.executable} {_CLI_C_PATH} test {repo_path} {test_id} "
                     f"--branch {branch} --backend {backend} "
-                    f"--commit0-config-file {commit0_config_file} --timeout 100"
+                    f"--commit0-config-file {commit0_config_file} --timeout {agent_test_timeout_sec()}"
                 )
                 if agent_config.blind_tests:
                     test_cmd = _make_blind_test_cmd(test_cmd)

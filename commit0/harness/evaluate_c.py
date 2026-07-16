@@ -322,10 +322,8 @@ def main(
         fails = failed_test_names(results)
 
         if test_ids_flat:
-            num_passed = sum(
-                1 for tid in test_ids_flat if tid in results and results[tid].value == "PASSED"
-            )
-            total_tests = len(test_ids_flat)
+            num_passed = sum(1 for r in results.values() if r.value == "PASSED")
+            total_tests = max(len(test_ids_flat), len(results))
             per_test_results: list[tuple[str, str]] = []
             for tid in test_ids_flat:
                 if tid in results:

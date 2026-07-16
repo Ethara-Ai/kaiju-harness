@@ -52,19 +52,30 @@ _LLM_TRANSIENT_SIGNALS = (
 _HTTP_TRANSIENT_CODE_RE = re.compile(r"(?:\b(?:http|status|code|error)[\s:/-]*|/1\.[01]\s+|/2(?:\.0)?\s+)(502|503|504|520|521|522|523|524|525|526|527|528|529)\b", re.IGNORECASE)
 
 # Word-bounded internal-server-error patterns. Matches ONLY in real LLM/HTTP
-# error contexts (module.ClassName paths, 500-status prefix, error-type
-# markers), NOT in source-code text (class defs, imports, string literals like
-# `"Internal server error"` in test assertions). This avoids false positives
-# on repos like BlackSheep whose source references InternalServerError as an
-# HTTP exception class.
+# error contexts. The 500-status numeric prose form was REMOVED after the
+# httprouter false positive: its stub docstring says `return HTTP '500 Internal
+# Server Error'` (describing a panic handler) which matched the old regex and
+# spuriously re-ran a completed module. Any repo dealing with HTTP handling
+# (Go, Rust, Python web servers) can carry the same prose in comments/docs.
+# Instead we key off structural signals ONLY:
+#   1. module.ClassName paths — real SDK errors always have them
+#      (openai.InternalServerError, litellm.exceptions.InternalServerError,
+#      httpx.InternalServerError, etc.)
+#   2. Exception-format `InternalServerError:` at start-of-line — Python's
+#      standard `str(exc)` output when a bare exception is printed
+#   3. Structured API error payload (`error type: internal_server_error`) —
+#      the JSON envelope OpenAI/Anthropic/Bedrock use for structured errors
+# Real transient 500s are ALWAYS accompanied by one of these signals; a plain
+# `500 Internal Server Error` phrase is unreliable and MUST NOT trigger.
 _INTERNAL_SERVER_ERR_RE = re.compile(
     r"(?:"
-    r"\.internalservererror\b|"          # module.ClassName (e.g. openai.internalservererror)
-    r"500\s*[:\s]\s*internal\s+server\s+error\b|"  # 500 status prefix
-    r"\berror\s+(?:type|class|code)[:\s]+(?:internalservererror|internal\s+server\s+error)\b|"  # error-marker prefix
-    r"\.internal_server_error\b"          # module.snake_case_name variant
+    r"\.internalservererror\b|"          # module.ClassName (openai.internalservererror)
+    r"\.internal_server_error\b|"         # module.snake_case_name variant
+    r"(?:^|\n)\s*internalservererror\s*[:(]|"  # exception-format at line start
+    r"\berror\s+(?:type|class|code)[:\s]+(?:internalservererror|internal[_\s]server[_\s]error)\b|"  # structured API error marker (prose form)
+    r"""["']type["']\s*:\s*["']internal_server_error["']"""  # JSON error payload: {"type": "internal_server_error"}
     r")",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

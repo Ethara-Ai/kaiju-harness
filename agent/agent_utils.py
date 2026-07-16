@@ -48,6 +48,27 @@ tee = "├── "
 last = "└── "
 
 
+def agent_test_timeout_sec() -> int:
+    """Return the per-test timeout (seconds) the agent-side commit0 CLI must use.
+
+    Reads ``KAIJU_AGENT_TEST_TIMEOUT_SEC`` env override. Falls back to 300s on
+    unset/blank/non-numeric/non-positive. Previously hardcoded to 100s which was
+    too short for framework-full-suite runs (ava/node:test cannot use per-test-ID
+    selection and must run the entire suite; JS/TS eval scripts wrap with
+    ``timeout ${EVAL_TEST_TIMEOUT:-900}`` internally, so a 100s outer cap
+    starves output). Kept safely below the 900s inactivity watchdog so a slow
+    (but progressing) test run is not misattributed as an agent hang.
+    """
+    raw = os.environ.get("KAIJU_AGENT_TEST_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return 300
+    try:
+        val = int(raw)
+    except ValueError:
+        return 300
+    return val if val > 0 else 300
+
+
 def extract_function_stubs(file_path: Path) -> List[str]:
     """Extract function stubs from a Python file, including type hints.
 

@@ -4,6 +4,7 @@ import git
 import logging
 import os
 import traceback
+import sys as _sys  # F-A: emit timeout marker to stderr
 from pathlib import Path
 from typing import Iterator, Union
 
@@ -181,6 +182,24 @@ def main(
             )
             logger.info(output)
             if timed_out:
+                # F-A audit fix: flush test output to stdout BEFORE raising so
+                # the caller (aider captures the eval subprocess stdout) sees
+                # WHAT the tests produced before the timeout kill. Without this
+                # the agent only saw the "Test timed out after Ns" line and had
+                # zero signal to refine against.
+                try:
+                    _to = Path(log_dir / "test_output.txt")
+                    if _to.exists():
+                        print(_to.read_text(encoding="utf-8", errors="replace"))
+                    else:
+                        print(output or "(no test output captured before timeout)")
+                except OSError:
+                    pass
+                print(
+                    f"\n[TIMEOUT: test process killed after {timeout}s "
+                    f"(bump via KAIJU_AGENT_TEST_TIMEOUT_SEC or --timeout)]",
+                    file=_sys.stderr,
+                )
                 raise EvaluationError(
                     repo_name,
                     f"Test timed out after {timeout} seconds.",
@@ -188,7 +207,12 @@ def main(
                     log_file=str(log_file),
                 )
         close_logger(logger)
-        if verbose > 0:
+        # F-A2 audit fix: always flush test output to stdout on the
+        # SUCCESS path — the agent-side commit0 CLI (which spawns this
+        # module) needs the test output regardless of --verbose. Prior
+        # `if verbose > 0:` gate starved aider when local_inplace or a
+        # subprocess call passed verbose=0.
+        if True:
             test_output = Path(log_dir / "test_output.txt")
             print(test_output.read_text())
         exit_code_file = Path(log_dir / "test_exit_code.txt")
