@@ -111,35 +111,12 @@ def _validate_stubber_deps() -> None:
 
 
 def _ensure_pkg_manager(pkg_manager: str) -> None:
-    """Ensure the package manager is on PATH; auto-activate via corepack if needed."""
-    if shutil.which(pkg_manager) is not None:
-        return
-    if pkg_manager == "npm":
-        raise EnvironmentError(
-            "`npm` is not on PATH but the repo needs it. Install Node.js."
-        )
-    corepack = shutil.which("corepack")
-    if corepack and pkg_manager in ("pnpm", "yarn"):
-        logger.warning(
-            "`%s` not on PATH; attempting `corepack prepare %s@latest --activate`",
-            pkg_manager,
-            pkg_manager,
-        )
-        result = subprocess.run(
-            [corepack, "prepare", f"{pkg_manager}@latest", "--activate"],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
-        if result.returncode == 0 and shutil.which(pkg_manager) is not None:
-            logger.info("Activated %s via corepack", pkg_manager)
-            return
-    raise EnvironmentError(
-        f"`{pkg_manager}` is not on PATH. Install it manually:\n"
-        f"  npm install -g {pkg_manager}   (or)   corepack enable && "
-        f"corepack prepare {pkg_manager}@latest --activate"
-    )
+    """Thin wrapper over tools._toolchain.ensure_pm (see TOOLCHAIN_PROVISIONING.md)."""
+    from tools._toolchain import ToolchainError, ensure_pm
+    try:
+        ensure_pm(pkg_manager)
+    except ToolchainError as exc:
+        raise EnvironmentError(str(exc)) from exc
 
 
 def _list_workspace_packages(repo_dir: Path) -> list[str]:
@@ -604,7 +581,7 @@ def detect_package_manager(repo_dir: Path) -> str:
         return "pnpm"
     if (repo_dir / "yarn.lock").exists():
         return "yarn"
-    if (repo_dir / "bun.lockb").exists():
+    if (repo_dir / "bun.lockb").exists() or (repo_dir / "bun.lock").exists():
         return "bun"
     return "npm"
 
@@ -990,6 +967,12 @@ def create_ts_stubbed_branch(
         # frozen installs fail with a cryptic "no lockfile" error.
         _orig_npmrc = None if _has_lock else _neutralize_npmrc_lockfile_disable(repo_dir)
         try:
+            from tools._toolchain import ToolchainError, build_env_for_repo
+            try:
+                _install_env = build_env_for_repo(repo_dir)
+            except ToolchainError as _exc:
+                logger.warning("  Node auto-switch skipped: %s", _exc)
+                _install_env = None
             subprocess.run(
                 install_cmd,
                 cwd=str(repo_dir),
@@ -997,6 +980,7 @@ def create_ts_stubbed_branch(
                 text=True,
                 timeout=600,
                 check=False,
+                env=_install_env,
             )
         finally:
             if _orig_npmrc is not None:

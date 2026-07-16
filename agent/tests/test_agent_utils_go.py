@@ -84,3 +84,14 @@ class TestGetGoLintCmd:
         assert "lint" in cmd
         assert "myrepo" in cmd
         assert "/path/cfg.yaml" in cmd
+
+    def test_defaults_to_local_inplace_backend(self) -> None:
+        """Agent-container pipelines can't spawn a Docker container for lint;
+        the default backend must be local_inplace so linters run in-place."""
+        cmd = get_go_lint_cmd("myrepo", "/path/cfg.yaml")
+        assert "--backend local_inplace" in cmd
+
+    def test_explicit_backend_override(self) -> None:
+        cmd = get_go_lint_cmd("myrepo", "/path/cfg.yaml", backend="local")
+        assert "--backend local" in cmd
+        assert "local_inplace" not in cmd

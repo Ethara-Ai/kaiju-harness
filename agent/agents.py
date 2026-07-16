@@ -78,6 +78,47 @@ _INTERNAL_SERVER_ERR_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Substrings that flag a message as coming from an EXTERNAL TOOL (Docker,
+# kaiju harness subprocess) rather than the LLM/aider network stack. When one
+# of _LLM_TRANSIENT_SIGNALS appears NEAR one of these markers, we suppress the
+# transient-retry raise: the underlying failure is infrastructure (missing
+# docker.sock, subprocess ECONNRESET on a linter call, etc.) and re-running
+# the module will fail identically until the operator fixes the environment.
+# Without this guard, a Docker error text like ('Connection aborted.',
+# FileNotFoundError(2, ...)) triggered infinite retries on Go stage 2.
+_TOOL_ERROR_CONTEXT_MARKERS = (
+    "commit0.harness.",           # kaiju harness module log source
+    "docker.errors",              # docker SDK exception module
+    "docker.from_env",            # docker SDK entrypoint
+    "cannot connect to docker",   # lint_go/build_go error phrasing
+    "docker daemon",              # docker CLI error phrasing
+    "docker.apiclient",           # docker SDK low-level client
+    "docker.dockerclient",        # docker SDK high-level client
+)
+
+
+def _is_tool_error_context(text_lower: str, match_pos: int, window: int = 500) -> bool:
+    """Return True if a transient-pattern match is surrounded by tool-error
+    markers (Docker socket, kaiju harness subprocess) — i.e. not really an LLM
+    transient. The window is chosen to span a stack trace / a multi-line log
+    record without leaking into unrelated aider chat turns."""
+    start = max(0, match_pos - window)
+    end = min(len(text_lower), match_pos + window)
+    snippet = text_lower[start:end]
+    return any(marker in snippet for marker in _TOOL_ERROR_CONTEXT_MARKERS)
+
+
+def _find_llm_transient(text_lower: str, needle: str) -> int:
+    """Return the first position of `needle` that is NOT in a tool-error
+    context. Returns -1 if the substring is absent or every occurrence is
+    accompanied by a tool-error marker."""
+    idx = text_lower.find(needle)
+    while idx != -1:
+        if not _is_tool_error_context(text_lower, idx):
+            return idx
+        idx = text_lower.find(needle, idx + len(needle))
+    return -1
+
 
 def apply_llm_resilience(model: "Model") -> None:
     """(a)+(b) client-side: make litellm RETRY a failed/timed-out call and wait
@@ -111,24 +152,24 @@ def raise_if_transient_llm_error(text: str, context: str = "") -> None:
         return
     low = text.lower()
     for sig in _LLM_TRANSIENT_SIGNALS:
-        if sig in low:
+        if _find_llm_transient(low, sig) != -1:
             raise TransientLLMError(
                 f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
                 f"matched {sig!r} — re-running module (timed out)."
             )
-    http_match = _HTTP_TRANSIENT_CODE_RE.search(low)
-    if http_match:
-        code = http_match.group(1)
-        raise TransientLLMError(
-            f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
-            f"matched HTTP status {code} — re-running module (timed out)."
-        )
-    ise_match = _INTERNAL_SERVER_ERR_RE.search(low)
-    if ise_match:
-        raise TransientLLMError(
-            f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
-            f"matched internal server error pattern — re-running module (timed out)."
-        )
+    for m in _HTTP_TRANSIENT_CODE_RE.finditer(low):
+        if not _is_tool_error_context(low, m.start()):
+            code = m.group(1)
+            raise TransientLLMError(
+                f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
+                f"matched HTTP status {code} — re-running module (timed out)."
+            )
+    for m in _INTERNAL_SERVER_ERR_RE.finditer(low):
+        if not _is_tool_error_context(low, m.start()):
+            raise TransientLLMError(
+                f"aider swallowed a transient LLM error{(' in ' + context) if context else ''}: "
+                f"matched internal server error pattern — re-running module (timed out)."
+            )
 
 
 def _patch_litellm_output_config_passthrough() -> None:

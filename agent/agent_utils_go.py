@@ -254,9 +254,12 @@ _CLI_GO_PATH = str(Path(__file__).resolve().parent.parent / "commit0" / "cli_go.
 def get_go_lint_cmd(
     repo: str,
     commit0_config_file: str,
+    backend: str = "local_inplace",
 ) -> str:
     return (
-        f"python {_CLI_GO_PATH} lint {repo} --commit0-config-file {commit0_config_file}"
+        f"python {_CLI_GO_PATH} lint {repo} "
+        f"--commit0-config-file {commit0_config_file} "
+        f"--backend {backend}"
     )
 
 

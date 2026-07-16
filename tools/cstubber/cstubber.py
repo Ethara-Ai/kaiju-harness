@@ -383,10 +383,21 @@ def _function_should_skip(
         return "header_file"
 
     # __attribute__((constructor)) / ((destructor)) — never stub, would break init.
+    # A full LLVM libclang exposes these as CONSTRUCTOR_ATTR/DESTRUCTOR_ATTR, but
+    # the portable `libclang` wheel reports them as a generic UNEXPOSED_ATTR whose
+    # sole token is the attribute name. Check both so detection is independent of
+    # which libclang build is loaded (system Xcode/apt vs. bundled wheel).
     for child in cursor.get_children():
         kind_name = child.kind.name
         if kind_name in ("CONSTRUCTOR_ATTR", "DESTRUCTOR_ATTR"):
             return "init_hook"
+        if kind_name == "UNEXPOSED_ATTR":
+            try:
+                tokens = {t.spelling for t in child.get_tokens()}
+            except Exception:  # noqa: BLE001 - token read is best-effort
+                tokens = set()
+            if tokens & {"constructor", "destructor"}:
+                return "init_hook"
 
     file_path = source_path
     if name == "main" and skip_dir_re.search(file_path.replace(os.sep, "/")):

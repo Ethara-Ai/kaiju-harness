@@ -333,6 +333,13 @@ def lint(
     commit0_config_file: str = typer.Option(
         ".commit0.go.yaml", help="Path to commit0-go config file"
     ),
+    backend: str = typer.Option(
+        "local",
+        "--backend",
+        help="Execution backend: 'local' spawns a Docker container (default; "
+        "needs docker.sock); 'local_inplace' runs linters directly in the "
+        "current environment (matches agent-container pipelines).",
+    ),
     verbose: int = typer.Option(
         1, "--verbose", "-v", help="Verbosity level", count=True
     ),
@@ -350,6 +357,7 @@ def lint(
         config["dataset_split"],
         repo_or_repo_dir,
         config["base_dir"],
+        backend=backend,
     )
 
 

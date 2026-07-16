@@ -123,3 +123,49 @@ class TestOtherTransientSignals:
     def test_bare_overloaded_word_does_not_fire(self):
         """C++ `operator overloaded` in source MUST NOT fire (b40 regression fix)."""
         assert not _fires("class Foo { void operator overloaded(); };")
+
+
+class TestToolErrorContextSuppression:
+    """Docker/harness errors that CONTAIN LLM-transient substrings must NOT fire
+    the retry classifier — they're infrastructure errors that would fail
+    identically on retry (Go stage 2 lint infinite-retry regression: Docker
+    socket missing in agent container emitted 'Connection aborted.' which
+    matched _LLM_TRANSIENT_SIGNALS and drove tokens-until-timeout retries)."""
+
+    def test_docker_connection_aborted_does_not_fire(self):
+        assert not _fires(
+            "commit0.harness.lint_go - ERROR - Cannot connect to Docker: "
+            "Error while fetching server API version: ('Connection aborted.', "
+            "FileNotFoundError(2, 'No such file or directory'))"
+        )
+
+    def test_docker_from_env_failure_does_not_fire(self):
+        assert not _fires(
+            "docker.errors.DockerException: docker.from_env() failed — "
+            "connection aborted at /var/run/docker.sock"
+        )
+
+    def test_kaiju_harness_subprocess_timeout_does_not_fire(self):
+        assert not _fires(
+            "commit0.harness.run_js_tests - ERROR - subprocess timed out"
+        )
+
+    def test_llm_connection_aborted_still_fires(self):
+        """A REAL LLM connection abort (no tool-error markers nearby) MUST still fire."""
+        assert _fires(
+            "openai.APIConnectionError: Connection aborted during model streaming"
+        )
+
+    def test_llm_http_502_still_fires_in_clean_context(self):
+        assert _fires(
+            "litellm.exceptions.BadGatewayError: http 502 bad gateway from anthropic"
+        )
+
+    def test_mixed_context_llm_signal_before_docker_error_fires(self):
+        """If the LLM transient occurs FAR from the tool-error text, still fire."""
+        text = (
+            "openai.APIConnectionError: Connection aborted during streaming\n"
+            + "x" * 2000  # push docker log outside the 500-char context window
+            + "\ncommit0.harness.lint_go - ERROR - Cannot connect to Docker"
+        )
+        assert _fires(text)

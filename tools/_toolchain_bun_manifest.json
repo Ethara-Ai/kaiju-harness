@@ -1,0 +1,17 @@
+{
+  "$schema": "kaiju-toolchain-bun-manifest/1.0",
+  "_comment": "Pinned bun installer versions + SHA256 of the install script served at https://bun.sh/install. Refresh via `python -m tools.toolchain refresh-bun-manifest`. When installer_sha256 is null, the harness treats the SHA as UNVERIFIED (WARN in normal mode, FATAL in strict mode). Populate via CI or first-run capture.",
+  "default": "1.1.29",
+  "versions": {
+    "1.1.29": {
+      "installer_url": "https://bun.sh/install",
+      "installer_sha256": null,
+      "npm_package_version": "1.1.29"
+    },
+    "1.1.34": {
+      "installer_url": "https://bun.sh/install",
+      "installer_sha256": null,
+      "npm_package_version": "1.1.34"
+    }
+  }
+}

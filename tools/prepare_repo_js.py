@@ -374,32 +374,12 @@ def _validate_generated_lockfile(lockfile_path: Path, pkg_manager: str) -> None:
 
 
 def _ensure_pkg_manager(pkg_manager: str) -> None:
-    if shutil.which(pkg_manager) is not None:
-        return
-    if pkg_manager == "npm":
-        raise OSError("`npm` is not on PATH but the repo needs it. Install Node.js.")
-    corepack = shutil.which("corepack")
-    if corepack and pkg_manager in {"pnpm", "yarn"}:
-        logger.warning(
-            "`%s` not on PATH; attempting `corepack prepare %s@latest --activate`",
-            pkg_manager,
-            pkg_manager,
-        )
-        result = subprocess.run(
-            [corepack, "prepare", f"{pkg_manager}@latest", "--activate"],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
-        if result.returncode == 0 and shutil.which(pkg_manager) is not None:
-            logger.info("Activated %s via corepack", pkg_manager)
-            return
-    raise OSError(
-        f"`{pkg_manager}` is not on PATH. Install manually:\n"
-        f"  npm install -g {pkg_manager}   (or)   corepack enable && "
-        f"corepack prepare {pkg_manager}@latest --activate"
-    )
+    """Thin wrapper over tools._toolchain.ensure_pm (see TOOLCHAIN_PROVISIONING.md)."""
+    from tools._toolchain import ToolchainError, ensure_pm
+    try:
+        ensure_pm(pkg_manager)
+    except ToolchainError as exc:
+        raise OSError(str(exc)) from exc
 
 
 def _list_workspace_packages(repo_dir: Path) -> list[str]:
@@ -995,6 +975,12 @@ def create_js_stubbed_branch(
                 pkg_manager,
             )
             install_cmd = _generating_install_cmd(pkg_manager)
+        from tools._toolchain import ToolchainError, build_env_for_repo
+        try:
+            _install_env = build_env_for_repo(repo_dir)
+        except ToolchainError as _exc:
+            logger.warning("  Node auto-switch skipped: %s", _exc)
+            _install_env = None
         install_result = subprocess.run(
             install_cmd,
             cwd=str(repo_dir),
@@ -1002,6 +988,7 @@ def create_js_stubbed_branch(
             text=True,
             timeout=600,
             check=False,
+            env=_install_env,
         )
         if install_result.returncode != 0:
             raise RuntimeError(

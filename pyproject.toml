@@ -38,6 +38,14 @@ dependencies = [
     # missing when cppstubber (Clang LibTooling binary) is unavailable.
     "tree-sitter>=0.23.0,<1.0",
     "tree-sitter-language-pack>=0.13.0,<1.0",
+    # libclang Python bindings for the C stubber (tools/cstubber/cstubber.py),
+    # which parses via clang.cindex — unlike the C++ path (LibTooling binary +
+    # tree-sitter). The `libclang` wheel bundles the native library so the C
+    # prepare pipeline works in CI/containers without a system Xcode/apt clang;
+    # cstubber's macOS branch still overrides to the system libclang when present.
+    # Without this, C `prepare` dies with `ModuleNotFoundError: No module named
+    # 'clang'` and stubbing is skipped/corrupted.
+    "libclang>=18.1.1,<19",
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",

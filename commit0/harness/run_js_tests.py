@@ -346,6 +346,18 @@ def main(
             test_output = Path(log_dir / "test_output.txt")
             if test_output.exists():
                 print(test_output.read_text())
+            # ava/node_test redirect --tap straight to test_results.json (spec_js.py
+            # test_cmd dict) so test_output.txt is near-empty; without this flush the
+            # agent-side cmd_test sees only the earlier "Per-test-ID selection
+            # unsupported" warning and hallucinates edits against read-only test
+            # files (425-block rejection storms observed on ava repos in stage 3).
+            if framework in ("ava", _NODE_TEST_FRAMEWORK):
+                test_results = Path(log_dir / "test_results.json")
+                if test_results.exists():
+                    tap = test_results.read_text(encoding="utf-8", errors="replace")
+                    if tap.strip() and tap.strip() != "EMPTY_RESULTS":
+                        print(f"\n--- {framework} test results (TAP) ---")
+                        print(tap)
 
         exit_code = _read_exit_code(log_dir / "test_exit_code.txt")
         install_code = _read_exit_code(log_dir / "install_exit_code.txt")
