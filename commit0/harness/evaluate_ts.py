@@ -46,47 +46,102 @@ def parse_jest_vitest_report(
     """Parse a Jest/Vitest JSON report and return (status_counter, total_duration_s).
 
     ``report`` is the parsed ``report.json`` produced by Jest's ``--json`` or
-    Vitest's ``--reporter=json`` flag.
+    Vitest's ``--reporter=json`` flag, OR the shape produced by
+    ``node_test_tap.tap_to_jest_report_shape`` for Node ``--test`` runs.
 
     * ``assertionResults`` (single 's') is the key used by both Jest and Vitest.
     * Durations are in **milliseconds** — they are converted to seconds here.
-    * Any ``test_ids`` not present in the report are counted as ``"failed"``.
+    * Any ``test_ids`` not matched in the report are counted as ``"failed"``.
+
+    Matching is intentionally lenient. Different runners emit different
+    ``fullName`` conventions:
+
+    * Jest / Vitest join ancestors + title with a **space**
+      (``"path-to-regexp PathError should ..."``).
+    * jsbt (parsed from Node ``--test`` TAP comments) joins with ``" > "``
+      (``"watch a directory > should ..."``) and does NOT include a file prefix.
+    * The frozen inventory format is
+      ``"<rel_path> > <ancestor> > ... > <title>"``.
+
+    Rather than force every runner to produce the inventory format, we look up
+    each report assertion against several candidate spellings and, as a last
+    resort, its leaf title — but only when the leaf uniquely identifies one
+    inventory entry.
     """
     canonical: set[str] = set()
+    by_bare: dict[str, str] = {}
+    by_leaf: dict[str, list[str]] = {}
     for tid in test_ids:
         if not tid:
             continue
         canonical.add(tid)
-        if " > " in tid:
-            canonical.add(tid.split(" > ", 1)[1])
+        bare = tid.split(" > ", 1)[1] if " > " in tid else tid
+        by_bare[bare] = tid
+        leaf = tid.rsplit(" > ", 1)[-1]
+        by_leaf.setdefault(leaf, []).append(tid)
 
     matched: dict[str, str] = {}
     durations_ms: list[float] = []
 
     for test_result in report.get("testResults", []):
+        tr_name = test_result.get("name", "") or ""
+        # Strip common container prefixes so a Docker ``/testbed/`` file path
+        # matches an inventory entry recorded relative to the repo root.
+        rel_file = tr_name
+        for prefix in ("/testbed/", "/workspace/", "/repo/"):
+            if rel_file.startswith(prefix):
+                rel_file = rel_file[len(prefix):]
+                break
+
         for assertion in test_result.get("assertionResults", []):
-            full_name = assertion.get("fullName", "")
-            if not full_name or full_name not in canonical:
-                continue
+            title: str = assertion.get("title", "") or ""
+            ancestors: list[str] = assertion.get("ancestorTitles", []) or []
+            full_name: str = assertion.get("fullName", "") or ""
             raw_status: str = assertion.get("status", "failed")
             mapped = STATUS_MAP.get(raw_status, "failed")
-            if full_name not in matched or (
-                matched[full_name] == "failed" and mapped == "passed"
+            duration_ms = float(assertion.get("duration", 0) or 0)
+
+            candidates: list[str] = []
+            if full_name:
+                candidates.append(full_name)
+            if rel_file and (ancestors or title):
+                candidates.append(" > ".join([rel_file, *ancestors, title]))
+            if ancestors or title:
+                candidates.append(" > ".join([*ancestors, title]))
+            if title:
+                candidates.append(title)
+
+            hit: Union[str, None] = None
+            for cand in candidates:
+                if cand in canonical:
+                    hit = cand
+                    break
+                if cand in by_bare:
+                    hit = by_bare[cand]
+                    break
+
+            # Leaf-only fallback: only match if the leaf is UNIQUE in the
+            # inventory. Prevents cross-describe false positives when many
+            # tests share the same title (e.g. table-driven cases).
+            if hit is None and title:
+                leaf_hits = by_leaf.get(title, [])
+                if len(leaf_hits) == 1:
+                    hit = leaf_hits[0]
+
+            if hit is None:
+                continue
+
+            if hit not in matched or (
+                matched[hit] == "failed" and mapped == "passed"
             ):
-                matched[full_name] = mapped
-            durations_ms.append(float(assertion.get("duration", 0)))
+                matched[hit] = mapped
+            durations_ms.append(duration_ms)
 
     status: list[str] = []
     for tid in test_ids:
         if not tid:
             continue
-        bare = tid.split(" > ", 1)[1] if " > " in tid else tid
-        if bare in matched:
-            status.append(matched[bare])
-        elif tid in matched:
-            status.append(matched[tid])
-        else:
-            status.append("failed")
+        status.append(matched.get(tid, "failed"))
 
     total_seconds = sum(durations_ms) / 1000.0
     return Counter(status), total_seconds
