@@ -205,31 +205,33 @@ def _make_http_error(code: int, url: str = "https://api.github.com/x") -> HTTPEr
 
 
 class TestRateLimitRetry:
-    def test_403_retries_after_sleep_then_succeeds(self) -> None:
+    def test_403_retries_via_gh_request_then_succeeds(self) -> None:
+        """QC-C8-001: rate-limit retry now lives INSIDE the bounded _gh_request
+        wrapper (waits until X-RateLimit-Reset, capped at `retries`), not an
+        unbounded fixed-60s loop in _search_js_repos. Drive it via the real HTTP
+        seam (_safe_request) so the wrapper's retry actually runs."""
         rate_limited = _make_http_error(403)
-        success_payload = {"items": [], "total_count": 0}
+        success_body = b'{"items": [], "total_count": 0}'
         call_count = {"n": 0}
 
-        def _fake_gh(_url, _token=None):
+        def _fake_safe_request(_url, _headers=None):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise rate_limited
-            return success_payload
+            return success_body
 
         sleep_calls: list[float] = []
-
         with (
-            patch.object(discover_js, "_gh_request", _fake_gh),
+            patch.object(discover_js, "_safe_request", _fake_safe_request),
             patch.object(
                 discover_js.time, "sleep", lambda secs: sleep_calls.append(secs)
             ),
         ):
-            discover_js._search_js_repos(
-                min_stars=100, max_results=1, token=None
-            )
+            out = discover_js._gh_request("https://api.github.com/x", None)
 
-        assert call_count["n"] >= 2
-        assert 60 in sleep_calls
+        assert call_count["n"] == 2  # retried once after the 403
+        assert sleep_calls  # waited (bounded) before retrying
+        assert out == {"items": [], "total_count": 0}
 
     def test_non_403_httperror_propagates_without_sleep(self) -> None:
         unauthorised = _make_http_error(401)
@@ -247,13 +249,26 @@ class TestRateLimitRetry:
             )
         mock_sleep.assert_not_called()
 
-    def test_no_max_retries_cap_is_documented_gap(self) -> None:
+    def test_gh_request_has_bounded_retry_cap(self) -> None:
+        """QC-C8-001 CLOSED the old 'no max-retries cap' gap: _gh_request now
+        bounds retries and raises RuntimeError rather than looping forever on a
+        persistent 403."""
         import inspect
 
-        source = inspect.getsource(discover_js._search_js_repos)
-        assert "if e.code == 403" in source
-        assert "time.sleep(60)" in source
-        assert "continue" in source
+        source = inspect.getsource(discover_js._gh_request)
+        assert "retries" in source
+        assert "exhausted" in source and "RuntimeError" in source
+
+        with (
+            patch.object(
+                discover_js, "_safe_request", side_effect=_make_http_error(403)
+            ),
+            patch.object(discover_js.time, "sleep", lambda secs: None),
+        ):
+            with pytest.raises(RuntimeError, match="exhausted"):
+                discover_js._gh_request(
+                    "https://api.github.com/x", None, retries=3
+                )
         assert "max_retries" not in source.lower(), (
             "if a max-retries cap is added, update this test to assert the new "
             "bound rather than asserting the current unbounded loop"

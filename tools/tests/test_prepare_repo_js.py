@@ -566,7 +566,7 @@ class TestF009InstallFailureAborts:
 
 
 class TestF007UnpushableRowsRejected:
-    def test_push_failure_and_remote_resolution_failure_returns_none(
+    def test_push_failure_and_remote_resolution_failure_raises(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -599,16 +599,17 @@ class TestF007UnpushableRowsRejected:
         monkeypatch.setattr(prj, "push_to_fork", _failing_push)
         monkeypatch.setattr(prj, "_resolve_commits_from_remote", lambda *_a, **_kw: None)
 
-        result = prj.prepare_js_repo(
-            full_name="upstream/lib",
-            clone_dir=tmp_path,
-            org="Zahgon",
-            dry_run=False,
-        )
-        assert result is None, (
-            "F-007: when push fails AND remote resolution fails, prepare_js_repo "
-            "must NOT emit a dataset row whose SHAs only exist locally"
-        )
+        # QC-C1-004: JS now RAISES (parity with TS/Py/Go/Java) instead of
+        # silently returning None. Emitting a dataset row whose base/reference
+        # SHAs exist only in the local clone yields an UNBUILDABLE entry
+        # ('not our ref' in the container), so the run must fail loud.
+        with pytest.raises(RuntimeError, match="UNBUILDABLE|not our ref|Push to"):
+            prj.prepare_js_repo(
+                full_name="upstream/lib",
+                clone_dir=tmp_path,
+                org="Zahgon",
+                dry_run=False,
+            )
 
 
 class TestStubMarkerInvariant:

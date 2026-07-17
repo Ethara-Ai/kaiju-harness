@@ -832,3 +832,52 @@ class TestDetectPackageManagerBun:
     def test_bun_lockb(self, tmp_path: Path) -> None:
         (tmp_path / "bun.lockb").write_bytes(b"\x00")
         assert detect_package_manager(tmp_path) == "bun"
+
+
+class TestCaptureTsTestIdsFailLoud:
+    """`_capture_ts_test_ids` must fail LOUD when a repo has test files but 0 IDs
+    were captured (signals a toolchain/install failure — e.g. Yarn-Berry flag
+    mismatch left node_modules empty). Shipping the row silently just defers the
+    failure to the run-stage inventory guard. Honors KAIJU_REQUIRE_INVENTORY=0.
+    """
+
+    def _repo_with_tests(self, tmp_path: Path) -> Path:
+        (tmp_path / "package.json").write_text('{"name":"x","version":"1.0.0"}')
+        tests = tmp_path / "tests"
+        tests.mkdir()
+        (tests / "foo.test.ts").write_text("test('a', () => {});")
+        return tmp_path
+
+    def test_raises_when_tests_present_but_zero_ids(self, tmp_path, monkeypatch):
+        import tools.prepare_repo_ts as m
+        import tools.generate_test_ids_ts as g
+        repo = self._repo_with_tests(tmp_path)
+        # _capture_ts_test_ids imports these locally from generate_test_ids_ts,
+        # so patch at the source module (patching prepare_repo_ts has no effect).
+        monkeypatch.setattr(g, "collect_ts_test_ids_local", lambda **kw: [])
+        monkeypatch.setattr(g, "_normalize_ts_test_ids", lambda ids, td: ids)
+        monkeypatch.delenv("KAIJU_REQUIRE_INVENTORY", raising=False)
+        with pytest.raises(RuntimeError, match="0 test IDs"):
+            m._capture_ts_test_ids(repo_dir=repo, repo="x/y", test_dir="tests",
+                                   framework="jest", reference_commit=None)
+
+    def test_override_downgrades_to_warning(self, tmp_path, monkeypatch):
+        import tools.prepare_repo_ts as m
+        import tools.generate_test_ids_ts as g
+        repo = self._repo_with_tests(tmp_path)
+        monkeypatch.setattr(g, "collect_ts_test_ids_local", lambda **kw: [])
+        monkeypatch.setattr(g, "_normalize_ts_test_ids", lambda ids, td: ids)
+        monkeypatch.setenv("KAIJU_REQUIRE_INVENTORY", "0")
+        m._capture_ts_test_ids(repo_dir=repo, repo="x/y", test_dir="tests",
+                               framework="jest", reference_commit=None)  # no raise
+
+    def test_no_test_files_stays_soft(self, tmp_path, monkeypatch):
+        """A genuinely test-free repo must NOT raise."""
+        import tools.prepare_repo_ts as m
+        import tools.generate_test_ids_ts as g
+        (tmp_path / "package.json").write_text('{"name":"x","version":"1.0.0"}')
+        monkeypatch.setattr(g, "collect_ts_test_ids_local", lambda **kw: [])
+        monkeypatch.setattr(g, "_normalize_ts_test_ids", lambda ids, td: ids)
+        monkeypatch.delenv("KAIJU_REQUIRE_INVENTORY", raising=False)
+        m._capture_ts_test_ids(repo_dir=tmp_path, repo="x/y", test_dir="tests",
+                               framework="jest", reference_commit=None)  # no raise
