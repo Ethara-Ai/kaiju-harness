@@ -8,13 +8,12 @@ _logger = logging.getLogger(__name__)
 
 
 def get_dockerfile_base_cpp() -> str:
-    template_path = DOCKERFILES_CPP_DIR / "Dockerfile.cpp"
-    if not template_path.exists():
-        raise FileNotFoundError(
-            f"C++ base Dockerfile template not found: {template_path}"
-        )
     from commit0.harness.constants_cpp import CPP_UBUNTU_VERSION
-    return template_path.read_text().replace("__CPP_UBUNTU_VERSION__", CPP_UBUNTU_VERSION)
+    from commit0.harness.dockerfiles._template import render_dockerfile
+    return render_dockerfile(
+        DOCKERFILES_CPP_DIR / "Dockerfile.cpp",
+        {"__CPP_UBUNTU_VERSION__": CPP_UBUNTU_VERSION},
+    )
 
 
 def get_dockerfile_repo_cpp(

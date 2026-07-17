@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from typing import Iterator, Union
 
+from commit0.harness.reward_hack import average_pass_rate
 from commit0.harness.run_ts_tests import main as run_ts_tests
 from commit0.harness.get_ts_test_ids import main as get_ts_test_ids
 from commit0.harness.constants import RepoInstance
@@ -26,6 +27,19 @@ from commit0.harness.utils import (
 from commit0.harness.split_utils import resolve_split
 
 logger = logging.getLogger(__name__)
+
+# Statuses that are NOT a measured model score — excluded from the micro-average
+# (mirrors evaluate_go.py / evaluate_c.py / evaluate_rust.py). A SUITE_CRASHED
+# (import/setup crash), PATCH_APPLY_FAILED, TEST_SUITE_TIMEOUT, COMPILE_FAILED
+# (runner crash) or OUTPUT_MISSING row is an infra failure whose 0/N must not be
+# scored as a genuine 0%.
+_EXCLUDED_STATUSES = {
+    "SUITE_CRASHED",
+    "PATCH_APPLY_FAILED",
+    "TEST_SUITE_TIMEOUT",
+    "COMPILE_FAILED",
+    "OUTPUT_MISSING",
+}
 
 # Maps Jest/Vitest assertion status values to normalized status strings.
 STATUS_MAP: dict[str, str] = {
@@ -390,11 +404,17 @@ def main(
             f"{x.get('status', 'TESTS_RAN')}"
         )
     total_runtime = sum(float(str(x["sum"])) for x in out)
-    averaged_passed = (
-        sum(float(str(x["passed"])) for x in out) / len(out) if out else 0.0
-    )
+    # A crashed/patch-failed/timed-out/infra row is NOT a measured model score —
+    # exclude it from the mean (mirrors evaluate_go.py) instead of counting its
+    # 0/N as a genuine 0% that silently drags the reported score down.
+    averaged_passed, _excluded, _scored = average_pass_rate(out, _EXCLUDED_STATUSES)
     print(f"total runtime: {total_runtime}")
     print(f"average pass rate: {averaged_passed}")
+    if _excluded:
+        print(
+            f"NOTE: {_excluded}/{len(out)} repo(s) EXCLUDED from the average "
+            f"(suite-crash / patch-failed / timeout / infra — not a measured model score)."
+        )
     logger.info(
         "Evaluation complete: %d repos, avg pass rate %.2f%%, total runtime %.1fs",
         len(out),

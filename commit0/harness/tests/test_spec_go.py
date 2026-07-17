@@ -257,3 +257,35 @@ class TestModuleExports:
         import commit0.harness.spec_go as mod
         assert "Commit0GoSpec" in mod.__all__
         assert "make_go_spec" in mod.__all__
+
+
+class TestGoInstallVerifyPipefailSafe:
+    """Regression: the repo setup runs under `set -euxo pipefail`. The old gate
+    `go list -m 2>/dev/null | head -1 | grep -q .` could false-fail — `head -1`
+    closing early SIGPIPEs `go list`, and pipefail then fails the whole build on
+    a valid module graph. Capture the first line into a var (`|| true`) instead.
+    """
+
+    def _instance(self) -> dict:
+        return {
+            "repo": "example/repo",
+            "base_commit": "aabb1122",
+            "reference_commit": "ccdd3344",
+            "test": {"test_cmd": "go test -count=1 ./..."},
+            "setup": {},
+        }
+
+    def _verify_line(self) -> str:
+        cmds = make_go_spec(self._instance(), absolute=True).make_repo_script_list()
+        matches = [c for c in cmds if "INSTALL_VERIFICATION_FAILED" in c]
+        assert len(matches) == 1
+        return matches[0]
+
+    def test_no_fragile_head_grep_pipeline(self) -> None:
+        assert "| head -1 | grep -q ." not in self._verify_line()
+
+    def test_uses_captured_var_and_still_fails_loud(self) -> None:
+        line = self._verify_line()
+        assert '_kaiju_mod="$(go list -m 2>/dev/null | head -1 || true)"' in line
+        assert 'if [ -z "$_kaiju_mod" ]' in line
+        assert "exit 1" in line

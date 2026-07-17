@@ -190,7 +190,14 @@ class Commit0Spec(Spec):
         eval_script_list = [
             f"cd {self.repo_directory}",
             f"git reset --hard {base}",
-            f"git apply --allow-empty -v {diff_path}",
+            # Patch-apply with a --recount fallback, then a PATCH_APPLY_FAILED
+            # sentinel on total failure. The eval header is `set -uxo pipefail`
+            # (no -e), so a bare failing `git apply` would NOT abort: pytest would
+            # run against the unpatched stub and record a legitimate-looking 0/N.
+            # evaluate.py reads this sentinel from test_output.txt (+ the exit
+            # code) to classify the run as patch_apply_failed (infra, excluded)
+            # instead. Mirrors spec_ts.py / spec_cpp.py / spec_rust.py.
+            f"if git apply --allow-empty -v {diff_path} || git apply --allow-empty --recount -v {diff_path}; then :; else echo PATCH_APPLY_FAILED > test_output.txt; echo 1 > pytest_exit_code.txt; exit 0; fi",
             *revert_lines,
             "git status",
             'timeout --kill-after=10 "${EVAL_TEST_TIMEOUT:-900}" ' + f"{shlex.quote(self.instance['test']['test_cmd'])} --json-report --json-report-file=report.json --continue-on-collection-errors{{coverage}} {{test_ids}} > test_output.txt 2>&1",
@@ -275,7 +282,10 @@ class SWEBenchSpec(Spec):
             [
                 f"cd {self.repo_directory}",
                 f"git reset --hard {base}",
-                "git apply --allow-empty -v /patch.diff",
+                # --recount fallback + PATCH_APPLY_FAILED sentinel (see Commit0Spec
+                # above): the eval header has no `set -e`, so a bare failing apply
+                # would silently score the unpatched stub as a genuine 0/N.
+                "if git apply --allow-empty -v /patch.diff || git apply --allow-empty --recount -v /patch.diff; then :; else echo PATCH_APPLY_FAILED > test_output.txt; echo 1 > pytest_exit_code.txt; exit 0; fi",
                 *revert_lines,
             ]
             + results

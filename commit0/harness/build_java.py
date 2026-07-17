@@ -149,18 +149,20 @@ def build_java_repo_images(
         if dataset is not None and repo_name in dataset:
             instance = dataset[repo_name]
         else:
-            instance = {
-                "repo": repo_name,
-                "instance_id": repo_name,
-                "base_commit": "HEAD",
-                "reference_commit": "HEAD",
-                "setup": {},
-                "test": {},
-                "src_dir": ".",
-            }
-            logger.warning(
-                f"No dataset entry for '{repo_name}' — using default instance. "
-                "Repo-specific java_version/build_system will not be applied."
+            # FAIL LOUD (QC-C8-005). Previously this synthesized a default
+            # instance with base_commit/reference_commit="HEAD" and only logged a
+            # warning. That silently fabricates the two commits the whole eval
+            # pins its denominator on, so a missing dataset entry would produce a
+            # wrong-but-plausible score with no error. Mirror the sibling contract
+            # in build_c.py::_get_c_specs and build_go.py::_get_go_specs, which
+            # only ever build specs from real dataset examples and never
+            # synthesize a fallback.
+            raise RuntimeError(
+                f"No dataset entry for '{repo_name}'; refusing to build a Java repo "
+                "image with a synthetic base_commit/reference_commit='HEAD'. A "
+                "missing dataset entry means those commits would be fabricated, "
+                "silently corrupting the eval denominator. Provide a dataset that "
+                "contains this repo (or omit it from the build set)."
             )
         tasks.append((repo_name, instance))
 

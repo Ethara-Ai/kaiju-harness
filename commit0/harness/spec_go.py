@@ -91,8 +91,11 @@ class Commit0GoSpec(Spec):
 
     @property
     def base_dockerfile(self) -> str:
-        dockerfile_path = Path(__file__).parent / "dockerfiles" / "Dockerfile.go"
-        return dockerfile_path.read_text().replace("__GO_VERSION__", GO_VERSION)
+        from commit0.harness.dockerfiles._template import render_dockerfile
+        return render_dockerfile(
+            Path(__file__).parent / "dockerfiles" / "Dockerfile.go",
+            {"__GO_VERSION__": GO_VERSION},
+        )
 
     @property
     def repo_dockerfile(self) -> str:
@@ -150,7 +153,16 @@ class Commit0GoSpec(Spec):
                 "go mod download >/tmp/kaiju_go_mod_download.log 2>&1 || true",
                 "go build ./... >/tmp/kaiju_go_build.log 2>&1 || true",
                 f"git reset --hard {base_commit}",
-                'go list -m 2>/dev/null | head -1 | grep -q . || (echo "INSTALL_VERIFICATION_FAILED: go list -m failed after go mod download (module graph invalid; see /tmp/kaiju_go_mod_download.log)" >&2; exit 1)',
+                # Capture the module line into a var (with `|| true`) rather than
+                # `go list -m | head -1 | grep -q .`: under `set -euxo pipefail`
+                # `head -1` closing early SIGPIPEs `go list` -> non-zero pipe ->
+                # false INSTALL_VERIFICATION_FAILED on a valid multi-line module
+                # graph. The capture keeps the first line (written before SIGPIPE)
+                # and the emptiness test is what actually gates.
+                '_kaiju_mod="$(go list -m 2>/dev/null | head -1 || true)"; '
+                'if [ -z "$_kaiju_mod" ]; then '
+                'echo "INSTALL_VERIFICATION_FAILED: go list -m produced no module after go mod download (module graph invalid; see /tmp/kaiju_go_mod_download.log)" >&2; '
+                'exit 1; fi',
             ]
         )
 

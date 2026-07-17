@@ -38,6 +38,7 @@ def _expected_test_count(name: str) -> int:
     except (OSError, ValueError):
         return 0
     return sum(1 for line in raw.splitlines() if line.strip())
+from commit0.harness.reward_hack import average_pass_rate
 from commit0.harness.run_cpp_tests import main as run_cpp_tests
 from commit0.harness.cpp_test_parser import (
     parse_cmake_build_attribution,
@@ -54,6 +55,21 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Statuses that are NOT a measured model score — excluded from the micro-average
+# (mirrors evaluate_go.py / evaluate_c.py / evaluate_rust.py). CHEAT_DETECTED is
+# a forged run (never trusted); COMPILE_FAILED / BUILD_CONFIGURE_FAILED /
+# OUTPUT_MISSING / *_TIMEOUT / PATCH_APPLY_FAILED are infra failures. NOTE:
+# COMPILE_FAILED_MODEL is deliberately NOT excluded — the base compiled (A11) so
+# a build failure there is a genuine model 0/N (see the :309 comment).
+_EXCLUDED_STATUSES = {
+    "CHEAT_DETECTED",
+    "COMPILE_FAILED",
+    "BUILD_CONFIGURE_FAILED",
+    "OUTPUT_MISSING",
+    "TEST_SUITE_TIMEOUT",
+    "PATCH_APPLY_FAILED",
+}
 
 _CPP_FAILURE_EXIT_CODES = {1, 42, 200, 201}
 
@@ -566,9 +582,17 @@ def main(
             f"{x.get('status', 'TESTS_RAN')}"
         )
     total_runtime = sum(x["sum"] for x in out)
-    averaged_passed = sum(x["passed"] for x in out) / len(out) if out else 0.0
+    # An infra-broken / forged (CHEAT_DETECTED) / compile-failed run is NOT a
+    # measured model score — its 0.0 must not drag the average down like a
+    # genuine 0%. Average over SCORED repos only (mirrors evaluate_go.py).
+    averaged_passed, _excluded, _scored = average_pass_rate(out, _EXCLUDED_STATUSES)
     print(f"total runtime: {total_runtime}")
     print(f"average pass rate: {averaged_passed}")
+    if _excluded:
+        print(
+            f"NOTE: {_excluded}/{len(out)} repo(s) EXCLUDED from the average "
+            f"(infra-broken / compile-failed / cheat — not a measured model score)."
+        )
     logger.info(
         "C++ evaluation complete: %d repos, avg pass rate %.2f%%, total runtime %.1fs",
         len(out),

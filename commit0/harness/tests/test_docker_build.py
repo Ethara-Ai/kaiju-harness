@@ -848,3 +848,52 @@ class TestBuildRepoImages:
         )
         assert successful == []
         assert "repo1:v1" in failed
+
+
+class TestUnsubstitutedPlaceholderGuard:
+    """`build_image` must fail LOUD if a Dockerfile template placeholder was
+    never substituted, instead of shipping `FROM gcc:__C_GCC_VERSION__-...` to
+    Docker (which fails with a cryptic 'not found'). Universal for all languages.
+    """
+
+    def test_regex_matches_version_placeholders(self):
+        from commit0.harness.docker_build import _UNSUBSTITUTED_PLACEHOLDER_RE as RE
+        for tok in (
+            "__C_GCC_VERSION__", "__GO_VERSION__", "__RUST_VERSION__",
+            "__CPP_UBUNTU_VERSION__", "__CARGO_NEXTEST_VERSION__",
+        ):
+            assert RE.findall(f"FROM base:{tok}-x") == [tok]
+
+    def test_regex_ignores_lowercase_and_shell(self):
+        """Must NOT match real Dockerfile content: lowercase dunders, env refs."""
+        from commit0.harness.docker_build import _UNSUBSTITUTED_PLACEHOLDER_RE as RE
+        assert RE.findall("RUN echo __pycache__ && echo ${HTTP_PROXY}") == []
+        assert RE.findall("COPY __init__.py /app/") == []
+
+    def test_guard_raises_naming_every_leftover(self):
+        from commit0.harness.docker_build import (
+            _assert_dockerfile_fully_substituted,
+            BuildImageError,
+        )
+        df = "FROM gcc:__C_GCC_VERSION__-bookworm\nARG X=__GO_VERSION__\n"
+        with pytest.raises(BuildImageError) as ei:
+            _assert_dockerfile_fully_substituted("img", df)
+        msg = str(ei.value)
+        assert "__C_GCC_VERSION__" in msg and "__GO_VERSION__" in msg
+
+    def test_guard_passes_on_clean_dockerfile(self):
+        from commit0.harness.docker_build import _assert_dockerfile_fully_substituted
+        _assert_dockerfile_fully_substituted("img", "FROM gcc:13-bookworm\n")
+        _assert_dockerfile_fully_substituted("img", "")  # tolerates empty
+
+    def test_build_image_rejects_placeholder_before_any_docker_call(self):
+        """The guard runs before _build_image_once, so no Docker work happens."""
+        from commit0.harness.docker_build import build_image, BuildImageError
+        with patch(f"{MODULE}._build_image_once") as once:
+            with pytest.raises(BuildImageError):
+                build_image(
+                    "commit0.base.c:latest", {},
+                    "FROM gcc:__C_GCC_VERSION__-bookworm\n",
+                    "linux/amd64", MagicMock(), Path("/tmp"),
+                )
+            once.assert_not_called()

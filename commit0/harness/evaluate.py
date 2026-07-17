@@ -12,6 +12,7 @@ from typing import Iterator, Union
 
 from commit0.harness.run_pytest_ids import main as run_tests
 from commit0.harness._eval_common import detect_patch_apply_failed, detect_timeout
+from commit0.harness.reward_hack import average_pass_rate
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RepoInstance, SPLIT, RUN_PYTEST_LOG_DIR
 from commit0.harness.split_utils import resolve_split
@@ -27,6 +28,14 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Statuses that are NOT a measured model score — excluded from the micro-average
+# (matches the canonical Rust/Go/C _EXCLUDED_STATUSES posture). INVENTORY_MISMATCH
+# additionally carries a `passed=None` sentinel that must never reach the sum.
+_EXCLUDED_STATUSES = {
+    "INVENTORY_MISMATCH",
+    "PYTEST_INFRA_ERROR",
+}
 
 
 def _preflight_check_images(
@@ -250,9 +259,15 @@ def main(
                 {
                     "name": name,
                     "sum": 0,
+                    # An eval-infra crash (no report.json) is NOT a measured model
+                    # score: pytest never produced a report. Carry a status so the
+                    # aggregator EXCLUDES it from the average (mirrors the
+                    # canonical Rust/Go/C _EXCLUDED_STATUSES posture) instead of
+                    # counting it as a genuine 0% that silently drags the mean.
                     "passed": 0,
                     "num_passed": 0,
                     "num_tests": len(test_ids),
+                    "status": "PYTEST_INFRA_ERROR",
                     "error": reason,
                     "patch_apply_failed": _patch_failed,
                     "timed_out": _timed_out,
@@ -327,9 +342,18 @@ def main(
             total = sum(runtimes)
         if "xfail" not in status:
             status["xfail"] = 0
+        # Reward-hack guard (numerator canonical cross-check): count passes/xfails
+        # ONLY among the frozen canonical inventory (test_ids), NOT over every
+        # nodeid the report happens to contain. Otherwise a model that fails the
+        # real tests but injects extra passing (non-canonical) nodeids would
+        # inflate the numerator. Mirrors evaluate_ts.py's `full_name not in
+        # canonical: continue` filter. Since observed_passed_or_xfail is now
+        # bounded by len(test_ids) <= num_tests_effective, the ratio can never
+        # exceed 1 even without an explicit clamp.
         observed_passed_or_xfail = sum(
-            1 for v in tests.values()
-            if v is not None and v.get("outcome") in ("passed", "xfail")
+            1 for tid in test_ids
+            if tid in tests and tests[tid] is not None
+            and tests[tid].get("outcome") in ("passed", "xfail")
         )
         num_tests_effective = max(len(test_ids), len(tests))
         passed = (
@@ -351,9 +375,20 @@ def main(
     for x in out:
         print(f"{x['name']},{x['sum']},{x['num_passed']}/{x['num_tests']}")
     total_runtime = sum([x["sum"] for x in out])
-    averaged_passed = sum([x["passed"] for x in out]) / len(out) if out else 0.0
+    # Exclude non-measured rows from the micro-average (mirrors the canonical
+    # Rust/Go/C _EXCLUDED_STATUSES pattern): an INVENTORY_MISMATCH row carries a
+    # `passed=None` sentinel (summing it would TypeError and abort the batch), and
+    # a PYTEST_INFRA_ERROR row is an eval crash, not a genuine 0% model score.
+    averaged_passed, _excluded, _scored = average_pass_rate(
+        out, _EXCLUDED_STATUSES
+    )
     print(f"total runtime: {total_runtime}")
     print(f"average pass rate: {averaged_passed}")
+    if _excluded:
+        print(
+            f"NOTE: {_excluded}/{len(out)} repo(s) EXCLUDED from the average "
+            f"(inventory-mismatch / infra crash — not a measured model score)."
+        )
     logger.info(
         "Evaluation complete: %d repos, avg pass rate %.2f%%, total runtime %.1fs",
         len(out),

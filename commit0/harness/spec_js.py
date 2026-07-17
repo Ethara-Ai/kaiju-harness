@@ -133,10 +133,18 @@ class Commit0JsSpec(Spec):
                 ".babelrc", ".babelrc.js", ".babelrc.json",
                 "package.json", "package-lock.json", "npm-shrinkwrap.json",
                 "yarn.lock", "pnpm-lock.yaml", ".npmrc",
+                # Parity with the 6 sibling spec_*.py revert lists: the JS eval
+                # also invokes `python3 .kaiju_guard.py` (eval_hardening), so a
+                # model-added Python import hook is reverted here too as
+                # defense-in-depth. Reverting/deleting these Python files can
+                # never break a legitimate JS submission.
+                "sitecustomize.py", "usercustomize.py",
                 ".env", ".gitmodules", ".gitattributes",
             ],
             delete_added_globs=[
                 "*.test.js", "**/*.test.js", "*.spec.js", "**/*.spec.js",
+                "sitecustomize.py", "**/sitecustomize.py",
+                "usercustomize.py", "**/usercustomize.py",
                 "jest.config.*", "**/jest.config.*",
                 "vitest.config.*", "**/vitest.config.*",
                 ".mocharc.*", "**/.mocharc.*",
@@ -177,7 +185,13 @@ class Commit0JsSpec(Spec):
                 "echo \"PATCH_SUSPICIOUSLY_SMALL: $_diff_bytes bytes; possible encoding corruption\" >&2; "
                 "fi"
             ),
-            f"git apply --allow-empty -v {diff_path}",
+            # Patch-apply with a --recount fallback, then a PATCH_APPLY_FAILED
+            # sentinel on total failure. The steps run under `set -uo pipefail`
+            # (no -e), so a bare failing `git apply` would NOT abort: the suite
+            # would run against the unpatched stub and record a legitimate-looking
+            # 0/N. evaluate_js.py reads this sentinel from test_stdout.txt to
+            # classify the run as infra (excluded). Mirrors spec_ts.py.
+            f"if git apply --allow-empty -v {diff_path} || git apply --allow-empty --recount -v {diff_path}; then :; else echo PATCH_APPLY_FAILED > test_stdout.txt; echo 1 > test_exit_code.txt; exit 0; fi",
             # Layer-2 guard: snapshot applied tree; heal harness-corrupted files
             # (balanced->unbalanced) so a valid submission isn't failed by the
             # reconstruction. Heal before the syntax check + tests see the file.

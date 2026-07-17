@@ -114,9 +114,22 @@ class Commit0TsSpec(Spec):
         ]
         prefix = _exec_prefix_from_install(install_cmd)
         steps.extend(self._package_manager_install(install_cmd))
+        install_fail = "(echo 'INSTALL_FAILED' >&2; exit 1)"
+        if "yarn" in install_cmd.lower():
+            install_step = (
+                "if yarn --version 2>/dev/null | grep -q '^1\\.'; then "
+                f"{install_cmd} --ignore-scripts || {install_cmd} --ignore-scripts || {install_fail}; "
+                "else "
+                f"yarn install --immutable --mode=skip-build || yarn install --immutable --mode=skip-build || {install_fail}; "
+                "fi"
+            )
+        else:
+            install_step = (
+                f"{install_cmd} --ignore-scripts || {install_cmd} --ignore-scripts || {install_fail}"
+            )
         steps.extend(
             [
-                f"{install_cmd} --ignore-scripts || {install_cmd} --ignore-scripts || (echo 'INSTALL_FAILED' >&2; exit 1)",
+                install_step,
                 # Post-install verification: catches silent partial installs.
                 # Yarn Berry PnP mode leaves NO node_modules dir (only .pnp.cjs);
                 # --ignore-scripts can skip lockfile write on some yarn/pnpm builds.

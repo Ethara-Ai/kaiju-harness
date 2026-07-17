@@ -81,10 +81,25 @@ class Commit0JavaSpec(Spec):
             'if [ -f ./mvnw ]; then chmod +x ./mvnw; MVN_CMD=./mvnw; else MVN_CMD=mvn; fi',
         ]
 
+    # Where the dependency-resolve step tees its output, so the verification gate
+    # can surface the REAL failure cause (SSL/PKIX, 404, timeout) instead of
+    # guessing "network/registry issue". `|| true` keeps a partial resolve from
+    # aborting the build — the jar-count gate below is the authoritative check.
+    _DEP_RESOLVE_LOG = "/tmp/kaiju_dep_resolve.log"
+
     def _get_dependency_install_cmd(self) -> str:
+        # NOTE: no `-q` — we want the download/error detail in the log so a real
+        # failure is diagnosable. Maven gets the same bounded-retry net flags as
+        # compile/test so a transient blip retries instead of failing the build.
         if self.build_system == "gradle":
-            return "$GRADLE_CMD dependencies --no-daemon -q || true"
-        return "$MVN_CMD dependency:resolve -q -B || true"
+            return (
+                f"$GRADLE_CMD dependencies --no-daemon > {self._DEP_RESOLVE_LOG} 2>&1 "
+                "|| true"
+            )
+        return (
+            f"$MVN_CMD dependency:resolve -B {self._MVN_NET_FLAGS} "
+            f"> {self._DEP_RESOLVE_LOG} 2>&1 || true"
+        )
 
     # Maven flags that skip common non-compilation plugins (license audits,
     # enforcer rules, Javadoc, source JARs, etc.) so we only care about
@@ -190,7 +205,27 @@ class Commit0JavaSpec(Spec):
             *self._wrapper_preamble(),
             *self._toolchains_xml_commands(),
             self._get_dependency_install_cmd(),
-            'find ~/.m2/repository ~/.gradle/caches -name "*.jar" 2>/dev/null | head -1 | grep -q . || (echo "INSTALL_VERIFICATION_FAILED: neither ~/.m2 nor ~/.gradle contains any .jar after dependency resolve (network/registry issue)" >&2; exit 1)',
+            # Verify dependency resolution populated a local cache. Scan ONLY dirs
+            # that exist: a Maven repo has no ~/.gradle/caches and a Gradle repo
+            # has no ~/.m2/repository, and `find` on a missing path exits non-zero
+            # — under `set -euxo pipefail` that (plus head's SIGPIPE) fails the
+            # WHOLE build even when jars ARE present. That was a false-positive
+            # that broke every Java build. `find | wc -l` reads to completion (no
+            # SIGPIPE); on genuine failure we tail the resolve log so the message
+            # names the REAL cause instead of guessing "network/registry issue".
+            (
+                '_kaiju_jars=0\n'
+                'for _kaiju_d in "$HOME/.m2/repository" "$HOME/.gradle/caches"; do\n'
+                '  if [ -d "$_kaiju_d" ]; then '
+                '_kaiju_jars=$((_kaiju_jars + $(find "$_kaiju_d" -name "*.jar" 2>/dev/null | wc -l))); fi\n'
+                'done\n'
+                'if [ "$_kaiju_jars" -eq 0 ]; then\n'
+                '  echo "INSTALL_VERIFICATION_FAILED: dependency resolve produced no .jar '
+                'in ~/.m2/repository or ~/.gradle/caches" >&2\n'
+                f'  tail -n 40 {self._DEP_RESOLVE_LOG} >&2 2>/dev/null || true\n'
+                '  exit 1\n'
+                'fi'
+            ),
         ]
 
     @staticmethod

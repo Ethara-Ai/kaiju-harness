@@ -467,6 +467,40 @@ _TRANSIENT_BUILD_ERROR_MARKERS = (
 )
 
 
+# Template placeholder convention shared by every language's Dockerfile
+# (`__GO_VERSION__`, `__C_GCC_VERSION__`, `__CPP_UBUNTU_VERSION__`,
+# `__RUST_VERSION__`, `__CARGO_NEXTEST_VERSION__`, ...). Each spec's
+# base_dockerfile is responsible for substituting these before build; a missed
+# substitution otherwise reaches Docker as e.g. `FROM gcc:__C_GCC_VERSION__-...`
+# and fails with a cryptic "not found" that hides the real cause. This ALL-CAPS,
+# double-underscore-delimited pattern is narrow enough not to match real
+# Dockerfile content (lowercase `__pycache__`, `$__foo` shell vars, etc.).
+_UNSUBSTITUTED_PLACEHOLDER_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
+
+
+def _assert_dockerfile_fully_substituted(image_name: str, dockerfile: str) -> None:
+    """Fail LOUD before building if a template placeholder was never substituted.
+
+    Universal guard for every language: converts the class of "version
+    placeholder leaked into the Dockerfile" bugs from a cryptic Docker Hub
+    resolve error into an actionable message naming the exact token(s) and the
+    spec responsible. Applies to base AND repo images since all flow through
+    :func:`build_image`.
+    """
+    if not dockerfile:
+        return
+    leftovers = sorted(set(_UNSUBSTITUTED_PLACEHOLDER_RE.findall(dockerfile)))
+    if leftovers:
+        raise BuildImageError(
+            image_name,
+            "Dockerfile contains unsubstituted template placeholder(s): "
+            f"{', '.join(leftovers)}. The spec that produced this image "
+            "(base_dockerfile/repo_dockerfile) must .replace() every "
+            "__PLACEHOLDER__ with its constant before building.",
+            _logger,
+        )
+
+
 def _is_transient_build_error(message: str) -> bool:
     """True if *message* looks like a transient network failure worth retrying."""
     low = (message or "").lower()
@@ -493,6 +527,12 @@ def build_image(*args: Any, **kwargs: Any) -> None:
     a real bug. Image name is args[0] (or the image_name kwarg) for logging.
     """
     image_name = args[0] if args else kwargs.get("image_name", "<unknown>")
+    # _build_image_once signature: (image_name, setup_scripts, dockerfile, ...);
+    # dockerfile is positional index 2 or the `dockerfile` kwarg.
+    dockerfile = kwargs.get("dockerfile")
+    if dockerfile is None and len(args) >= 3:
+        dockerfile = args[2]
+    _assert_dockerfile_fully_substituted(image_name, dockerfile or "")
     max_attempts = _build_max_attempts()
     for attempt in range(1, max_attempts + 1):
         try:

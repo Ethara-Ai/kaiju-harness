@@ -12,17 +12,13 @@ _logger = logging.getLogger(__name__)
 
 
 def get_dockerfile_base_rust() -> str:
-    template_path = DOCKERFILES_RUST_DIR / "Dockerfile.rust"
-    if not template_path.exists():
-        raise FileNotFoundError(
-            f"Rust base Dockerfile template not found: {template_path}"
-        )
-    # Single source of truth: substitute the pinned toolchain versions from
-    # constants_rust.py so the FROM tag and nextest install can't drift.
-    return (
-        template_path.read_text()
-        .replace("__RUST_VERSION__", RUST_VERSION)
-        .replace("__CARGO_NEXTEST_VERSION__", CARGO_NEXTEST_VERSION)
+    from commit0.harness.dockerfiles._template import render_dockerfile
+    return render_dockerfile(
+        DOCKERFILES_RUST_DIR / "Dockerfile.rust",
+        {
+            "__RUST_VERSION__": RUST_VERSION,
+            "__CARGO_NEXTEST_VERSION__": CARGO_NEXTEST_VERSION,
+        },
     )
 
 

@@ -21,7 +21,7 @@ class TestGetDockerfileBaseRust:
     def test_missing_template_raises(self, tmp_path):
         with patch(f"{MODULE}.DOCKERFILES_RUST_DIR", tmp_path):
             with pytest.raises(
-                FileNotFoundError, match="Rust base Dockerfile template not found"
+                FileNotFoundError, match="Dockerfile template not found"
             ):
                 get_dockerfile_base_rust()
 

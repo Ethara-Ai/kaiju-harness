@@ -29,6 +29,7 @@ from commit0.harness.js_test_parser import (
     JsTestStatus,
     parse_js_test_output,
 )
+from commit0.harness.reward_hack import average_pass_rate
 from commit0.harness.run_js_tests import main as run_js_tests
 from commit0.harness.split_utils import resolve_split
 from commit0.harness.utils import (
@@ -387,14 +388,23 @@ def main(
     total_runtime = sum(
         float(x.get("duration_seconds", 0.0) or 0.0) for x in out_sorted
     )
-    averaged_passed = (
-        sum(float(x.get("passed_rate", 0.0) or 0.0) for x in out_sorted)
-        / len(out_sorted)
-        if out_sorted
-        else 0.0
+    # An infra-broken run (patch-apply failed / suite timeout / empty-or-crashed
+    # report) is NOT a measured model score — its 0.0 must not drag the average
+    # down like a genuine 0%. JS flags this with the `infra_failed` boolean rather
+    # than a status string, so exclude via predicate (mirrors evaluate_go.py's
+    # _EXCLUDED_STATUSES filter). Average over SCORED repos only.
+    averaged_passed, _excluded, _scored = average_pass_rate(
+        out_sorted,
+        passed_key="passed_rate",
+        exclude_if=lambda r: bool(r.get("infra_failed")),
     )
     print(f"total runtime: {total_runtime}")
     print(f"average pass rate: {averaged_passed}")
+    if _excluded:
+        print(
+            f"NOTE: {_excluded}/{len(out_sorted)} repo(s) EXCLUDED from the average "
+            f"(patch-failed / timeout / infra — not a measured model score)."
+        )
 
     results_path = (RUN_JS_TEST_LOG_DIR / _RESULTS_FILENAME).resolve()
     results_path.parent.mkdir(parents=True, exist_ok=True)

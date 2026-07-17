@@ -47,6 +47,16 @@ def docker_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "commit0.harness.build_js.docker", fake_module, raising=False
     )
+    # QC-C8-006: build_js.main() gets its client from docker_client() (imported
+    # from docker_utils), NOT from build_js.docker.from_env — patching the bare
+    # `docker` symbol or sys.modules["docker"] never reaches docker_utils's
+    # already-bound module, so the test would silently hit the real daemon.
+    # Patch the actual call site.
+    monkeypatch.setattr(
+        "commit0.harness.build_js.docker_client",
+        lambda: fake_client,
+        raising=True,
+    )
     monkeypatch.setitem(sys.modules, "docker", fake_module)
     yield fake_client
     if saved_docker is not None:

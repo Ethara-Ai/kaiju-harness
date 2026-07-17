@@ -172,3 +172,56 @@ class TestCDockerfileBase:
     def test_c_gcc_version_constant(self):
         from commit0.harness.constants_c import C_GCC_VERSION
         int(C_GCC_VERSION)  # raises if not numeric
+
+
+class TestNoUnsubstitutedPlaceholdersInRenderedBase:
+    """The Dockerfile TEMPLATES carry `__PLACEHOLDER__` tokens, but each spec's
+    `base_dockerfile` MUST render them out. This regression pins the C bug where
+    spec_c returned the raw template (`FROM gcc:__C_GCC_VERSION__-bookworm`),
+    which Docker Hub can't resolve. Any future templated language that forgets to
+    .replace() fails here instead of at build time.
+    """
+
+    def _rendered_bases(self):
+        from commit0.harness.spec_c import Commit0CSpec
+        from commit0.harness.dockerfiles.__init__cpp import get_dockerfile_base_cpp
+        from commit0.harness.dockerfiles.__init__rust import get_dockerfile_base_rust
+
+        inst = {
+            "instance_id": "x/y", "repo": "x/y",
+            "base_commit": "0" * 40, "reference_commit": "1" * 40,
+        }
+        c = Commit0CSpec(repo="x/y", repo_directory="/testbed", instance=inst, absolute=True)
+        rendered = {
+            "c": c.base_dockerfile,
+            "cpp": get_dockerfile_base_cpp(),
+            "rust": get_dockerfile_base_rust(),
+        }
+        # Go renders via spec_go.base_dockerfile (needs a GoSpec); import guarded
+        # so this test still runs if Go deps shift.
+        try:
+            from commit0.harness.spec_go import make_go_spec
+            g = make_go_spec(inst, absolute=True)
+            rendered["go"] = g.base_dockerfile
+        except Exception:  # noqa: BLE001 - Go optional in this consistency check
+            pass
+        return rendered
+
+    def test_rendered_base_has_no_all_caps_placeholder(self):
+        from commit0.harness.docker_build import _UNSUBSTITUTED_PLACEHOLDER_RE as RE
+        for lang, df in self._rendered_bases().items():
+            leftovers = sorted(set(RE.findall(df)))
+            assert not leftovers, (
+                f"{lang} base_dockerfile leaked unsubstituted placeholder(s): "
+                f"{leftovers}. The spec must .replace() them before build."
+            )
+
+    def test_c_base_pins_concrete_gcc_version(self):
+        from commit0.harness.spec_c import Commit0CSpec
+        from commit0.harness.constants_c import C_GCC_VERSION
+        inst = {
+            "instance_id": "x/y", "repo": "x/y",
+            "base_commit": "0" * 40, "reference_commit": "1" * 40,
+        }
+        c = Commit0CSpec(repo="x/y", repo_directory="/testbed", instance=inst, absolute=True)
+        assert c.base_dockerfile.splitlines()[0] == f"FROM gcc:{C_GCC_VERSION}-bookworm"

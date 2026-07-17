@@ -63,7 +63,7 @@ class TestBuildRustMain:
     """Tests for build_rust.main."""
 
     @patch(f"{BUILD_MODULE}.build_rust_repo_images")
-    @patch(f"{BUILD_MODULE}.docker")
+    @patch(f"{BUILD_MODULE}.docker_client")
     def test_success(self, mock_docker, mock_build, tmp_path):
         from commit0.harness.build_rust import main
 
@@ -74,7 +74,7 @@ class TestBuildRustMain:
         mock_build.assert_called_once()
 
     @patch(f"{BUILD_MODULE}.build_rust_repo_images")
-    @patch(f"{BUILD_MODULE}.docker")
+    @patch(f"{BUILD_MODULE}.docker_client")
     def test_failed_build_exits(self, mock_docker, mock_build, tmp_path):
         from commit0.harness.build_rust import main
 

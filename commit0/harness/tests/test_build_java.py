@@ -30,7 +30,7 @@ class TestBuildJavaBaseImages:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}.get_docker_platform", return_value="linux/amd64")
     @patch(f"{MODULE}._resolve_mitm_ca_cert", return_value=None)
-    @patch(f"{MODULE}.docker")
+    @patch(f"{MODULE}.docker_client")
     def test_builds_three_versions(
         self,
         mock_docker: MagicMock,
@@ -38,7 +38,7 @@ class TestBuildJavaBaseImages:
         mock_platform: MagicMock,
         mock_build: MagicMock,
     ) -> None:
-        mock_docker.from_env.return_value = MagicMock()
+        mock_docker.return_value = MagicMock()
         from commit0.harness.build_java import build_java_base_images
 
         build_java_base_images(java_versions=["11", "17", "21"])
@@ -47,7 +47,7 @@ class TestBuildJavaBaseImages:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}.get_docker_platform", return_value="linux/amd64")
     @patch(f"{MODULE}._resolve_mitm_ca_cert", return_value=None)
-    @patch(f"{MODULE}.docker")
+    @patch(f"{MODULE}.docker_client")
     def test_calls_build_image(
         self,
         mock_docker: MagicMock,
@@ -55,7 +55,7 @@ class TestBuildJavaBaseImages:
         mock_platform: MagicMock,
         mock_build: MagicMock,
     ) -> None:
-        mock_docker.from_env.return_value = MagicMock()
+        mock_docker.return_value = MagicMock()
         from commit0.harness.build_java import build_java_base_images
 
         build_java_base_images(java_versions=["17"])
@@ -66,7 +66,7 @@ class TestBuildJavaBaseImages:
     @patch(f"{MODULE}.build_image", side_effect=docker.errors.BuildError("fail", []))
     @patch(f"{MODULE}.get_docker_platform", return_value="linux/amd64")
     @patch(f"{MODULE}._resolve_mitm_ca_cert", return_value=None)
-    @patch(f"{MODULE}.docker")
+    @patch(f"{MODULE}.docker_client")
     def test_docker_error_propagates(
         self,
         mock_docker: MagicMock,
@@ -74,7 +74,7 @@ class TestBuildJavaBaseImages:
         mock_platform: MagicMock,
         mock_build: MagicMock,
     ) -> None:
-        mock_docker.from_env.return_value = MagicMock()
+        mock_docker.return_value = MagicMock()
         from commit0.harness.build_java import build_java_base_images
 
         with pytest.raises(docker.errors.BuildError):
@@ -85,7 +85,7 @@ class TestBuildJavaRepoImages:
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}.get_docker_platform", return_value="linux/amd64")
     @patch(f"{MODULE}._resolve_mitm_ca_cert", return_value=None)
-    @patch(f"{MODULE}.docker")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}.make_java_spec")
     def test_builds_per_repo(
         self,
@@ -95,22 +95,45 @@ class TestBuildJavaRepoImages:
         mock_platform: MagicMock,
         mock_build: MagicMock,
     ) -> None:
-        mock_docker.from_env.return_value = MagicMock()
+        mock_docker.return_value = MagicMock()
         spec = MagicMock()
         spec.repo_dockerfile = "FROM java:17"
         spec.make_repo_script_list.return_value = ["mvn install"]
         mock_spec.return_value = spec
         from commit0.harness.build_java import build_java_repo_images
 
-        build_java_repo_images(repo_names=["org/repoA", "org/repoB"])
+        # A repo must be present in the dataset with real commits — the synthetic
+        # HEAD fallback was removed (QC-C8-005), so build now requires dataset
+        # entries for every requested repo.
+        dataset = {
+            "org/repoA": {
+                "repo": "org/repoA",
+                "instance_id": "org/repoA",
+                "base_commit": "a" * 40,
+                "reference_commit": "b" * 40,
+                "setup": {},
+                "test": {},
+                "src_dir": ".",
+            },
+            "org/repoB": {
+                "repo": "org/repoB",
+                "instance_id": "org/repoB",
+                "base_commit": "c" * 40,
+                "reference_commit": "d" * 40,
+                "setup": {},
+                "test": {},
+                "src_dir": ".",
+            },
+        }
+        build_java_repo_images(repo_names=["org/repoA", "org/repoB"], dataset=dataset)
         assert mock_build.call_count == 2
 
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}.get_docker_platform", return_value="linux/amd64")
     @patch(f"{MODULE}._resolve_mitm_ca_cert", return_value=None)
-    @patch(f"{MODULE}.docker")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}.make_java_spec")
-    def test_creates_default_instance(
+    def test_missing_dataset_entry_raises(
         self,
         mock_spec: MagicMock,
         mock_docker: MagicMock,
@@ -118,22 +141,23 @@ class TestBuildJavaRepoImages:
         mock_platform: MagicMock,
         mock_build: MagicMock,
     ) -> None:
-        mock_docker.from_env.return_value = MagicMock()
+        mock_docker.return_value = MagicMock()
         spec = MagicMock()
         spec.repo_dockerfile = "FROM java:17"
         spec.make_repo_script_list.return_value = []
         mock_spec.return_value = spec
         from commit0.harness.build_java import build_java_repo_images
 
-        build_java_repo_images(repo_names=["org/myrepo"], dataset=None)
-        call_args = mock_spec.call_args[0][0]
-        assert call_args["repo"] == "org/myrepo"
-        assert call_args["base_commit"] == "HEAD"
+        # QC-C8-005: a repo absent from the dataset must FAIL LOUD, never fall
+        # back to a synthetic base/reference=HEAD instance.
+        with pytest.raises(RuntimeError, match="No dataset entry"):
+            build_java_repo_images(repo_names=["org/myrepo"], dataset=None)
+        mock_build.assert_not_called()
 
     @patch(f"{MODULE}.build_image")
     @patch(f"{MODULE}.get_docker_platform", return_value="linux/amd64")
     @patch(f"{MODULE}._resolve_mitm_ca_cert", return_value=None)
-    @patch(f"{MODULE}.docker")
+    @patch(f"{MODULE}.docker_client")
     @patch(f"{MODULE}.make_java_spec")
     def test_empty_repo_list_no_builds(
         self,
@@ -143,7 +167,7 @@ class TestBuildJavaRepoImages:
         mock_platform: MagicMock,
         mock_build: MagicMock,
     ) -> None:
-        mock_docker.from_env.return_value = MagicMock()
+        mock_docker.return_value = MagicMock()
         from commit0.harness.build_java import build_java_repo_images
 
         # Empty list is falsy so falls back to JAVA_SPLIT; patch it empty

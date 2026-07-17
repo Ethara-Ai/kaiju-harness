@@ -15,7 +15,7 @@ from commit0.harness.constants import (
     RELATIVE_REPO_DIR,
     RepoInstance,
 )
-from commit0.harness.constants_c import CRepoInstance
+from commit0.harness.constants_c import CRepoInstance, C_GCC_VERSION
 from commit0.harness.eval_hardening import (
     revert_and_clean_lines,
     guard_snapshot_lines,
@@ -36,8 +36,11 @@ class Commit0CSpec(Spec):
 
     @property
     def base_dockerfile(self) -> str:
-        dockerfile_path = Path(__file__).parent / "dockerfiles" / "Dockerfile.c"
-        return dockerfile_path.read_text()
+        from commit0.harness.dockerfiles._template import render_dockerfile
+        return render_dockerfile(
+            Path(__file__).parent / "dockerfiles" / "Dockerfile.c",
+            {"__C_GCC_VERSION__": C_GCC_VERSION},
+        )
 
     @property
     def repo_dockerfile(self) -> str:

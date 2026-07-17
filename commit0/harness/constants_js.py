@@ -8,6 +8,12 @@ from typing import TypedDict
 JS_BASE_BRANCH: str = "commit0"
 JS_DATASET_BRANCH: str = "commit0_all"
 JS_STUB_MARKER: str = "// __COMMIT0_STUB__"
+# The Babel stubber co-emits BOTH the comment marker above AND this throw on
+# separate lines (see tools/jsstubber/stub_js.ts buildStubBody). Detection must
+# accept EITHER signal so a stub carrying only one of them (e.g. a hand-written
+# throw, or a comment stripped by a formatter) is never silently treated as
+# already-implemented and dropped from the agent's target-edit set.
+JS_STUB_THROW: str = 'throw new Error("STUB")'
 
 DEFAULT_NODE_VERSION: int = 20
 CONTAINER_WORKDIR: str = "/testbed"

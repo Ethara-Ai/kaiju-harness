@@ -268,9 +268,14 @@ def _eval_single_repo(
             "Evaluation CRASHED for %s: %s\n%s",
             short_name, e, traceback.format_exc(),
         )
-        canonical = _load_java_test_ids(short_name)
-        num_total = len(canonical) if canonical else 0
-        return short_name, time.monotonic() - start, 0, num_total
+        # An eval-harness CRASH (an exception before any test ran) is an infra
+        # failure, NOT a measured model 0/N. Return num_total=0 so the aggregator
+        # in cli_java.py (which averages `r[2]/r[3] for r in results if r[3] > 0`)
+        # EXCLUDES this repo from both the numerator and the denominator, instead
+        # of scoring a genuine-looking 0/canonical that silently drags the mean
+        # down. This mirrors the _EXCLUDED_STATUSES posture of the other
+        # languages (C4-002).
+        return short_name, time.monotonic() - start, 0, 0
 
     elapsed = time.monotonic() - start
     # Infra markers (TIMEOUT/COMPILATION) are not real tests — exclude them.

@@ -247,3 +247,51 @@ class TestEdgeCases:
         spec = _make_spec(build_system="gradle", test_ids=None)
         cmd = spec._get_test_cmd(spec.test_ids)
         assert "$GRADLE_CMD test" in cmd
+
+
+class TestDependencyVerificationPipefailSafe:
+    """Regression: the repo setup runs under `set -euxo pipefail`. The old
+    verification `find ~/.m2/repository ~/.gradle/caches -name "*.jar" | head -1
+    | grep -q .` false-failed EVERY Maven repo — `find` on the absent
+    ~/.gradle/caches exits non-zero and (with head's SIGPIPE) pipefail failed the
+    whole build even though dependency resolution had fully succeeded. See the
+    JSON-java build that reported a bogus "network/registry issue".
+    """
+
+    def test_no_fragile_find_head_grep_pipeline(self):
+        for bs in ("maven", "gradle"):
+            block = _make_spec(build_system=bs).make_repo_script_list()[-1]
+            assert "| head -1 | grep -q ." not in block, (
+                f"{bs}: fragile find|head|grep verification reintroduced — "
+                "false-fails under pipefail when a build-system dir is absent"
+            )
+
+    def test_verification_scans_only_existing_dirs(self):
+        block = _make_spec(build_system="maven").make_repo_script_list()[-1]
+        # Guards each candidate dir with [ -d ] so a missing dir can't fail find.
+        assert '[ -d "$_kaiju_d" ]' in block
+        assert "$HOME/.m2/repository" in block
+        assert "$HOME/.gradle/caches" in block
+        assert 'find "$_kaiju_d" -name "*.jar"' in block
+        assert "| wc -l" in block  # wc reads to completion -> no SIGPIPE
+
+    def test_still_fails_loud_on_zero_jars(self):
+        block = _make_spec(build_system="maven").make_repo_script_list()[-1]
+        assert 'if [ "$_kaiju_jars" -eq 0 ]' in block
+        assert "INSTALL_VERIFICATION_FAILED" in block
+        assert "exit 1" in block
+
+    def test_dep_resolve_tees_real_error_to_log(self):
+        spec = _make_spec(build_system="maven")
+        cmd = spec._get_dependency_install_cmd()
+        # No -q (so the log carries the real download/error detail), tee to log,
+        # and the verification tails that log so a genuine failure names the cause.
+        assert "-q " not in cmd and not cmd.endswith("-q")
+        assert spec._DEP_RESOLVE_LOG in cmd
+        assert "|| true" in cmd
+        block = spec.make_repo_script_list()[-1]
+        assert f"tail -n 40 {spec._DEP_RESOLVE_LOG}" in block
+
+    def test_maven_resolve_has_bounded_net_flags(self):
+        cmd = _make_spec(build_system="maven")._get_dependency_install_cmd()
+        assert "maven.wagon.http.retryHandler.count" in cmd
