@@ -298,9 +298,9 @@ echo "== fork/push org: $ORG (default zahgon; override with --org) =="
 
 # resolved command lines (single source of truth for --print and for execution)
 # c's prepare CLI has no --org (it forks to its default); every other lang accepts it.
-# c uses --fork-org (not --org) and needs --push so the base_commit lands on the
-# fork the repo-image setup.sh clones from (else setup.sh git-fails, exit 128).
-_ORG_FLAG="--org $ORG"; [ "$LNG" = "c" ] && _ORG_FLAG="--fork-org $ORG --push"
+# c uses --fork-org (not --org). Push is now DEFAULT-ON for c (opt-out --dry-run),
+# same as every sibling preparer (QC-C1-002), so the old --push band-aid is gone.
+_ORG_FLAG="--org $ORG"; [ "$LNG" = "c" ] && _ORG_FLAG="--fork-org $ORG"
 # cpp prepare has no --output (it writes <repo>_cpp_dataset.json itself); passing
 # one corrupts --outputs-root via argparse prefix-matching. Drop it for cpp.
 _OUT_FLAG="--output $DATASET"; [ "$LNG" = "cpp" ] && _OUT_FLAG=""

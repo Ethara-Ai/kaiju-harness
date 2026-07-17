@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-# C13: refuse to run with xtrace on. `.env` is sourced with `set -a`, exporting
+# C13: refuse to run with xtrace on. The whitelisted `.env` loader still exports
 # AWS_BEARER_TOKEN_BEDROCK / ANTHROPIC_API_KEY / OPENAI_API_KEY into every child;
 # with `set -x` those (and the full agent command line) get echoed to logs. A
 # 2000-line script is often debugged with `bash -x` — fail closed instead.
@@ -28,11 +28,11 @@ esac
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# QC-C2-009: whitelisted .env export via the shared helper, NOT the blanket
+# `set -a; source .env` which exported every .env var (incl. unrelated secrets)
+# into every child process. See scripts/_load_env_whitelist.sh.
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE="${BASE_DIR}/repos"
@@ -1454,7 +1454,7 @@ run_evaluate() {
         "$VENV_PYTHON" commit0/cli_rust.py evaluate \
             --branch "$branch" \
             --backend "$BACKEND" \
-            --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-600}" \
+            --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-1800}" \
             --num-cpus 1 \
             --num-workers 1 \
             --commit0-config-file "$COMMIT0_CONFIG"

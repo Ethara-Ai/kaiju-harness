@@ -1121,7 +1121,7 @@ run_evaluate_ts() {
         "$VENV_PYTHON" -m commit0.cli_ts evaluate
         --branch "$branch"
         --backend "$BACKEND"
-        --timeout 300
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-1800}"
         --num-cpus 1
         --num-workers 1
         --commit0-config-file "$COMMIT0_TS_CONFIG"
@@ -1449,7 +1449,18 @@ save_results() {
         fi
     fi
     mkdir -p "$(dirname "$PIPELINE_LOG")"
-    echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
+    # Write atomically via a temp file and ONLY promote it if it is valid,
+    # non-empty JSON. A jq failure or an empty RESULTS_JSON must never truncate
+    # an already-good pipeline_results.json to 0 bytes (that loses all stage
+    # results and zeroes ATIF rewards).
+    local _tmp="${PIPELINE_LOG}.tmp.$$"
+    if echo "$RESULTS_JSON" | jq '.' > "$_tmp" 2>/dev/null && [[ -s "$_tmp" ]]; then
+        mv -f "$_tmp" "$PIPELINE_LOG"
+    else
+        rm -f "$_tmp"
+        log "ERROR: save_results refused to write empty/invalid JSON to ${PIPELINE_LOG} (kept prior file)"
+        return 1
+    fi
 }
 
 write_cache() {

@@ -131,6 +131,12 @@ resolve_model() {
             CACHE_PROMPTS="true"
             return 0
             ;;
+        opus47cc|opus47claudecode|claude-opus-4-7-claudecode)
+            MODEL_NAME="anthropic/claude-opus-4-7"
+            MODEL_SHORT="claude-opus-4.7"
+            CACHE_PROMPTS="true"
+            return 0
+            ;;
         opus48cc|opus48claudecode|claude-opus-4-8-claudecode)
             MODEL_NAME="anthropic/claude-opus-4-8"
             MODEL_SHORT="claude-opus-4.8"
@@ -139,6 +145,12 @@ resolve_model() {
             ;;
         sonnet46v|sonnet46vertex|claude-sonnet-4-6-vertex)
             MODEL_NAME="vertex_ai/claude-sonnet-4-6"
+            MODEL_SHORT="claude-sonnet-4.6"
+            CACHE_PROMPTS="true"
+            return 0
+            ;;
+        sonnet46cc|sonnet46claudecode|claude-sonnet-4-6-claudecode)
+            MODEL_NAME="anthropic/claude-sonnet-4-6"
             MODEL_SHORT="claude-sonnet-4.6"
             CACHE_PROMPTS="true"
             return 0

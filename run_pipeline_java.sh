@@ -21,11 +21,11 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# QC-C2-009: whitelisted .env export via the shared helper, NOT the blanket
+# `set -a; source .env` which exported every .env var (incl. unrelated secrets)
+# into every child process. See scripts/_load_env_whitelist.sh.
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE="${BASE_DIR}/repos/java"
@@ -53,6 +53,8 @@ GO_CRAZY="false"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-120}"
 USE_SPEC_INFO="true"
 STRICT_INVENTORY="true"
+# QC-C2-005 deviation from canonical 900: Maven builds are slow, so the agent
+# can legitimately be silent >900s during a build between turns.
 INACTIVITY_TIMEOUT=1800
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -127,6 +129,8 @@ USAGE
 # The containerized runner passes --backend to EVERY language's pipeline for
 # parity, so accept it here (java always evaluates in-place) rather than dying
 # with "Unknown argument '--backend'".
+# QC-C2-005 deviation from canonical BACKEND=local: Java builds IN-PLACE (no
+# image copy) — the local_inplace backend is required by the Java build arch.
 BACKEND="local_inplace"
 
 while [[ $# -gt 0 ]]; do
@@ -988,7 +992,7 @@ run_evaluate_java() {
         timeout "$EVAL_TIMEOUT" "$COMMIT0_JAVA" evaluate \
             --repo "$repo" \
             --branch "$branch" \
-            --timeout "$EVAL_TIMEOUT" \
+            --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-$EVAL_TIMEOUT}" \
             --backend "$BACKEND" \
             --log-dir "$repo_eval_dir" \
             >>"$eval_log" 2>&1
@@ -1289,7 +1293,18 @@ save_results() {
         fi
     fi
     mkdir -p "$(dirname "$PIPELINE_LOG")"
-    echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
+    # Write atomically via a temp file and ONLY promote it if it is valid,
+    # non-empty JSON. A jq failure or an empty RESULTS_JSON must never truncate
+    # an already-good pipeline_results.json to 0 bytes (that loses all stage
+    # results and zeroes ATIF rewards).
+    local _tmp="${PIPELINE_LOG}.tmp.$$"
+    if echo "$RESULTS_JSON" | jq '.' > "$_tmp" 2>/dev/null && [[ -s "$_tmp" ]]; then
+        mv -f "$_tmp" "$PIPELINE_LOG"
+    else
+        rm -f "$_tmp"
+        log "ERROR: save_results refused to write empty/invalid JSON to ${PIPELINE_LOG} (kept prior file)"
+        return 1
+    fi
 }
 
 # ============================================================

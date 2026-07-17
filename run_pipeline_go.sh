@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-# Refuse to run with xtrace on. `.env` is sourced with `set -a`, exporting
+# Refuse to run with xtrace on. The whitelisted `.env` loader still exports
 # AWS_BEARER_TOKEN_BEDROCK / ANTHROPIC_API_KEY / OPENAI_API_KEY into every child;
 # with `set -x` those (and the full agent command line) get echoed to logs.
 case "$-" in
@@ -28,11 +28,11 @@ esac
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# QC-C2-009: whitelisted .env export via the shared helper, NOT the blanket
+# `set -a; source .env` which exported every .env var (incl. unrelated secrets)
+# into every child process. See scripts/_load_env_whitelist.sh.
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE="${BASE_DIR}/repos"
@@ -66,6 +66,13 @@ RESUME="false"
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
+# Ablation knobs (parity with run_pipeline_c.sh). Emitted into the agent config
+# YAML; default to the non-ablated production values.
+BLIND_LINT="false"
+BLIND_TESTS="false"
+NAMES_ONLY_TESTS="false"
+STRIP_NON_STUBS="false"
+INJECT_TEST_FILES_READONLY="true"
 
 print_usage() {
     cat <<'USAGE'
@@ -123,6 +130,11 @@ while [[ $# -gt 0 ]]; do
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
+        --blind-lint) BLIND_LINT="true"; shift ;;
+        --blind-tests) BLIND_TESTS="true"; shift ;;
+        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
+        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
+        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         -h|--help)     print_usage ;;
         --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         --resume)      RESUME="true"; shift ;;
@@ -532,6 +544,10 @@ write_agent_config() {
     local use_lint_info="$2"
     local run_entire_dir_lint="$3"
     local add_import_module_to_context="$4"
+    # QC-C2-008: parameterizable per-stage (defaults to the prior hardcoded
+    # false) so the emitter signature matches cpp/js/rust/ts and the value can
+    # no longer silently drift between hardcoded and per-stage across languages.
+    local use_unit_tests_info="${5:-false}"
 
     cat > "$AGENT_CONFIG" <<'YAMLEOF'
 agent_name: aider
@@ -552,7 +568,7 @@ use_topo_sort_dependencies: false
 add_import_module_to_context: ${add_import_module_to_context}
 use_repo_info: false
 max_repo_info_length: 10000
-use_unit_tests_info: false
+use_unit_tests_info: ${use_unit_tests_info}
 max_unit_tests_info_length: 10000
 use_spec_info: ${USE_SPEC_INFO}
 max_spec_info_length: 10000
@@ -569,11 +585,11 @@ max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
-blind_lint: false
-blind_tests: false
-names_only_tests: false
-inject_test_files_readonly: true
-strip_non_stubs: false
+blind_lint: ${BLIND_LINT}
+blind_tests: ${BLIND_TESTS}
+names_only_tests: ${NAMES_ONLY_TESTS}
+inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
+strip_non_stubs: ${STRIP_NON_STUBS}
 language: go
 EOF
     log "  Wrote agent Go config: ${AGENT_CONFIG}"
@@ -1131,7 +1147,7 @@ run_evaluate() {
         # inner fires first and yields clean partial output + a 124/137 exit the
         # evaluator classifies as TEST_SUITE_TIMEOUT — instead of the outer killpg
         # pre-empting it at 300s. Env-overridable; stays under EVAL_TIMEOUT (3600).
-        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-700}"
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-1800}"
         --num-cpus 1
         --num-workers 1
         --commit0-config-file "$COMMIT0_CONFIG"

@@ -20,11 +20,11 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# QC-C2-009: whitelisted .env export via the shared helper, NOT the blanket
+# `set -a; source .env` which exported every .env var (incl. unrelated secrets)
+# into every child process. See scripts/_load_env_whitelist.sh.
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE="${BASE_DIR}/repos"
@@ -34,6 +34,8 @@ MAX_ITERATION=3
 
 # C++ pipeline — hardcoded language; spec-info now user-toggleable (see --no-spec-info)
 export LANGUAGE="cpp"
+# QC-C2-005 deviation from canonical true: C++ spec docs default OFF (noisy /
+# unreliable extraction); operator-overridable via env or --no-spec-info.
 USE_SPEC_INFO="${USE_SPEC_INFO:-false}"
 COMMIT0_BUILD_PLATFORMS="${COMMIT0_BUILD_PLATFORMS:-linux/amd64,linux/arm64}"
 export COMMIT0_BUILD_PLATFORMS
@@ -48,6 +50,8 @@ DATASET_ARG=""
 BRANCH_OVERRIDE=""
 REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
+# QC-C2-005 deviation from canonical 3600: C++ compiles inside the eval
+# container are slow; the whole-eval cap needs the extra head-room.
 EVAL_TIMEOUT=7200
 NO_STAGE3_LINT="false"
 GO_CRAZY="false"
@@ -60,6 +64,8 @@ STRICT_INVENTORY="true"
 # need the longer inactivity timeout tier. Standardised on the 2-tier schedule:
 # 900s for interpreted/fast-compile langs (Python/Go/Rust/C/JS/TS), 1800s for
 # slow-compile langs (Java, C++). Override at CLI with --inactivity-timeout N.
+# QC-C2-005 deviation from canonical 900: C++ compiles are slow, so the agent
+# can legitimately be silent >900s during a build between turns.
 INACTIVITY_TIMEOUT=1800
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -189,107 +195,13 @@ fi
 # Resolve Model
 # ============================================================
 
-resolve_model() {
-    local arg="$1"
-    case "$arg" in
-        opus)
-            MODEL_NAME="${BEDROCK_OPUS_ARN}"
-            MODEL_SHORT="opus4.6"
-            CACHE_PROMPTS="true"
-            ;;
-        kimi)
-            MODEL_NAME="${BEDROCK_KIMI_ARN}"
-            MODEL_SHORT="kimi-k2.5"
-            CACHE_PROMPTS="false"
-            ;;
-        glm5|glm-5)
-            MODEL_NAME="${BEDROCK_GLM5_ARN}"
-            MODEL_SHORT="glm-5"
-            CACHE_PROMPTS="false"
-            ;;
-        minimax)
-            MODEL_NAME="${BEDROCK_MINIMAX_ARN}"
-            MODEL_SHORT="minimax-m2.5"
-            CACHE_PROMPTS="false"
-            ;;
-        nova-premier)
-            MODEL_NAME="${BEDROCK_NOVA_PREMIER_ARN}"
-            MODEL_SHORT="nova-premier"
-            CACHE_PROMPTS="false"
-            ;;
-        nova-lite|nova-2-lite)
-            MODEL_NAME="${BEDROCK_NOVA2_LITE_ARN}"
-            MODEL_SHORT="nova-2-lite"
-            CACHE_PROMPTS="false"
-            ;;
-        gpt54)
-            MODEL_NAME="openai/gpt-5.4"
-            MODEL_SHORT="gpt-5.4"
-            CACHE_PROMPTS="false"
-            ;;
-        gpt55)
-            MODEL_NAME="${OPENAI_GPT55_MODEL:-openai/gpt-5.5}"
-            MODEL_SHORT="gpt-5.5"
-            CACHE_PROMPTS="false"
-            ;;
-        opus47v|opus47vertex|claude-opus-4-7-vertex)
-            MODEL_NAME="vertex_ai/claude-opus-4-7"
-            MODEL_SHORT="claude-opus-4.7"
-            CACHE_PROMPTS="true"
-            ;;
-        opus48v|opus48vertex|claude-opus-4-8-vertex)
-            MODEL_NAME="vertex_ai/claude-opus-4-8"
-            MODEL_SHORT="claude-opus-4.8"
-            CACHE_PROMPTS="true"
-            ;;
-        sonnet46v|sonnet46vertex|claude-sonnet-4-6-vertex)
-            MODEL_NAME="vertex_ai/claude-sonnet-4-6"
-            MODEL_SHORT="claude-sonnet-4.6"
-            CACHE_PROMPTS="true"
-            ;;
-        gemini25pro|gemini-2.5-pro)
-            MODEL_NAME="vertex_ai/gemini-2.5-pro"
-            MODEL_SHORT="gemini-2.5-pro"
-            CACHE_PROMPTS="false"
-            ;;
-        gemini|gemini31|gemini-3.1-pro)
-            MODEL_NAME="vertex_ai/gemini-3.1-pro-preview"
-            MODEL_SHORT="gemini-3.1-pro"
-            CACHE_PROMPTS="false"
-            ;;
-        opus48cc|opus48claudecode|claude-opus-4-8-claudecode)
-            MODEL_NAME="anthropic/claude-opus-4-8"
-            MODEL_SHORT="claude-opus-4.8-cc"
-            CACHE_PROMPTS="true"
-            ;;
-        opus47cc|opus47claudecode|claude-opus-4-7-claudecode)
-            MODEL_NAME="anthropic/claude-opus-4-7"
-            MODEL_SHORT="claude-opus-4.7-cc"
-            CACHE_PROMPTS="true"
-            ;;
-        sonnet46cc|sonnet46claudecode|claude-sonnet-4-6-claudecode)
-            MODEL_NAME="anthropic/claude-sonnet-4-6"
-            MODEL_SHORT="claude-sonnet-4.6-cc"
-            CACHE_PROMPTS="true"
-            ;;
-        *)
-            MODEL_NAME="$arg"
-            MODEL_SHORT=$(echo "$arg" | sed 's|.*/||' | tr -dc 'a-zA-Z0-9._-' | cut -c1-20)
-            if [[ -z "$MODEL_SHORT" ]]; then
-                MODEL_SHORT="custom"
-            fi
-            if [[ "$arg" == bedrock/*claude* ]] || [[ "$arg" == bedrock/*anthropic* ]] || [[ "$arg" == anthropic/* ]]; then
-                CACHE_PROMPTS="true"
-            else
-                CACHE_PROMPTS="false"
-            fi
-            # ARN-based bedrock models need converse/ route unless already specified
-            if [[ "$MODEL_NAME" == bedrock/* ]] && [[ "$MODEL_NAME" == *:aws:bedrock:* ]] && [[ "$MODEL_NAME" != bedrock/converse/* ]]; then
-                MODEL_NAME="bedrock/converse/${MODEL_NAME#bedrock/}"
-            fi
-            ;;
-    esac
-}
+# Source the SHARED model resolver (parity with all 7 sibling pipelines).
+# Previously C++ carried its own DRIFTED inline copy of resolve_model() that had
+# fallen behind the canonical table (missing newer models + the ARN mechanism).
+# The two C++-only claude-code aliases it did carry (opus47cc / sonnet46cc) were
+# folded into the shared resolver, so this is a superset with no behavior loss.
+# shellcheck disable=SC1091
+source "${BASE_DIR}/commit0/harness/resolve_model.sh"
 
 resolve_model "$MODEL_ARG"
 
@@ -1261,7 +1173,7 @@ run_evaluate() {
         env COMMIT0_CPP_LOG_DIR="$eval_artifacts_dir"
         "$VENV_PYTHON" -m commit0.cli_cpp evaluate
         --branch "$branch"
-        --timeout "$EVAL_TIMEOUT"
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-$EVAL_TIMEOUT}"
         --num-workers 1
         --backend "$BACKEND"
     )
@@ -1581,7 +1493,18 @@ save_results() {
         fi
     fi
     mkdir -p "$(dirname "$PIPELINE_LOG")"
-    echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
+    # Write atomically via a temp file and ONLY promote it if it is valid,
+    # non-empty JSON. A jq failure or an empty RESULTS_JSON must never truncate
+    # an already-good pipeline_results.json to 0 bytes (that loses all stage
+    # results and zeroes ATIF rewards).
+    local _tmp="${PIPELINE_LOG}.tmp.$$"
+    if echo "$RESULTS_JSON" | jq '.' > "$_tmp" 2>/dev/null && [[ -s "$_tmp" ]]; then
+        mv -f "$_tmp" "$PIPELINE_LOG"
+    else
+        rm -f "$_tmp"
+        log "ERROR: save_results refused to write empty/invalid JSON to ${PIPELINE_LOG} (kept prior file)"
+        return 1
+    fi
 }
 
 # ============================================================

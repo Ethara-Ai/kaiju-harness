@@ -23,11 +23,11 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# QC-C2-009: whitelisted .env export via the shared helper, NOT the blanket
+# `set -a; source .env` which exported every .env var (incl. unrelated secrets)
+# into every child process. See scripts/_load_env_whitelist.sh.
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE="${BASE_DIR}/repos"
@@ -64,6 +64,13 @@ RESUME="false"
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
 MAX_PARALLEL_REPOS=1
+# Ablation knobs (parity with run_pipeline_c.sh). Emitted into the agent config
+# YAML; default to the non-ablated production values.
+BLIND_LINT="false"
+BLIND_TESTS="false"
+NAMES_ONLY_TESTS="false"
+STRIP_NON_STUBS="false"
+INJECT_TEST_FILES_READONLY="true"
 USE_CLAUDE_CODE="false"
 
 print_usage() {
@@ -127,6 +134,11 @@ while [[ $# -gt 0 ]]; do
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
+        --blind-lint) BLIND_LINT="true"; shift ;;
+        --blind-tests) BLIND_TESTS="true"; shift ;;
+        --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
+        --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
+        --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
         --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
         --resume)      RESUME="true"; shift ;;
         -h|--help)     print_usage ;;
@@ -591,6 +603,11 @@ write_agent_config() {
     local use_lint_info="$2"
     local run_entire_dir_lint="$3"
     local add_import_module_to_context="$4"
+    # QC-C2-008: use_unit_tests_info is a per-stage knob in cpp/js/rust/ts; make
+    # it parameterizable here too (defaulting to the prior hardcoded false) so
+    # the emitter signature is uniform and the value can no longer silently
+    # drift between "hardcoded" and "per-stage" across languages.
+    local use_unit_tests_info="${5:-false}"
 
     cat > "$AGENT_CONFIG" <<'YAMLEOF'
 agent_name: aider
@@ -615,7 +632,7 @@ use_topo_sort_dependencies: true
 add_import_module_to_context: ${add_import_module_to_context}
 use_repo_info: false
 max_repo_info_length: 10000
-use_unit_tests_info: false
+use_unit_tests_info: ${use_unit_tests_info}
 max_unit_tests_info_length: 10000
 use_spec_info: ${USE_SPEC_INFO}
 max_spec_info_length: 10000
@@ -632,11 +649,11 @@ max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
-blind_lint: false
-blind_tests: false
-names_only_tests: false
-strip_non_stubs: false
-inject_test_files_readonly: true
+blind_lint: ${BLIND_LINT}
+blind_tests: ${BLIND_TESTS}
+names_only_tests: ${NAMES_ONLY_TESTS}
+strip_non_stubs: ${STRIP_NON_STUBS}
+inject_test_files_readonly: ${INJECT_TEST_FILES_READONLY}
 EOF
     log "  Wrote agent config: ${AGENT_CONFIG}"
 }
@@ -960,11 +977,19 @@ run_evaluate() {
     local branch="$1"
     local stage_label="${2:-eval}"
 
+    # QC-C2-010: the outer eval --timeout is the WHOLE-eval container-exec cap
+    # (build + the inner per-run test cap). All 8 pipelines derive it from ONE
+    # shared var, KAIJU_EVAL_HARNESS_TIMEOUT, so an operator override applies
+    # uniformly. The 1800s default is 2x the inner EVAL_TEST_TIMEOUT=900 cap
+    # (spec*.py) so a slow-but-legit suite is never falsely timed out to 0.
+    # Build-heavy langs (c/cpp/java compile inside the eval) keep a larger
+    # default via ${KAIJU_EVAL_HARNESS_TIMEOUT:-$EVAL_TIMEOUT} — a documented,
+    # test-whitelisted deviation, not silent drift.
     local cmd=(
         "$VENV_PYTHON" -m commit0 evaluate
         --branch "$branch"
         --backend "$BACKEND"
-        --timeout 300
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-1800}"
         --num-cpus 1
         --num-workers 1
         --commit0-config-file "$COMMIT0_CONFIG"

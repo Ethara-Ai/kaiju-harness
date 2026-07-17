@@ -25,11 +25,11 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# QC-C2-009: whitelisted .env export via the shared helper, NOT the blanket
+# `set -a; source .env` which exported every .env var (incl. unrelated secrets)
+# into every child process. See scripts/_load_env_whitelist.sh.
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
 REPO_BASE_JS="${BASE_DIR}/repos_js"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
@@ -57,10 +57,13 @@ GO_CRAZY="false"
 # 300+ for slow-start bridges (multi-account pool, cold Docker network) so
 # preflight doesn't abort the whole run on transient upstream slowness.
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-120}"
+# QC-C2-005 deviation from canonical true: JS feeds the agent the raw README
+# in-container (no PDF spec extraction), so PDF spec injection is off by design.
 USE_SPEC_INFO="false"
 STRICT_INVENTORY="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
+MAX_PARALLEL_REPOS=1
 SKIP_TO_STAGE=""
 RESUME="false"
 NUM_SAMPLES=1
@@ -99,6 +102,7 @@ Options:
   --max-wall-time  <secs>    Absolute per-stage wall-time cap in seconds (default: 86400)
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
+  --max-parallel-repos <n>   Repos to prepare/run in parallel (default: 1)
   --no-stage3-lint           Disable lint in Stage 3
   --use-spec-info            Enable README-based spec context (default: off for JS)
   --no-strict-inventory      Warn (do not FATAL) when a repo's frozen test-id inventory is missing
@@ -125,6 +129,7 @@ while [[ $# -gt 0 ]]; do
         --stage-timeout) [[ $# -lt 2 ]] && { echo "Error: --stage-timeout requires a value"; exit 1; }; STAGE_TIMEOUT="$2";     shift 2 ;;
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
+        --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
         --go-crazy) GO_CRAZY="true"; shift ;;
         --preflight-timeout) [[ $# -lt 2 ]] && { echo "Error: --preflight-timeout requires a value (seconds)"; exit 1; }; PROBE_TIMEOUT="$2"; shift 2 ;;
@@ -996,7 +1001,7 @@ run_agent_js() {
         --agent-config-file "$AGENT_CONFIG"
         --commit0-config-file "$COMMIT0_JS_CONFIG"
         --log-dir "$log_dir"
-        --max-parallel-repos 1
+        --max-parallel-repos "$MAX_PARALLEL_REPOS"
     )
 
     local first_cmd=( "${cmd[@]}" )
@@ -1060,7 +1065,7 @@ run_evaluate_js() {
         # JS/TS repos have slow npm install + long test suites; the operator
         # can raise this to avoid spurious TEST_SUITE_TIMEOUT scoring. Default
         # 600s (higher than Go's due to npm install overhead).
-        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-600}"
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-1800}"
         --num-cpus 1
         --num-workers 1
         --commit0-config-file "$COMMIT0_JS_CONFIG"
@@ -1393,7 +1398,18 @@ save_results() {
         fi
     fi
     mkdir -p "$(dirname "$PIPELINE_LOG")"
-    echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
+    # Write atomically via a temp file and ONLY promote it if it is valid,
+    # non-empty JSON. A jq failure or an empty RESULTS_JSON must never truncate
+    # an already-good pipeline_results.json to 0 bytes (that loses all stage
+    # results and zeroes ATIF rewards).
+    local _tmp="${PIPELINE_LOG}.tmp.$$"
+    if echo "$RESULTS_JSON" | jq '.' > "$_tmp" 2>/dev/null && [[ -s "$_tmp" ]]; then
+        mv -f "$_tmp" "$PIPELINE_LOG"
+    else
+        rm -f "$_tmp"
+        log "ERROR: save_results refused to write empty/invalid JSON to ${PIPELINE_LOG} (kept prior file)"
+        return 1
+    fi
 }
 
 write_cache() {

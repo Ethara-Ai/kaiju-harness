@@ -23,12 +23,11 @@ set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -f "${BASE_DIR}/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "${BASE_DIR}/.env"
-    set +a
-fi
+# QC-C2-009: whitelisted .env export via the shared helper, NOT the blanket
+# `set -a; source .env` which exported every .env var (incl. unrelated secrets)
+# into every child process. See scripts/_load_env_whitelist.sh.
+# shellcheck source=scripts/_load_env_whitelist.sh
+source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 
@@ -125,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --resume)      RESUME="true"; shift ;;
         -h|--help) print_usage ;;
         --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;
@@ -140,20 +140,31 @@ export PROBE_TIMEOUT
 [[ -z "$DATASET_ARG" ]] && { echo "Error: --dataset is required"; print_usage; }
 
 # Source shared model resolution (Go/Java/Rust/TS/Python all use this).
-if [[ -f "${BASE_DIR}/commit0/harness/resolve_model.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "${BASE_DIR}/commit0/harness/resolve_model.sh"
-    resolve_model "$MODEL_ARG"
+# Sourced UNCONDITIONALLY, exactly like the 7 sibling pipelines: if the file is
+# ever missing/moved, `source` fails under `set -e` and the run aborts loudly
+# rather than silently skipping model resolution AND the Claude Code bridge
+# (which would make --use-claude-code a silent no-op).
+# shellcheck disable=SC1091
+source "${BASE_DIR}/commit0/harness/resolve_model.sh"
+resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Bedrock Bearer Token Priority
+# ============================================================
+# When AWS_BEARER_TOKEN_BEDROCK is set for Bedrock models, unset IAM
+# credentials so litellm/boto3 cannot fall back to SigV4 signing with
+# an IAM user that may lack bedrock:InvokeModel permissions.
+if [[ "$MODEL_NAME" == bedrock/* ]] && [[ -n "${AWS_BEARER_TOKEN_BEDROCK:-}" ]]; then
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE 2>/dev/null || true
+    export AWS_SHARED_CREDENTIALS_FILE="/dev/null"
+fi
 
 # ============================================================
 # Claude Code OAuth bridge (optional --use-claude-code)
 # ============================================================
+# shellcheck disable=SC1091
 source "${BASE_DIR}/scripts/_claude_code_pipeline_helper.sh"
 claude_code_maybe_start_bridge "$MODEL_NAME"
-else
-    MODEL_NAME="$MODEL_ARG"
-    MODEL_SHORT="$MODEL_ARG"
-fi
 
 # ------------------------------------------------------------
 # Dataset resolution
@@ -575,9 +586,213 @@ EOF
 # ------------------------------------------------------------
 # Agent + eval invocation
 # ------------------------------------------------------------
+AGENT_PID=""
 AGENT_ELAPSED=0
 AGENT_RC=0
 AGENT_NEEDS_RETRY=0
+
+# ============================================================
+# Inactivity / wall-time watchdog (QC-C2-002 — ported verbatim from the 6
+# sibling pipelines; C was the ONLY driver with no watchdog, so a hung/stuck C
+# agent ran unbounded, burning API + wall-time budget with no kill). These
+# helpers are PID/log-dir based and language-agnostic.
+# ============================================================
+
+get_mtime() {
+    stat -c '%Y' "$1" 2>/dev/null \
+        || stat -f '%m' "$1" 2>/dev/null \
+        || "$VENV_PYTHON" -c "import os,sys; print(int(os.path.getmtime(sys.argv[1])))" "$1" 2>/dev/null \
+        || echo "0"
+}
+
+# An INTENTIONAL rate-limit pause (recovery drops a re-touched `.rate_limit_paused`
+# marker) is not a hang. Returns 0 iff a marker under $1 has mtime within $2s of now.
+_pause_marker_fresh() {
+    local search_dir="$1"
+    local fresh_within="$2"
+    local now mt newest_mt=0
+    now=$(date +%s)
+    while IFS= read -r marker; do
+        mt=$(get_mtime "$marker")
+        if [[ "$mt" -gt "$newest_mt" ]]; then newest_mt="$mt"; fi
+    done < <(find "$search_dir" -name ".rate_limit_paused" 2>/dev/null)
+    [[ "$newest_mt" -gt 0 ]] || return 1
+    local age=$(( now - newest_mt ))
+    [[ "$age" -lt "$fresh_within" ]]
+}
+
+get_newest_aider_log() {
+    local search_dir="$1"
+    local newest=""
+    local newest_mtime=0
+    while IFS= read -r logfile; do
+        local mt
+        mt=$(get_mtime "$logfile")
+        if [[ "$mt" -gt "$newest_mtime" ]]; then
+            newest_mtime="$mt"
+            newest="$logfile"
+        fi
+    done < <(find "$search_dir" -name "aider.log" 2>/dev/null)
+    echo "$newest"
+}
+
+# Signal the whole process group (agent launched under `set -m` leads its own
+# group), falling back to the single PID, so forked cmake/gcc/aider children are
+# reaped instead of orphaned to keep burning budget after a kill.
+_kill_tree() {
+    local pid="$1" sig="${2:-TERM}"
+    [[ -z "$pid" ]] && return 0
+    kill "-${sig}" "-${pid}" 2>/dev/null \
+        || kill "-${sig}" "${pid}" 2>/dev/null \
+        || true
+}
+
+# Cumulative CPU seconds for the whole process group led by $1 — a "still
+# computing locally" liveness gate.
+_pgroup_cpu_secs() {
+    ps -o time= -g "$1" 2>/dev/null | awk '
+        { gsub(/ /,""); n=split($0,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; t+=s }
+        END { printf "%d", t+0 }'
+}
+
+# True if any process in group $1 has an ESTABLISHED outbound TCP connection —
+# i.e. an LLM request is in flight (server-side thinking is ~0% CPU + no logs).
+_pgroup_has_live_conn() {
+    command -v lsof >/dev/null 2>&1 || return 2
+    local pids
+    pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$pids" ]] && return 1
+    lsof -nP -a -p "$pids" -iTCP -sTCP:ESTABLISHED >/dev/null 2>&1
+}
+
+# Return code contract:
+#   0    = agent exited successfully
+#   124  = watchdog killed agent (inactivity / hard / wall-time)
+#   other= agent error (non-zero exit)
+watchdog_run() {
+    local agent_pid="$1"
+    local log_dir="$2"
+    local inactivity_limit="$3"
+    local hard_timeout="$4"
+    local absolute_max="${5:-86400}"
+    local start_time
+    start_time=$(date +%s)
+    local hard_timeout_warned="false"
+    local _veto_start=0
+
+    local _liveconn_veto_secs="${WATCHDOG_LIVECONN_VETO_SECS:-}"
+    if ! [[ "$_liveconn_veto_secs" =~ ^[0-9]+$ ]] || [[ "$_liveconn_veto_secs" -lt 1 ]]; then
+        _liveconn_veto_secs=$(( inactivity_limit * 6 ))
+        [[ "$_liveconn_veto_secs" -lt 5400 ]] && _liveconn_veto_secs=5400
+    fi
+
+    while kill -0 "$agent_pid" 2>/dev/null; do
+        sleep 5
+
+        local now_epoch
+        now_epoch=$(date +%s)
+        local latest_mtime=0
+
+        local latest_log
+        latest_log=$(get_newest_aider_log "$log_dir")
+        if [[ -n "$latest_log" ]] && [[ -f "$latest_log" ]]; then
+            local aider_mtime
+            aider_mtime=$(get_mtime "$latest_log")
+            [[ "$aider_mtime" -gt "$latest_mtime" ]] && latest_mtime="$aider_mtime"
+        fi
+
+        local agent_run_log="${log_dir}/agent_run.log"
+        if [[ -f "$agent_run_log" ]]; then
+            local run_log_mtime
+            run_log_mtime=$(get_mtime "$agent_run_log")
+            [[ "$run_log_mtime" -gt "$latest_mtime" ]] && latest_mtime="$run_log_mtime"
+        fi
+
+        local idle=0
+        local agent_active="false"
+        if [[ "$latest_mtime" -gt 0 ]]; then
+            idle=$(( now_epoch - latest_mtime ))
+            if [[ $idle -lt $inactivity_limit ]]; then
+                agent_active="true"
+                _veto_start=0
+            fi
+        else
+            agent_active="true"
+            _veto_start=0
+        fi
+
+        if [[ "$absolute_max" -gt 0 ]]; then
+            local wall_elapsed=$(( now_epoch - start_time ))
+            if [[ $wall_elapsed -ge $absolute_max ]]; then
+                log "  WATCHDOG: Absolute wall-time cap ${absolute_max}s reached. Force-killing agent."
+                _kill_tree "$agent_pid" TERM; sleep 2; _kill_tree "$agent_pid" KILL
+                wait "$agent_pid" 2>/dev/null || true
+                return 124
+            fi
+        fi
+
+        if [[ "$hard_timeout" -gt 0 ]]; then
+            local elapsed=$(( now_epoch - start_time ))
+            if [[ $elapsed -ge $hard_timeout ]]; then
+                if [[ "$agent_active" == "true" ]]; then
+                    if [[ "$hard_timeout_warned" == "false" ]]; then
+                        log "  WATCHDOG: Hard timeout ${hard_timeout}s reached but agent still active."
+                        hard_timeout_warned="true"
+                    fi
+                else
+                    log "  WATCHDOG: Hard timeout ${hard_timeout}s reached and agent inactive (${idle}s). Killing."
+                    _kill_tree "$agent_pid" TERM; sleep 2; _kill_tree "$agent_pid" KILL
+                    wait "$agent_pid" 2>/dev/null || true
+                    return 124
+                fi
+            fi
+        fi
+
+        if [[ "$latest_mtime" -gt 0 ]] && [[ "$agent_active" == "false" ]]; then
+            if _pause_marker_fresh "$log_dir" "$(( inactivity_limit * 2 ))"; then
+                log "  WATCHDOG: log idle ${idle}s but a fresh rate-limit pause marker is present — intentionally paused, not stuck. Continuing."
+                _veto_start=0
+                continue
+            fi
+            local _alive="false"
+            if _pgroup_has_live_conn "$agent_pid"; then
+                _alive="true"
+                if [[ $(( idle % 60 )) -lt 5 ]]; then
+                    log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                fi
+            else
+                local _cpu1 _cpu2
+                _cpu1=$(_pgroup_cpu_secs "$agent_pid")
+                sleep 3
+                _cpu2=$(_pgroup_cpu_secs "$agent_pid")
+                if [[ "${_cpu2:-0}" -gt "${_cpu1:-0}" ]]; then
+                    _alive="true"
+                    log "  WATCHDOG: log idle ${idle}s but agent CPU advancing (${_cpu1}->${_cpu2}s) — working, not stuck. Continuing."
+                fi
+            fi
+            if [[ "$_alive" == "true" ]]; then
+                if [[ "$_veto_start" -eq 0 ]]; then _veto_start="$now_epoch"; fi
+                local _veto_for=$(( now_epoch - _veto_start ))
+                if [[ "$_veto_for" -lt "$_liveconn_veto_secs" ]]; then
+                    continue
+                fi
+                log "  WATCHDOG: agent alive-but-silent for ${_veto_for}s (> ${_liveconn_veto_secs}s live-conn veto cap) — killing despite live signal."
+            else
+                _veto_start=0
+            fi
+            log "  WATCHDOG: No log activity for ${idle}s AND no live connection / CPU idle. Agent appears stuck."
+            log "  WATCHDOG: Killing agent (PID ${agent_pid})."
+            _kill_tree "$agent_pid" TERM; sleep 2; _kill_tree "$agent_pid" KILL
+            wait "$agent_pid" 2>/dev/null || true
+            return 124
+        fi
+    done
+
+    wait "$agent_pid" 2>/dev/null
+    local rc=$?
+    [[ $rc -eq 127 ]] && rc=0
+    return $rc
+}
 
 # Limbo sweep: a module dir with aider.log or turns.jsonl but NO .done AND NO
 # .needs_retry means the agent was killed mid-post-processing (typically by the
@@ -607,19 +822,37 @@ run_agent_stage() {
     log "Stage [${stage_label}]: invoking agent.config_c run on branch=${BRANCH_NAME}"
     local start_time
     start_time=$(date +%s)
+    mkdir -p "$LOG_BASE/${stage_label}"
+    local _agent_run_log="$LOG_BASE/${stage_label}/agent_run.log"
+    log "  Running agent (watchdog: inactivity=${INACTIVITY_TIMEOUT}s, hard=${STAGE_TIMEOUT}s, wall-cap=${MAX_WALL_TIME}s) — output → ${_agent_run_log}"
     set +e
+    # Unbuffered Python so streamed progress advances the log mtime the watchdog
+    # reads; launch under monitor mode so the agent leads its own process group
+    # and the watchdog can reap the whole tree on a kill.
+    export PYTHONUNBUFFERED=1
+    set -m
     "$VENV_PYTHON" -m agent.config_c run "$BRANCH_NAME" \
         --backend "$BACKEND" \
         --agent-config-file "$agent_config" \
         --commit0-config-file "$COMMIT0_CONFIG" \
         --log-dir "$LOG_BASE/${stage_label}" \
-        --max-parallel-repos "$MAX_PARALLEL_REPOS"
+        --max-parallel-repos "$MAX_PARALLEL_REPOS" \
+        >>"$_agent_run_log" 2>&1 &
+    local _apid=$!
+    set +m
+    AGENT_PID=$_apid
+    watchdog_run "$_apid" "$LOG_BASE/${stage_label}" "$INACTIVITY_TIMEOUT" "$STAGE_TIMEOUT" "$MAX_WALL_TIME"
     AGENT_RC=$?
+    AGENT_PID=""
     set -e
     local end_time
     end_time=$(date +%s)
     AGENT_ELAPSED=$(( end_time - start_time ))
-    log "  Agent finished in ${AGENT_ELAPSED}s (rc=${AGENT_RC})"
+    if [[ $AGENT_RC -eq 124 ]]; then
+        log "  Agent KILLED by watchdog after ${AGENT_ELAPSED}s (inactivity/hard/wall-time)"
+    else
+        log "  Agent finished in ${AGENT_ELAPSED}s (rc=${AGENT_RC})"
+    fi
 
     # A module that exhausted its transient-error retries is left WITHOUT a .done
     # marker plus a .needs_retry breadcrumb (run_agent_c.py::_skip_failed_module),
@@ -645,13 +878,21 @@ run_agent_stage() {
         local _rstart _rend
         _rstart=$(date +%s)
         set +e
+        export PYTHONUNBUFFERED=1
+        set -m
         KAIJU_RESUME=1 "$VENV_PYTHON" -m agent.config_c run "$BRANCH_NAME" \
             --backend "$BACKEND" \
             --agent-config-file "$agent_config" \
             --commit0-config-file "$COMMIT0_CONFIG" \
             --log-dir "$LOG_BASE/${stage_label}" \
-            --max-parallel-repos "$MAX_PARALLEL_REPOS"
+            --max-parallel-repos "$MAX_PARALLEL_REPOS" \
+            >>"$LOG_BASE/${stage_label}/agent_run.log" 2>&1 &
+        local _rpid=$!
+        set +m
+        AGENT_PID=$_rpid
+        watchdog_run "$_rpid" "$LOG_BASE/${stage_label}" "$INACTIVITY_TIMEOUT" "$STAGE_TIMEOUT" "$MAX_WALL_TIME"
         AGENT_RC=$?
+        AGENT_PID=""
         set -e
         _rend=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_rend - _rstart) ))
@@ -750,7 +991,7 @@ run_evaluate() {
     timeout "$EVAL_TIMEOUT" "$VENV_PYTHON" -m commit0.cli_c evaluate \
         --branch "$BRANCH_NAME" \
         --backend "$BACKEND" \
-        --timeout "$EVAL_TIMEOUT" \
+        --timeout "${KAIJU_EVAL_HARNESS_TIMEOUT:-$EVAL_TIMEOUT}" \
         --commit0-config-file "$COMMIT0_CONFIG" \
         >"$eval_log" 2>&1
     local eval_rc=$?
@@ -1195,6 +1436,18 @@ stage_3_test_refine() {
 }
 
 cleanup() {
+    # Idempotent/re-entrant: reset traps immediately so a second Ctrl-C (or a
+    # SIGTERM arriving during our own kill escalation) doesn't re-enter cleanup
+    # and leave the agent tree alive. Parity with the sibling pipelines.
+    trap - INT TERM EXIT
+    # Reap the backgrounded agent + its cmake/gcc/aider children on interrupt so
+    # they don't orphan and keep burning API/wall-time budget (the agent now runs
+    # under a watchdog in its own process group — QC-C2-002).
+    if [[ -n "${AGENT_PID:-}" ]] && kill -0 "$AGENT_PID" 2>/dev/null; then
+        _kill_tree "$AGENT_PID" TERM
+        sleep 2
+        _kill_tree "$AGENT_PID" KILL
+    fi
     if [[ -f "$COMMIT0_CONFIG" ]]; then
         log "Cleanup: leaving $COMMIT0_CONFIG (delete manually if desired)"
     fi
@@ -1299,6 +1552,13 @@ main() {
     mkdir -p "${BASE_DIR}/logs"
     # 1-indexed (mirrors run_pipeline_go.sh) so the first sample lands in run_1.
     for sample_idx in $(seq 1 "$NUM_SAMPLES"); do
+        # (Re-)arm the exit/interrupt trap for THIS sample. run_single_sample
+        # calls cleanup() on its success path (which resets the EXIT trap), so
+        # re-arm each iteration to keep the interrupt-reap active for the agent
+        # launched in the next sample.
+        trap cleanup EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
         log "===== Sample ${sample_idx} / ${NUM_SAMPLES} ====="
         run_single_sample "$sample_idx"
     done
