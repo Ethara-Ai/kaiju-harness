@@ -25,6 +25,18 @@ import tempfile
 # ---------------------------------------------------------------------------
 
 def _install_harbor_stubs():
+    # If the REAL harbor package is importable, use it — do NOT shadow it with
+    # bare stubs. The stubs were a defensive fallback for environments without
+    # harbor installed; installing them unconditionally via sys.modules poisoned
+    # GLOBAL module state (commit0_to_atif_v2 binds Trajectory=_Stub at import),
+    # so any later test in the same session that exercised the real
+    # Trajectory.to_json_dict() path broke (e.g. scripts/tests/test_qc_c7_atif.py).
+    try:  # pragma: no cover - depends on the environment
+        import harbor.models.trajectories  # noqa: F401
+        import harbor.utils.trajectory_validator  # noqa: F401
+        return
+    except Exception:
+        pass
     harbor = types.ModuleType("harbor")
     harbor_models = types.ModuleType("harbor.models")
     harbor_traj = types.ModuleType("harbor.models.trajectories")

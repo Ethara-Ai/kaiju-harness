@@ -217,5 +217,11 @@ override-dependencies = [
 ]
 
 [tool.uv.sources]
-aider-chat = { git = "https://github.com/Ethara-Ai/aider.git", branch = "main" }
-litellm = { git = "https://github.com/Ethara-Ai/litellm.git", branch = "main" }
+# Pin to an immutable commit SHA (NOT branch = "main"): the capture layer
+# monkey-patches litellm/aider internals by class-name/attr (agent/agents.py,
+# agent/edit_capture.py), so an upstream rename on a moving branch would
+# SILENTLY break cost/reasoning/edit capture. These SHAs are the ones already
+# resolved in uv.lock; bump them deliberately (and re-test with the canary in
+# agent/tests/test_qc_monkeypatch_canary.py) when adopting a new upstream.
+aider-chat = { git = "https://github.com/Ethara-Ai/aider.git", rev = "afca02447d61d3fffcc9a87ed1089a811fc1a018" }
+litellm = { git = "https://github.com/Ethara-Ai/litellm.git", rev = "f501d8ac4e2c729970bf60d3dabeacd878a0aa06" }

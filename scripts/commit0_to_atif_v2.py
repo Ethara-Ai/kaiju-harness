@@ -163,9 +163,13 @@ class V2Stats:
     n_steps: int = 0
     n_agent: int = 0
     n_user: int = 0
-    n_edits: int = 0          # SEARCH/REPLACE blocks parsed into tool_calls
+    n_edits: int = 0          # edits emitted as file_editor tool_calls
     n_edits_empty: int = 0    # edits whose replace body is empty
     assistant_search_markers: int = 0  # '<<<<<<< SEARCH' in assistant turns (apples-to-apples vs n_edits)
+    # "ground_truth" when tool_calls came from output.json applied-edits, else
+    # "text_parser_fallback" (legacy runs w/o output.json). The edit-format
+    # tripwire only applies to the fallback path (C7-001).
+    edit_source: str = "text_parser_fallback"
     real_timestamps: bool = False
     md_edit_count: int | None = None   # SEARCH blocks seen in chat.history.md (cross-check)
     reward: float | None = None
@@ -532,6 +536,72 @@ def _extract_tool_definitions(out_data: dict[str, Any] | None) -> list[dict] | N
 
 
 # ---------------------------------------------------------------------------
+# ground-truth edits/usage from output.json (fixes C7-001 / C7-011)
+# ---------------------------------------------------------------------------
+# output.json is the openhands render of aider's run. Its FileEditorAction events
+# carry the edits aider ACTUALLY applied (agent/openhands_formatter.py prefers the
+# edit_capture ground truth `turn.applied_edits` over its own text parse — see
+# openhands_formatter.py:565-581). Consuming those here lets the ATIF exporter
+# PREFER that ground truth instead of re-deriving tool_calls from the ~96%-accurate
+# text-regex parser on llm_history.txt, which can FABRICATE an edit from prose or
+# miss one. Every language runner emits this identical output.json, so reading it
+# fixes C7-001 for all 8 languages through one shared code path (no per-language
+# wiring). When output.json is ABSENT (legacy runs), these return None and the
+# caller falls back to the text parser. An empty list is authoritative "zero edits
+# applied" and suppresses phantom parser edits.
+_GT_EDIT_COMMANDS = frozenset({"create", "str_replace", "insert"})
+
+
+def _extract_ground_truth_edits(out_data: dict[str, Any] | None) -> list[dict[str, str]] | None:
+    """Ordered ground-truth edits aider applied, from output.json history.
+
+    Returns a flat list of {command, path, old_str, new_str} in emission order, or
+    None when output.json (or its `history`) is absent so the caller reverts to the
+    text-regex parser. The 'view' file-read command is excluded (it is not an edit).
+    """
+    if not out_data or "history" not in out_data:
+        return None
+    edits: list[dict[str, str]] = []
+    for e in out_data.get("history") or []:
+        if e.get("kind") != "ActionEvent":
+            continue
+        act = e.get("action") or {}
+        if act.get("kind") != "FileEditorAction":
+            continue
+        cmd = act.get("command")
+        if cmd not in _GT_EDIT_COMMANDS:
+            continue
+        path = act.get("path") or ""
+        if not path:
+            continue
+        edits.append({
+            "command": cmd,
+            "path": path,
+            "old_str": act.get("old_str") or "",
+            "new_str": act.get("new_str") or "",
+        })
+    return edits
+
+
+def _extract_ground_truth_usage(out_data: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """Ordered per-turn usage blocks from output.json history (fixes C7-011).
+
+    Each genuine assistant turn that incurred cost carries a reconciled `usage`
+    block on its first ActionEvent (openhands_formatter.py). Returns them in order,
+    or None when output.json/history is absent. Used to attach per-turn Metrics to
+    EACH assistant turn rather than collapsing the whole-trajectory grand total onto
+    the terminal step only.
+    """
+    if not out_data or "history" not in out_data:
+        return None
+    usages: list[dict[str, Any]] = []
+    for e in out_data.get("history") or []:
+        if e.get("kind") == "ActionEvent" and isinstance(e.get("usage"), dict):
+            usages.append(e["usage"])
+    return usages
+
+
+# ---------------------------------------------------------------------------
 # reward join (same as v1)
 # ---------------------------------------------------------------------------
 def load_pipeline_rewards(p: Path) -> dict[str, float | None]:
@@ -555,18 +625,44 @@ def load_pipeline_rewards(p: Path) -> dict[str, float | None]:
     return {k: (d.get(k) or {}).get("pass_rate") for k in ("stage1", "stage2", "stage3")}
 
 
-def find_pipeline_for(output_path: Path) -> Path | None:
+def _resolved_from_pass_rate(v: float | None) -> int | None:
+    """Canonical `resolved` flag from a stage pass_rate (fixes C7-002).
+
+    ONE definition, ALL-PASS, matching the Harbor verifier convention
+    (commit0_to_harbor_dataset.py: `resolved = 1 if passed == total else 0`) and
+    the per-model reward.json map already emitted below. pass_rate is computed as
+    passed/total, and N/N == 1.0 exactly in Python for integer counts, so
+    `>= 1.0` is an exact equivalent of `passed == total`. Both the per-step
+    trajectory flag AND the per-model reward.json route through this helper so
+    the two can never drift to different (any-pass vs all-pass) semantics again.
+    Returns None when pass_rate is unknown (no reward signal for the stage).
+    """
+    if v is None:
+        return None
+    return 1 if v >= 1.0 else 0
+
+
+def find_pipeline_for(output_path: Path, stop_at: Path | None = None) -> Path | None:
     """Find the nearest pipeline_*_results.json searching upward from the unit dir.
 
     Stops at (and includes) the logs_* ancestor so per-branch pipeline files are
     preferred over the top-level one (fixes RJ-2). Hits are sorted for determinism
     when multiple result files exist at the same level (fixes RJ-1).
+
+    `stop_at` bounds the upward walk to the run/task root (fixes C7-003). The
+    kaiju layout (`<model>/agent/run_N/stage*_*/...`) has NO `logs_*` marker, so
+    without an explicit boundary the walk would escape the run and climb to the
+    corpus/filesystem root, mis-attributing a stray pipeline_*_results.json from
+    an unrelated run. The walk stops after inspecting `stop_at` in BOTH the legacy
+    (logs_) and kaiju layouts.
     """
     for parent in output_path.parents:
         hits = sorted(parent.glob("pipeline_*_results.json"))
         if hits:
             return hits[0]
         if parent.name.startswith("logs_"):
+            break
+        if stop_at is not None and parent == stop_at:
             break
     return None
 
@@ -615,7 +711,28 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
     sid = 0
     call_seq = 0
     last_ast_idx = max((i for i, (r, _) in enumerate(turns) if r == "assistant"), default=-1)
+    n_assistant = sum(1 for r, _ in turns if r == "assistant")
     _m = (out_data or {}).get("metrics") or {}
+
+    # C7-001: PREFER the ground-truth edits aider actually applied (from
+    # output.json) over the fabrication-prone text parser. gt_queue is a flat
+    # FIFO of the authoritative edits; None means output.json was absent (legacy
+    # run) so we fall back to _parse_edits. gt_queue == [] is authoritative "zero
+    # edits" and suppresses phantom parser edits.
+    gt_edits = _extract_ground_truth_edits(out_data)
+    gt_queue: list[dict[str, str]] | None = list(gt_edits) if gt_edits is not None else None
+    st.edit_source = "ground_truth" if gt_queue is not None else "text_parser_fallback"
+
+    # C7-011: attach per-turn Metrics to EACH assistant turn that incurred cost,
+    # from output.json's reconciled per-turn `usage` blocks. We only distribute
+    # per-turn when the count of usage-bearing turns matches the number of
+    # assistant turns (a confident 1:1 alignment); otherwise we fall back to the
+    # whole-trajectory grand total placed on the terminal step and TAG it as such,
+    # so a consumer never mistakes a cumulative figure for that step's cost.
+    gt_usages = _extract_ground_truth_usage(out_data)
+    per_step_metrics = gt_usages is not None and len(gt_usages) == n_assistant and n_assistant > 0
+    _usage_pos = 0
+
     for i, (role, body) in enumerate(turns):
         if role == "system":
             sid += 1
@@ -628,46 +745,78 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
             # Strict no-invention rule: the only tool names emitted on agent steps
             # are those registered in kaiju/agent/openhands_formatter.py.
             # - <think>...</think> blocks      -> step.reasoning_content (not a ToolCall)
-            # - SEARCH/REPLACE blocks          -> 'file_editor' tool call
-            #     - SEARCH empty                 => command='create'
-            #     - SEARCH non-empty             => command='str_replace'
-            # view/insert/finish have no text marker in aider's llm_history.txt
-            # and are NEVER emitted from this source. Every ToolCall is validated
-            # by _assert_kaiju_tool() before the step is appended.
+            # - applied edits                  -> 'file_editor' tool call
+            #     - old_str empty                => command='create'
+            #     - old_str non-empty            => command='str_replace'/'insert'
+            # Every ToolCall is validated by _assert_kaiju_tool() before the step
+            # is appended.
             think_blocks = _extract_think_blocks(body)
-            edits, empty, raw_markers = _parse_edits(body)
-            st.n_edits += len(edits)
-            st.n_edits_empty += empty
+            parsed_edits, parsed_empty, raw_markers = _parse_edits(body)
             st.assistant_search_markers += raw_markers
+            if gt_queue is not None:
+                # Ground-truth path: place as many authoritative edits on this turn
+                # as the parser saw markers here (anchors placement without needing
+                # per-turn ids — absent for some languages, e.g. go). The LAST
+                # assistant turn absorbs any ground-truth edits the parser missed so
+                # the full authoritative set is preserved and NOTHING is fabricated
+                # beyond it. When the parser over-matches (prose that looks like an
+                # edit) the queue runs dry and the phantom edits are suppressed.
+                take = len(gt_queue) if i == last_ast_idx else min(len(parsed_edits), len(gt_queue))
+                turn_edits = [gt_queue.pop(0) for _ in range(take)]
+            else:
+                turn_edits = [
+                    {"command": ("create" if not e["search"].strip() else "str_replace"),
+                     "path": e["file_path"], "old_str": e["search"], "new_str": e["replace"]}
+                    for e in parsed_edits
+                ]
             tool_calls = []
-            for e in edits:
+            n_empty = 0
+            for e in turn_edits:
                 call_seq += 1
                 cid = f"edit_{call_seq}"
-                # Match kaiju's openhands_formatter.py:344: command='create' when
-                # SEARCH is empty (new file), else 'str_replace'. Aligns
-                # function_name with the file_editor tool in Agent.tool_definitions.
-                command = "create" if not e["search"].strip() else "str_replace"
+                if not e["new_str"].strip():
+                    n_empty += 1
                 tool_calls.append(ToolCall(
                     tool_call_id=cid,
                     function_name="file_editor",
-                    arguments={"command": command,
-                               "path": e["file_path"],
-                               "old_str": e["search"],
-                               "new_str": e["replace"]},
+                    arguments={"command": e["command"],
+                               "path": e["path"],
+                               "old_str": e["old_str"],
+                               "new_str": e["new_str"]},
                 ))
             for _tc in tool_calls:
                 _assert_kaiju_tool(_tc)
+            st.n_edits += len(tool_calls)
+            st.n_edits_empty += n_empty
             step_ts = last_response_ts if (real_ts and i == last_ast_idx) else None
             _step_metrics: Metrics | None = None
-            if i == last_ast_idx and any(
+            if per_step_metrics:
+                u = gt_usages[_usage_pos]
+                _usage_pos += 1
+                cached = u.get("cache_read_tokens")
+                if cached is None:
+                    cached = u.get("cached_content_tokens")
+                if any(u.get(k) for k in ("prompt_tokens", "completion_tokens", "cost_usd")) or cached:
+                    _step_metrics = Metrics(
+                        prompt_tokens=u.get("prompt_tokens"),
+                        completion_tokens=u.get("completion_tokens"),
+                        cached_tokens=cached,
+                        cost_usd=u.get("cost_usd"),
+                        extra={"metrics_scope": "per_turn"},
+                    )
+            elif i == last_ast_idx and any(
                 _m.get(k) is not None
                 for k in ("total_prompt_tokens", "total_completion_tokens", "cache_hit_tokens", "total_cost")
             ):
+                # No confident per-turn alignment: attach the whole-trajectory grand
+                # total to the terminal step, TAGGED so it is never read as this
+                # step's own cost (C7-011).
                 _step_metrics = Metrics(
                     prompt_tokens=_m.get("total_prompt_tokens"),
                     completion_tokens=_m.get("total_completion_tokens"),
                     cached_tokens=_m.get("cache_hit_tokens"),
                     cost_usd=_m.get("total_cost"),
+                    extra={"metrics_scope": "trajectory_grand_total"},
                 )
             sid += 1
             steps.append(Step(
@@ -731,6 +880,10 @@ def convert_unit(unit_dir: Path, *, task: str, model: str, stage: str, module: s
     _extra: dict[str, Any] = {
         "instance_id": instance_id, "stage": stage, "module": module,
         "session_timestamps": ([timestamps[0], timestamps[-1]] if timestamps else None) if real_ts else None,
+        # Provenance of tool_calls (C7-001) and per-step cost (C7-011), so mixed
+        # corpora are auditable and a grand-total step is never read as per-turn.
+        "edit_source": st.edit_source,
+        "per_step_metrics_available": per_step_metrics,
     }
     if out_data:
         _git = (out_data.get("test_result") or {}).get("git_patch")
@@ -816,11 +969,14 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
     used_dests: set[Path] = set()
     model_rewards: dict[tuple[str, str], tuple[dict[str, float | None], "Path | None"]] = {}
     for unit, model, stage, module in units:
-        pipeline = pipeline_override if pipeline_override else find_pipeline_for(unit)
+        pipeline = (pipeline_override if pipeline_override
+                    else find_pipeline_for(unit, stop_at=task_dir))
         spr = load_pipeline_rewards(pipeline) if pipeline else {}
         key = STAGE_TO_PIPELINE_KEY.get(stage)
         reward = spr.get(key) if key else None
-        resolved = (1 if (reward is not None and reward > 0) else 0) if reward is not None else None
+        # Canonical ALL-PASS resolved semantics, shared with the per-model
+        # reward.json map below (fixes C7-002 — was any-pass `reward > 0` here).
+        resolved = _resolved_from_pass_rate(reward)
         # when a (model,stage,module) has >1 pipeline branch, the branch disambiguates
         # BOTH the output path leaf AND the trajectory_id (else they collide).
         branch_suffix = ""
@@ -881,7 +1037,7 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
             continue
         rd = out_root / task_name / model_name / "verifier"
         rd.mkdir(parents=True, exist_ok=True)
-        resolved_map = {k: (1 if (v is not None and v >= 1.0) else 0)
+        resolved_map = {k: _resolved_from_pass_rate(v)
                         for k, v in spr.items() if v is not None}
         fname = f"reward__{branch_suffix}.json" if branch_suffix else "reward.json"
         (rd / fname).write_text(json.dumps(
@@ -894,18 +1050,24 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
     conv = [s for s in all_stats if not s.skipped and not s.errors]
     total_edits = sum(s.n_edits for s in conv)
     total_markers = sum(s.assistant_search_markers for s in conv)
-    # Tripwire (edit_format mismatch). EDIT_RE only matches aider's 'diff' format
-    # (path line -> ```fence -> <<<<<<< SEARCH). If the model emits a different format
-    # (diff-fenced puts the path INSIDE the fence; udiff/whole don't use these markers
-    # the same way), EDIT_RE matches ~none of the markers and tool_calls are silently
-    # lost. We detect this by PARSE RATE = parsed_edits / search_markers (markers counted
-    # in assistant turns only, so system-prompt examples don't inflate it). A healthy
-    # 'diff' run parses ~85%+ (the small gap is benign model formatting noise); a format
-    # mismatch parses ~0%. We flag below PARSE_RATE_FLOOR. Evaluated per-task because the
-    # edit_format is uniform within a run (one model/config), which is far less noisy
-    # than a per-unit equality check.
+    # Edit provenance (C7-001). Ground-truth units take tool_calls from
+    # output.json's applied edits; only the fallback units re-derive them from the
+    # text parser and are therefore the only ones the edit-format tripwire applies
+    # to.
+    gt_units = [s for s in conv if s.edit_source == "ground_truth"]
+    fb_units = [s for s in conv if s.edit_source == "text_parser_fallback"]
+    fb_edits = sum(s.n_edits for s in fb_units)
+    fb_markers = sum(s.assistant_search_markers for s in fb_units)
+    # Tripwire (edit_format mismatch) — FALLBACK-ONLY (C7-001). EDIT_RE only matches
+    # aider's 'diff' format (path line -> ```fence -> <<<<<<< SEARCH). If the model
+    # emits a different format (diff-fenced puts the path INSIDE the fence;
+    # udiff/whole don't use these markers the same way), EDIT_RE matches ~none of the
+    # markers and tool_calls would be silently lost. We detect this by PARSE RATE =
+    # parsed_edits / search_markers over the TEXT-PARSER units only (ground-truth
+    # units are authoritative and immune). A healthy 'diff' run parses ~85%+; a format
+    # mismatch parses ~0%. Flagged below PARSE_RATE_FLOOR.
     PARSE_RATE_FLOOR = 0.5
-    parse_rate = (total_edits / total_markers) if total_markers else None
+    parse_rate = (fb_edits / fb_markers) if fb_markers else None
     edit_format_ok = parse_rate is None or parse_rate >= PARSE_RATE_FLOOR
     # Honest empty-pct: None (not 0.0) when there are no edits at all, so a wholesale
     # parse failure can't masquerade as "0% empty / perfect".
@@ -921,6 +1083,10 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
         "real_timestamps": sum(1 for s in all_stats if s.real_timestamps),
         "total_edits": total_edits,
         "assistant_search_markers": total_markers,
+        "edit_source_counts": {"ground_truth": len(gt_units),
+                               "text_parser_fallback": len(fb_units)},
+        "fallback_edits": fb_edits,
+        "fallback_search_markers": fb_markers,
         "edit_parse_rate": round(parse_rate, 4) if parse_rate is not None else None,
         "empty_replace_edits": sum(s.n_edits_empty for s in conv),
         "empty_edit_pct": empty_pct,
@@ -935,17 +1101,18 @@ def convert_task(task_dir: Path, out_root: Path, task_name: str,
     }
     out_root.mkdir(parents=True, exist_ok=True)
     if not edit_format_ok:
-        worst = sorted((s for s in conv if s.assistant_search_markers > 0),
+        worst = sorted((s for s in fb_units if s.assistant_search_markers > 0),
                        key=lambda s: s.n_edits / s.assistant_search_markers)[:50]
         (out_root / f"{task_name}_v2_edit_format_warning.json").write_text(json.dumps(
             {"task": task_name,
              "msg": (f"Edit parse rate {parse_rate:.1%} is below the {PARSE_RATE_FLOOR:.0%} "
-                     "floor. EDIT_RE only matches aider 'diff' format — the model's "
-                     "edit_format is likely not 'diff' (e.g. diff-fenced/udiff/whole). "
-                     "tool_calls have been silently dropped — DO NOT SHIP without fixing "
-                     "EDIT_RE for this format and re-running."),
-             "parse_rate": round(parse_rate, 4), "parsed_edits": total_edits,
-             "search_markers": total_markers,
+                     "floor for TEXT-PARSER-FALLBACK units (no output.json). EDIT_RE only "
+                     "matches aider 'diff' format — the model's edit_format is likely not "
+                     "'diff' (e.g. diff-fenced/udiff/whole). tool_calls have been silently "
+                     "dropped — DO NOT SHIP without fixing EDIT_RE for this format and "
+                     "re-running (or supplying output.json ground truth)."),
+             "parse_rate": round(parse_rate, 4), "parsed_edits": fb_edits,
+             "search_markers": fb_markers,
              "worst_units": [{"source": s.source, "markers": s.assistant_search_markers,
                               "parsed": s.n_edits} for s in worst]}, indent=2))
     (out_root / f"{task_name}_v2_report.json").write_text(json.dumps(report, indent=2))
@@ -1012,6 +1179,10 @@ def main(argv: list[str] | None = None) -> int:
                               if not r.get("edit_format_ok", True)]
     total_edits = sum(r.get("total_edits", 0) for r in batch)
     total_markers = sum(r.get("assistant_search_markers", 0) for r in batch)
+    # Overall parse rate is over the TEXT-PARSER-FALLBACK units only (C7-001) — the
+    # only ones whose tool_calls depend on EDIT_RE. Ground-truth units are immune.
+    fb_edits = sum(r.get("fallback_edits", 0) for r in batch)
+    fb_markers = sum(r.get("fallback_search_markers", 0) for r in batch)
     totals = {
         "version": "v2-native", "tasks": len(batch),
         "total_units": sum(r.get("units", 0) for r in batch),
@@ -1020,7 +1191,9 @@ def main(argv: list[str] | None = None) -> int:
         "total_errors": sum(max(r.get("with_errors", 0), 0) for r in batch),
         "total_edits": total_edits,
         "total_search_markers": total_markers,
-        "overall_edit_parse_rate": round(total_edits / total_markers, 4) if total_markers else None,
+        "fallback_edits": fb_edits,
+        "fallback_search_markers": fb_markers,
+        "overall_edit_parse_rate": round(fb_edits / fb_markers, 4) if fb_markers else None,
         "edit_format_ok": not tasks_with_fmt_warning,
         "tasks_with_edit_format_warning": tasks_with_fmt_warning,
         "per_task": batch,

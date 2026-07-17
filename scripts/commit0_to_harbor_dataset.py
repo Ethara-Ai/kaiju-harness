@@ -173,7 +173,49 @@ HARBOR_TEMPLATE_DEFAULTS_BY_LANG: dict[str, dict[str, Any]] = {
 # to dash/underscore/case normalization). Populate from the live ECR list:
 #   aws ecr list-images --repository-name kaiju-q1-coding-base
 # Keys = full instance_id ("commit-0/<name>"); values = correct ECR image tag.
+#
+# C7-014: this dict ships EMPTY, so historically the ONLY way past the
+# underscore/uppercase gate below was the wholesale `--allow-unverified-ecr-tags`
+# bypass (which disables verification for EVERY task). `--ecr-tag-snapshot
+# <file.json>` gives the override mechanism a real data channel WITHOUT AWS
+# access at export time: an operator runs `aws ecr list-images ...` once, saves a
+# checked-in `{instance_id: tag}` snapshot, and the gate then resolves the
+# ~19 divergent tasks per-task while STILL failing loud on any tag the snapshot
+# does not cover. python and go both consult this same dict, so the fix is
+# language-uniform (rust is intentionally exempt from the gate).
 ECR_TAG_OVERRIDES: dict[str, str] = {}
+
+
+def load_ecr_tag_overrides(snapshot_path: pathlib.Path) -> int:
+    """Merge a checked-in ECR-tag snapshot into ECR_TAG_OVERRIDES (fixes C7-014).
+
+    The snapshot is a JSON object mapping full instance_id ("commit-0/<name>") to
+    the verified live ECR image tag, e.g. produced by:
+        aws ecr list-images --repository-name kaiju-q1-coding-base \\
+            --query 'imageIds[].imageTag'
+    Fails LOUD (raises) on a missing/malformed file or a non-string entry rather
+    than silently proceeding with unverified tags. Returns the number of entries
+    merged.
+    """
+    if not snapshot_path.exists():
+        raise FileNotFoundError(f"ECR tag snapshot not found: {snapshot_path}")
+    try:
+        data = json.loads(snapshot_path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Failed to read ECR tag snapshot {snapshot_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"ECR tag snapshot {snapshot_path} must be a JSON object "
+            f"{{instance_id: tag}}, got {type(data).__name__}."
+        )
+    for k, v in data.items():
+        if not isinstance(k, str) or not isinstance(v, str) or not v:
+            raise ValueError(
+                f"ECR tag snapshot {snapshot_path}: entry {k!r} -> {v!r} is not a "
+                "non-empty string:string mapping."
+            )
+    ECR_TAG_OVERRIDES.update(data)
+    return len(data)
 
 
 # ---------------------------------------------------------------------------
@@ -295,15 +337,12 @@ INSTRUCTION_TEMPLATE_BY_LANG: dict[str, str] = {
 }
 
 # tests/test.sh — Harbor verifier (verbatim constant across all tasks).
-# NOTE: pytest test IDs are passed via `$TEST_IDS` unquoted because commit0
-# uses node IDs of the form `tests/<file>.py::<Class>::<method>` (no spaces).
-# If a future task introduces parametrize markers containing literal spaces
-# (e.g. `test_func[case 1]`), this line WILL split incorrectly. The fix is:
-#   mapfile -t TEST_IDS < /tests/test_ids.txt
-#   pytest "${TEST_IDS[@]}" ...
-# Keeping the legacy form here preserves byte-for-byte parity with the
-# existing reference packages; switch to the mapfile form once the reference
-# is regenerated.
+# Test IDs are read one-per-line into a bash ARRAY and passed quoted
+# (`"${TEST_IDS[@]}"`), so an id that contains a literal space — e.g. a
+# parametrize marker `test_func[case 1]` — is passed as ONE argument instead of
+# being word-split into two bogus ids that pytest would fail to collect,
+# silently under-counting the reward (fixes C7-006). This is the mapfile form the
+# legacy comment always earmarked as the correct fix.
 TEST_SH = r"""#!/bin/bash
 # Harbor verifier for a commit0 task (runs inside the pre-built ECR image).
 # Scope: the official commit0 test-id set (parity with pipeline_results).
@@ -324,9 +363,14 @@ fi
 # Ensure pytest-json-report is available (don't upgrade pinned pytest/pytest-asyncio).
 python -m pip install --quiet --no-cache-dir pytest-json-report >/dev/null 2>&1 || true
 
-TEST_IDS="$(tr '\n' ' ' < /tests/test_ids.txt)"
+# Read test IDs one-per-line into an array; skip blank lines so a trailing
+# newline never becomes an empty argument (which pytest reads as ".").
+TEST_IDS=()
+while IFS= read -r _tid || [ -n "$_tid" ]; do
+  [ -n "$_tid" ] && TEST_IDS+=("$_tid")
+done < /tests/test_ids.txt
 
-pytest $TEST_IDS \
+pytest "${TEST_IDS[@]}" \
   --json-report --json-report-file=/logs/verifier/pytest_report.json \
   --continue-on-collection-errors \
   >/logs/verifier/pytest.log 2>&1 || true
@@ -452,8 +496,17 @@ SOLVE_SH_TEMPLATE = """\
 set -euo pipefail
 cd /testbed
 if ! git cat-file -e {reference_commit}^{{commit}} 2>/dev/null; then
-  git fetch --depth 1 {fork_url} {reference_commit}
+  # Fast path: fetch just the reference commit by SHA. Works on GitHub, which
+  # enables uploadpack.allowReachableSHA1InWant by default.
+  if ! git fetch --depth 1 {fork_url} {reference_commit} 2>/dev/null; then
+    # Fallback for git hosts that do NOT advertise arbitrary SHAs in `want`
+    # (allowReachableSHA1InWant off) — self-hosted mirrors etc. (C7-016). Fetch
+    # the fork's branches/tags in full so the commit arrives via a reachable ref.
+    echo "SHA fetch failed; falling back to full ref fetch from {fork_url}" >&2
+    git fetch --tags {fork_url} '+refs/heads/*:refs/remotes/oracle/*'
+  fi
 fi
+# Fail loud (set -e) if the commit is still absent after fetching.
 git reset --hard {reference_commit}
 echo "Reset to reference commit {reference_commit}"
 """
@@ -608,7 +661,7 @@ def load_dataset_json(task_dir: pathlib.Path, task_name: str) -> dict[str, Any]:
     return data
 
 
-def extract_spec_text(specs_dir: pathlib.Path, repo_name: str) -> str:
+def extract_spec_text(specs_dir: pathlib.Path, repo_name: str, language: str = "rust") -> str:
     """Decompress specs/<repo_name>.pdf.bz2 and extract text via PyMuPDF.
     Returns up to MAX_SPEC_LENGTH chars. Returns "" if:
       - the bz2 file does not exist
@@ -659,7 +712,7 @@ def extract_spec_text(specs_dir: pathlib.Path, repo_name: str) -> str:
                 print(f"  [WARN] {repo_name}: failed to extract a page ({exc}); skipping")
                 continue
             parts.append(chunk)
-        return _clean_spec_text("".join(parts), MAX_SPEC_LENGTH)
+        return _clean_spec_text("".join(parts), MAX_SPEC_LENGTH, language)
     finally:
         doc.close()
 
@@ -729,30 +782,38 @@ def _is_api_boundary(line: str) -> bool:
     return any(p.match(line) for p in _API_BOUNDARY_RES)
 
 
-def _clean_spec_text(raw: str, budget: int) -> str:
-    """Extract the crate-level prose summary from a rustdoc PDF.
+def _clean_spec_text(raw: str, budget: int, language: str = "rust") -> str:
+    """Extract the prose summary from a spec PDF.
 
-    Rustdoc-rendered PDFs in this dataset follow a consistent layout: a prose
-    summary at the top, then API listings (Modules/Structs/Enums/...). The
-    summary is what we want; everything past the first API boundary is noise.
+    The rustdoc-specific heuristics (API-boundary early-break, code-line and
+    symbol-dump filtering) are gated to ``language == "rust"`` (fixes C7-007).
+    Rustdoc-rendered PDFs follow a consistent layout: a prose summary at the top,
+    then API listings (Modules/Structs/Enums/...); everything past the first API
+    boundary is noise. But python/go specs are README-rendered PDFs where a
+    heading like "Functions" or "Modules" is legitimate prose section furniture —
+    applying the rustdoc early-break there silently truncated the summary, and the
+    code-like/symbol filters dropped real sentences that mention code or paths. So
+    for non-rust languages we run a MINIMAL cleaner: drop only universal nav cruft
+    and reflow column-wraps, keeping the prose.
 
     Steps:
-      1. Drop nav/error cruft.
-      2. Walk lines until the first API-boundary marker; collect everything
-         before it as the candidate region.
-      3. Within that region, reflow PDF column-wraps into sentences and join
-         short headers with their following prose body.
-      4. Drop any line/paragraph that is code-like (signatures, code fragments)
-         or a pure symbol/identifier dump.
+      1. Drop nav/error cruft (all languages).
+      2. rust only: walk lines until the first API-boundary marker; collect
+         everything before it as the candidate region. Non-rust: keep all lines.
+      3. Reflow PDF column-wraps into sentences and join short headers with their
+         following prose body (all languages).
+      4. rust only: drop any line/paragraph that is code-like (signatures, code
+         fragments) or a pure symbol/identifier dump.
       5. Concatenate with paragraph breaks, truncate at last sentence boundary
-         within `budget`.
+         within `budget` (all languages).
     """
+    is_rust = language == "rust"
     lines: list[str] = []
     for line in raw.splitlines():
         s = line.rstrip()
         if _is_nav_cruft(s):
             continue
-        if _is_api_boundary(s):
+        if is_rust and _is_api_boundary(s):
             break
         lines.append(s)
 
@@ -776,6 +837,15 @@ def _clean_spec_text(raw: str, budget: int) -> str:
     for para in paragraphs:
         text = re.sub(r"\s+", " ", para).strip()
         if not text:
+            continue
+        if not is_rust:
+            # Generic (python/go README) cleaner: keep prose paragraphs as-is;
+            # only require a minimal length so lone page numbers / stray glyphs
+            # don't leak. No code-like/symbol filtering — README prose routinely
+            # references code, paths and types.
+            if len(text.split()) < 2:
+                continue
+            prose.append(text)
             continue
         if _is_code_like(text):
             continue
@@ -954,7 +1024,8 @@ def build_task_package(
     if skip_spec:
         spec_text = ""
     else:
-        spec_text = extract_spec_text(task_dir / "specs", repo_name)
+        # Language-aware (C7-007): rustdoc-specific stripping only for rust.
+        spec_text = extract_spec_text(task_dir / "specs", repo_name, language)
 
     # ── 4. Write output files (staged to temp dir, published atomically) ─────
     tmp = output_root / f".{task_name}_tmp"
@@ -1177,10 +1248,26 @@ def main() -> None:
             "Allow ECR image tags with underscores or uppercase that are not in "
             "ECR_TAG_OVERRIDES. By default these are rejected to prevent emitting "
             "wrong docker_image values. Use only after manually verifying the ECR "
-            "tag for each affected task (~19/300 commit0 tasks need overrides)."
+            "tag for each affected task (~19/300 commit0 tasks need overrides). "
+            "Prefer --ecr-tag-snapshot for per-task verification."
+        ),
+    )
+    parser.add_argument(
+        "--ecr-tag-snapshot",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON {instance_id: ecr_tag} snapshot (from `aws ecr "
+            "list-images`) that populates ECR_TAG_OVERRIDES, so the ~19 divergent "
+            "tasks resolve per-task WITHOUT the wholesale --allow-unverified-ecr-tags "
+            "bypass. Tags not covered by the snapshot still fail loud (C7-014)."
         ),
     )
     args = parser.parse_args()
+
+    if args.ecr_tag_snapshot:
+        n = load_ecr_tag_overrides(pathlib.Path(args.ecr_tag_snapshot))
+        print(f"  [INFO] loaded {n} ECR tag override(s) from {args.ecr_tag_snapshot}")
 
     input_path  = pathlib.Path(args.input)
     output_path = pathlib.Path(args.output)
