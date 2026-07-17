@@ -283,7 +283,7 @@ def _file_stem(tf: str, repo_path: str = "") -> str:
     )
 
 
-def run_cpp_agent_for_repo(
+def _run_cpp_agent_for_repo_impl(
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: RepoInstance,
@@ -691,6 +691,78 @@ def run_cpp_agent_for_repo(
     logger.info("Completed %s", repo_name)
 
 
+def run_cpp_agent_for_repo(
+    repo_base_dir: str,
+    agent_config: AgentConfig,
+    example: RepoInstance,
+    branch: str,
+    override_previous_changes: bool = False,
+    backend: str = "modal",
+    log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
+) -> "tuple[str, bool]":
+    """Run the C++ agent for one repo with per-repo error isolation.
+
+    Any failure inside the worker is caught and logged so that one bad repo
+    cannot tear down the whole parallel batch (a bare ``ar.get()`` would
+    re-raise the FIRST failing worker and abandon every already-completed
+    worker's output.json). Returns ``(repo_name, ok)`` instead of raising,
+    matching the 7 sibling runners.
+    """
+    repo_name = example["repo"].split("/")[-1]
+    try:
+        _run_cpp_agent_for_repo_impl(
+            repo_base_dir,
+            agent_config,
+            example,
+            branch,
+            override_previous_changes,
+            backend,
+            log_dir,
+            commit0_config_file,
+        )
+        return repo_name, True
+    except Exception:
+        logger.error(
+            "C++ agent worker for %s failed; isolating so the batch continues",
+            repo_name,
+            exc_info=True,
+        )
+        return repo_name, False
+
+
+def _collect_cpp_worker_results(results: list) -> dict:
+    """Collect AsyncResults resiliently: one failure never aborts the rest.
+
+    Mirrors run_agent.py::_collect_worker_results. Returns a summary with
+    success/failure counts and the names of repos that reported failure.
+    """
+    succeeded = 0
+    failed = 0
+    failed_repos: list = []
+    for result in results:
+        try:
+            value = result.get()
+        except Exception:
+            failed += 1
+            logger.error(
+                "A C++ worker raised before returning a status; isolating",
+                exc_info=True,
+            )
+            continue
+        if isinstance(value, tuple) and len(value) == 2:
+            repo_name, ok = value
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+                failed_repos.append(repo_name)
+        else:
+            # Backwards-compatible: a bare return counts as success.
+            succeeded += 1
+    return {"succeeded": succeeded, "failed": failed, "failed_repos": failed_repos}
+
+
 def run_cpp_agent(
     branch: str,
     override_previous_changes: bool,
@@ -726,16 +798,27 @@ def run_cpp_agent(
     repo_base_dir = commit0_config.get("base_dir", "repos")
 
     if max_parallel_repos <= 1:
+        _seq_results = []
         for example in tqdm(cpp_examples, desc="Running aider for C++ repos"):
-            run_cpp_agent_for_repo(
-                repo_base_dir=repo_base_dir,
-                agent_config=agent_config,
-                example=example,
-                branch=branch,
-                override_previous_changes=override_previous_changes,
-                backend=backend,
-                log_dir=log_dir,
-                commit0_config_file=commit0_config_file,
+            _seq_results.append(
+                run_cpp_agent_for_repo(
+                    repo_base_dir=repo_base_dir,
+                    agent_config=agent_config,
+                    example=example,
+                    branch=branch,
+                    override_previous_changes=override_previous_changes,
+                    backend=backend,
+                    log_dir=log_dir,
+                    commit0_config_file=commit0_config_file,
+                )
+            )
+        _seq_failed = [rn for (rn, ok) in _seq_results if not ok]
+        if _seq_failed:
+            logger.error("C++ agent workers failed for: %s", ", ".join(_seq_failed))
+        if _seq_results and len(_seq_failed) == len(_seq_results):
+            raise RuntimeError(
+                "All %d C++ agent workers failed — systemic error, not a "
+                "per-repo issue" % len(_seq_results)
             )
     else:
         with tqdm(
@@ -760,9 +843,26 @@ def run_cpp_agent(
                     )
                     async_results.append(ar)
 
-                for ar in async_results:
-                    ar.get()
-                logger.info("All %d C++ agent workers completed", len(async_results))
+                # Per-worker isolation: a bare ``ar.get()`` re-raised the FIRST
+                # failing worker and abandoned every already-completed worker's
+                # output.json. Collect all results, attributing failures by repo.
+                summary = _collect_cpp_worker_results(async_results)
+                logger.info(
+                    "All %d C++ agent workers completed (%d ok, %d failed)",
+                    len(async_results),
+                    summary["succeeded"],
+                    summary["failed"],
+                )
+                if summary["failed_repos"]:
+                    logger.error(
+                        "C++ agent workers failed for: %s",
+                        ", ".join(summary["failed_repos"]),
+                    )
+                if async_results and summary["failed"] == len(async_results):
+                    raise RuntimeError(
+                        "All %d C++ agent workers failed — systemic error, not a "
+                        "per-repo issue" % len(async_results)
+                    )
 
 
 def main() -> None:

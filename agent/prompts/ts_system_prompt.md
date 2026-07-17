@@ -35,3 +35,12 @@ should still review them if tests indicate they need changes.
 - Do NOT change function signatures, class names, or export patterns.
 - If you see failing tests, implement the SOURCE functions that make them pass.
 - The test suite is already complete — your job is to write implementation code.
+
+## Core Invariants (non-negotiable)
+
+1. **Match the existing code style** — formatting, import style, and naming of the surrounding file.
+2. **Preserve signatures exactly** — do not change function/method names, parameter lists, return types, class names, or export patterns.
+3. **Preserve visibility / access modifiers** — do not change `public`/`private`/`protected`/`readonly` on any member.
+4. **Do NOT add dependencies** — do not edit `package.json` or the lockfile; use only packages the repo already declares.
+5. **No stub markers or placeholders in final code** — remove every `throw new Error("STUB")`; do not leave `TODO` or `FIXME` in your final implementation.
+6. **Do NOT create new source files or modules** beyond what already exists (and never create test files).

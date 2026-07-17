@@ -26,6 +26,7 @@ from agent.thinking_capture import SummarizerCost
 from commit0.harness.constants_js import (
     JS_SOURCE_EXTS,
     JS_STUB_MARKER,
+    JS_STUB_THROW,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,11 +108,23 @@ def collect_js_test_files(directory: str) -> list[str]:
     return test_files
 
 
+def js_content_has_stub(content: str) -> bool:
+    """True if *content* carries EITHER JS stub signal.
+
+    The Babel stubber co-emits both ``JS_STUB_MARKER`` (comment) and
+    ``JS_STUB_THROW`` on separate lines, but detection accepts either alone so a
+    stub that lost one signal is never mistaken for finished code and dropped
+    from the target-edit set. Keeping this the single detection predicate keeps
+    the agent, the stubber, and the prompt from drifting apart (QC-C6-004).
+    """
+    return JS_STUB_MARKER in content or JS_STUB_THROW in content
+
+
 def has_js_stubs(file_path: str) -> bool:
-    """Check if *file_path* contains the JS stub marker."""
+    """Check if *file_path* contains a JS stub signal (marker OR throw)."""
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return JS_STUB_MARKER in f.read()
+            return js_content_has_stub(f.read())
     except OSError:
         logger.warning(
             "Cannot read %s for stub detection, treating as no stubs", file_path
@@ -133,20 +146,30 @@ def extract_js_stubs(file_path: str) -> list[str]:
         logger.warning("Cannot read %s for stub extraction", file_path)
         return []
 
-    if JS_STUB_MARKER not in content:
+    if not js_content_has_stub(content):
         return []
 
     stubs: list[str] = []
     lines = content.split("\n")
+    # A machine stub has the comment marker AND the throw on adjacent lines that
+    # resolve to the SAME enclosing signature; dedupe by that signature's line
+    # index (falling back to the stub line index when no signature is found) so
+    # one stub body yields exactly one signature entry, not two.
+    seen: set[int] = set()
     for i, line in enumerate(lines):
-        if JS_STUB_MARKER in line:
-            sig_line = _find_enclosing_signature(lines, i)
-            stubs.append((sig_line if sig_line is not None else line).strip())
+        if JS_STUB_MARKER in line or JS_STUB_THROW in line:
+            sig_idx = _find_enclosing_signature_index(lines, i)
+            key = sig_idx if sig_idx is not None else i
+            if key in seen:
+                continue
+            seen.add(key)
+            sig_line = lines[sig_idx] if sig_idx is not None else line
+            stubs.append(sig_line.strip())
     return stubs
 
 
-def _find_enclosing_signature(lines: list[str], stub_index: int) -> str | None:
-    """Walk backwards from *stub_index* to find the JS function/method signature."""
+def _find_enclosing_signature_index(lines: list[str], stub_index: int) -> int | None:
+    """Walk backwards from *stub_index* to the JS function/method signature line index."""
     func_pattern = re.compile(
         r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*\w*\s*\(|"
         r"(?:const\s+|let\s+|var\s+)?\w+\s*[:=]\s*(?:async\s+)?"
@@ -161,8 +184,15 @@ def _find_enclosing_signature(lines: list[str], stub_index: int) -> str | None:
     )
     for j in range(stub_index, max(stub_index - 20, -1), -1):
         if func_pattern.search(lines[j]):
-            return lines[j]
+            return j
     return None
+
+
+def _find_enclosing_signature(lines: list[str], stub_index: int) -> str | None:
+    """Return the enclosing signature LINE (string), or None. Thin wrapper over
+    ``_find_enclosing_signature_index`` kept for the existing public contract."""
+    idx = _find_enclosing_signature_index(lines, stub_index)
+    return lines[idx] if idx is not None else None
 
 
 def _find_js_files_to_edit(
@@ -241,7 +271,7 @@ def get_target_edit_files_js(
                 content = local_repo.git.show(f"{base_commit}:{rel_path}")
             except Exception:  # noqa: BLE001
                 continue
-            if JS_STUB_MARKER in content:
+            if js_content_has_stub(content):
                 stubbed_at_base.add(file_path)
 
     filtered_files: list[str] = []
@@ -762,6 +792,7 @@ __all__ = [
     "collect_javascript_files",
     "collect_js_test_files",
     "has_js_stubs",
+    "js_content_has_stub",
     "extract_js_stubs",
     "get_target_edit_files_js",
     "get_message_js",

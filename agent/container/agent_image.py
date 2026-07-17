@@ -88,7 +88,7 @@ def _agent_dockerfile(repo_image: str) -> str:
             "# --rebuild-agent-image) rather than the base node image, which",
             "# --rebuild-agent-image does NOT rebuild. Guarded by `command -v npm` so it",
             "# no-ops on non-node base images (rust/python/java/go/c/cpp).",
-            "RUN command -v npm >/dev/null 2>&1 && npm install -g eslint@9 || true",
+            "RUN if command -v npm >/dev/null 2>&1; then npm install -g eslint@9 || (echo 'AGENT_IMAGE_ESLINT_INSTALL_FAILED' >&2; exit 1); else echo 'skipping eslint install: no npm in base image'; fi",
             "# uv provides a fast, hermetic Python 3.12 + resolver without",
             "# disturbing the image's system python or toolchain.",
             "RUN curl -LsSf https://astral.sh/uv/install.sh | sh",

@@ -561,7 +561,7 @@ def _module_file_patch(local_repo, base_commit: str, post_sha: str,
 # ---------------------------------------------------------------------------
 
 
-def run_rust_agent_for_repo(
+def _run_rust_agent_for_repo_impl(
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: RepoInstance,
@@ -1252,6 +1252,44 @@ def run_rust_agent_for_repo(
                       logger, filter_fn=_filter_rust_patch_lenient)
 
 
+def run_rust_agent_for_repo(
+    repo_base_dir: str,
+    agent_config: AgentConfig,
+    example: RepoInstance,
+    branch: str,
+    override_previous_changes: bool = False,
+    backend: str = "modal",
+    log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
+) -> "tuple[str, bool]":
+    """Run aider for one Rust repo with per-repo error isolation.
+
+    Any failure inside the worker is caught and logged so that one bad repo
+    cannot tear down the whole parallel batch. Returns ``(repo_name, ok)``
+    instead of raising, matching the canonical Python runner and its siblings.
+    """
+    _, repo_name = example["repo"].split("/")
+    try:
+        _run_rust_agent_for_repo_impl(
+            repo_base_dir,
+            agent_config,
+            example,
+            branch,
+            override_previous_changes,
+            backend,
+            log_dir,
+            commit0_config_file,
+        )
+        return repo_name, True
+    except Exception:
+        logger.error(
+            "Rust agent worker for %s failed; isolating so the batch continues",
+            repo_name,
+            exc_info=True,
+        )
+        return repo_name, False
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -1306,6 +1344,10 @@ def run_rust_agent(
         with multiprocessing.Pool(processes=max_parallel_repos) as pool:
             results = []
             for example in filtered_dataset:
+                # Carry the repo name alongside its AsyncResult so a timeout (where
+                # the worker never returns its (repo_name, ok) tuple) can still be
+                # attributed to the right repo.
+                _, _repo_name = example["repo"].split("/")
                 result = pool.apply_async(
                     run_rust_agent_for_repo,
                     args=(
@@ -1320,30 +1362,45 @@ def run_rust_agent(
                     ),
                     callback=lambda _: pbar.update(1),
                 )
-                results.append(result)
+                results.append((_repo_name, result))
 
             _n_failed = 0
+            failed_repos: list = []
             # E8: per-worker wall-clock so one wedged repo (e.g. a hung cargo test
             # with no timeout binary) can't block the whole batch on result.get()
             # forever. Generous default; override via KAIJU_PER_REPO_BUDGET_SEC.
             _per_repo_budget = int(os.environ.get("KAIJU_PER_REPO_BUDGET_SEC", "0") or 0) or None
-            for result in results:
+            for _repo_name, result in results:
                 # Collect every worker. The old `result.get()` re-raised the
                 # FIRST failing worker and abandoned the rest, losing their
                 # outcomes; isolate failures so one bad repo can't sink the batch.
                 try:
-                    result.get(timeout=_per_repo_budget)
+                    value = result.get(timeout=_per_repo_budget)
                 except multiprocessing.TimeoutError:
                     _n_failed += 1
-                    logger.error("Rust agent worker exceeded per-repo budget (%ss) — abandoning it",
-                                 _per_repo_budget)
+                    failed_repos.append(f"<timeout:{_repo_name}>")
+                    logger.error("Rust agent worker for %s exceeded per-repo budget (%ss) — abandoning it",
+                                 _repo_name, _per_repo_budget)
+                    continue
                 except Exception as _werr:  # noqa: BLE001
                     _n_failed += 1
-                    logger.error("Rust agent worker failed: %s", _werr, exc_info=True)
+                    failed_repos.append(_repo_name)
+                    logger.error("Rust agent worker for %s raised before returning a status: %s",
+                                 _repo_name, _werr, exc_info=True)
+                    continue
+                if isinstance(value, tuple) and len(value) == 2:
+                    _returned_repo, ok = value
+                    if not ok:
+                        _n_failed += 1
+                        failed_repos.append(_returned_repo)
             logger.info(
                 "All %d Rust agent workers completed (%d failed)",
                 len(results), _n_failed,
             )
+            if failed_repos:
+                logger.error(
+                    "Rust agent workers failed for: %s", ", ".join(failed_repos)
+                )
             if _n_failed:
                 # E8: a PARTIAL failure must not sink the batch — the successful
                 # repos already produced trajectories worth keeping, and the

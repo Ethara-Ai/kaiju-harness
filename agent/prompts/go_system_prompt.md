@@ -39,3 +39,12 @@ The code will be checked with:
 - `goimports -d ./...` — import formatting
 - `staticcheck ./...` — static analysis
 - `go vet ./...` — suspicious constructs
+
+## Core Invariants (non-negotiable)
+
+1. **Match the existing code style** — `gofmt` formatting, idiomatic error handling, and the surrounding file's naming conventions.
+2. **Preserve signatures exactly** — do not change function/method names, receiver types, parameter types, or return types.
+3. **Preserve visibility** — do not change the exported/unexported casing of any identifier (a capitalized name is exported; never rename `Foo`↔`foo` to change access).
+4. **Do NOT add dependencies** — do not add entries to `go.mod`/`go.sum`; use only packages the module already requires.
+5. **No stub markers or placeholders in final code** — remove every `_ = "STUB: not implemented"`; do not leave `panic(...)` placeholders, `TODO`, or `FIXME` in your final implementation.
+6. **Do NOT create new files or packages** — implement only inside the file added to the chat.

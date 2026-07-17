@@ -46,9 +46,9 @@ def _apply_thinking_capture_patches(
 ) -> None:
     """Monkey-patch a Coder instance to capture reasoning tokens.
 
-    Applies 4 patches that intercept reasoning content at different points
-    in aider's processing pipeline. Also patches clone() so lint_coder
-    clones inherit the patches.
+    Applies 7 patches that intercept reasoning content at different points
+    in aider's processing pipeline (kept in parity with agents.py). Also
+    patches clone() so lint_coder clones inherit the patches.
     """
     coder._thinking_capture = thinking_capture
     coder._current_stage = current_stage
@@ -56,6 +56,7 @@ def _apply_thinking_capture_patches(
     coder._turn_counter = getattr(coder, "_turn_counter", 0)
     coder._last_reasoning_content = None
     coder._last_completion_usage = None
+    coder._last_response_id = None
 
     _original_show_send_output = coder.show_send_output
     _original_show_send_output_stream = coder.show_send_output_stream
@@ -80,11 +81,16 @@ def _apply_thinking_capture_patches(
             except AttributeError:
                 coder._last_reasoning_content = None
         coder._last_completion_usage = getattr(completion, "usage", None)
+        coder._last_response_id = getattr(completion, "id", None) or coder._last_response_id
         _original_show_send_output(completion)
 
     def _reasoning_interceptor(completion: Any) -> Any:
+        from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
         coder._last_reasoning_content = ""
-        for chunk in completion:
+        saw_finish_reason = False
+        completion_iter = iter(completion)
+        for chunk in completion_iter:
             try:
                 rc = chunk.choices[0].delta.reasoning_content
             except AttributeError:
@@ -96,9 +102,38 @@ def _apply_thinking_capture_patches(
                 coder._last_reasoning_content += rc
             if hasattr(chunk, "usage") and chunk.usage:
                 coder._last_completion_usage = chunk.usage
+            chunk_id = getattr(chunk, "id", None)
+            if chunk_id:
+                coder._last_response_id = chunk_id
+
+            if (
+                not saw_finish_reason
+                and hasattr(chunk, "choices")
+                and chunk.choices
+                and chunk.choices[0].finish_reason
+            ):
+                saw_finish_reason = True
+
             yield chunk
+
+        # Drain any trailing chunks (usage/id often arrive after finish_reason).
+        try:
+            for trailing in completion_iter:
+                if hasattr(trailing, "usage") and trailing.usage:
+                    coder._last_completion_usage = trailing.usage
+                trailing_id = getattr(trailing, "id", None)
+                if trailing_id:
+                    coder._last_response_id = trailing_id
+        except Exception:
+            pass
+
         if not coder._last_reasoning_content:
             coder._last_reasoning_content = None
+
+        if not saw_finish_reason:
+            yield ModelResponseStream(
+                choices=[StreamingChoices(finish_reason="length", delta=Delta())]
+            )
 
     def patched_show_send_output_stream(completion: Any) -> Any:
         return _original_show_send_output_stream(_reasoning_interceptor(completion))
@@ -163,6 +198,7 @@ def _apply_thinking_capture_patches(
                 stage=coder._current_stage,
                 module=coder._current_module,
                 turn_number=coder._turn_counter,
+                llm_response_id=coder._last_response_id,
                 provider=_provider,
             )
 
@@ -206,6 +242,57 @@ def _apply_thinking_capture_patches(
     coder.add_assistant_reply_to_cur_messages = patched_add_assistant_reply
     coder.show_usage_report = patched_show_usage_report
     coder.clone = patched_clone
+
+    # Patch 6: ContextVar propagation into aider's chat-history summarizer thread.
+    # aider.coders.base_coder.summarize_start spawns a bare ``threading.Thread``
+    # which does NOT inherit Python ContextVar state. Our cost subsystem's
+    # ``_current_log`` binding (set by capture_module_calls) is invisible to the
+    # worker, so every summarizer call was silently dropped. Wrap the thread
+    # target with ``contextvars.copy_context().run(...)`` so the active log
+    # propagates into the worker.
+    import contextvars as _contextvars
+    import threading as _threading
+
+    def patched_summarize_start() -> None:
+        if not coder.summarizer.too_big(coder.done_messages):
+            return
+        coder.summarize_end()
+        if getattr(coder, "verbose", False):
+            coder.io.tool_output("Starting to summarize chat history.")
+        ctx = _contextvars.copy_context()
+        coder.summarizer_thread = _threading.Thread(
+            target=lambda: ctx.run(coder.summarize_worker)
+        )
+        coder.summarizer_thread.start()
+
+    coder.summarize_start = patched_summarize_start
+
+    from agent.llm_cost_capture import register_active_coder
+    register_active_coder(coder)
+
+    # Patch 7: Ensure cost is calculated even when FinishReasonLength fires.
+    # Upstream aider bug: send() calls calculate_and_show_tokens_and_cost()
+    # AFTER show_send_output_stream(), but FinishReasonLength raised inside
+    # the stream skips the cost line. We wrap send() to catch it.
+    # A coder without a ``send`` method (e.g. a minimal test double) cannot raise
+    # FinishReasonLength, so there is nothing to wrap — skip defensively. Real
+    # aider coders always expose ``send``, so production behaviour is unchanged.
+    _original_send = getattr(coder, "send", None)
+    if _original_send is not None:
+
+        def patched_send(messages: Any, model: Any = None, functions: Any = None) -> Any:
+            from aider.coders.base_coder import FinishReasonLength
+
+            try:
+                yield from _original_send(messages, model=model, functions=functions)
+            except FinishReasonLength:
+                try:
+                    coder.calculate_and_show_tokens_and_cost(messages, None)
+                except Exception:
+                    pass
+                raise
+
+        coder.send = patched_send
 
     _original_apply_updates = coder.apply_updates
 

@@ -99,6 +99,45 @@ def _bridge_secret() -> str:
     return os.environ.get("KAIJU_CODEX_BRIDGE_SECRET", "").strip()
 
 
+def _max_inline_retries() -> int:
+    """Max in-request account-failover retries before surfacing the upstream
+    error. Mirrors claude_code's KAIJU_CC_MAX_INLINE_RETRIES (default 3)."""
+    try:
+        return max(0, int(os.environ.get("KAIJU_CODEX_MAX_INLINE_RETRIES", "")))
+    except ValueError:
+        return 3
+
+
+# Option D — buffer-and-retry: buffer the WHOLE upstream Responses SSE stream and
+# re-issue on a mid-stream drop so the client only ever receives a COMPLETE
+# response (or a clean error), never a truncated one. Parity with claude_code's
+# _stream_buffered_with_retry (KAIJU_CC_BUFFER_AND_RETRY).
+#
+# DEFAULT OFF (opt-in): buffering means the client (aider/litellm) gets NO
+# incremental output until a turn completes, so a log-based inactivity watchdog
+# sees a frozen log for the whole turn and could false-kill a long
+# extended-thinking module. The mid-stream drop is already surfaced as an error
+# by the terminal-event guard in _stream_with_keepalive (so litellm num_retries /
+# recovery.py re-issue), making D a last resort. Enable with
+# KAIJU_CODEX_BUFFER_AND_RETRY=1.
+def _buffer_and_retry_enabled() -> bool:
+    return os.environ.get("KAIJU_CODEX_BUFFER_AND_RETRY", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _max_stream_buffer_retries() -> int:
+    try:
+        return max(0, int(os.environ.get("KAIJU_CODEX_STREAM_BUFFER_RETRIES", "3")))
+    except ValueError:
+        return 3
+
+
+# Seconds of buffering silence before an SSE keep-alive comment is emitted to the
+# client so its connection can't time out while the bridge re-issues upstream.
+_STREAM_KEEPALIVE_SECS = 15
+
+
 # A standalone SSE comment line. SSE parsers (and litellm's Responses-API stream
 # reader) ignore any line beginning with ":", but forwarding it downstream resets
 # the client's read-timeout clock. It is ONLY ever emitted between upstream reads
@@ -132,9 +171,17 @@ async def _stream_with_keepalive(
     the middle of a ``data:`` event. Stops when the upstream iterator is exhausted
     (``response.completed`` etc.) or raises; always closes the upstream response.
     Cancellation (client disconnect) propagates and the ``finally`` still closes.
+
+    Truncation guard (parity with claude_code's event_stream): a plain socket
+    close is NOT proof the turn finished. We watch a rolling byte tail for a
+    Responses terminal event (response.completed/.incomplete/.failed); if the
+    stream ends WITHOUT one, we inject a synthetic ``response.failed`` frame so
+    the client raises instead of recording a truncated turn as a clean stop.
     """
     ait = chunks.__aiter__()
     nxt: Optional[asyncio.Future] = None
+    tail = b""
+    saw_terminal = False
     try:
         while True:
             nxt = asyncio.ensure_future(ait.__anext__())
@@ -154,9 +201,17 @@ async def _stream_with_keepalive(
                     continue
                 except StopAsyncIteration:
                     nxt = None
+                    if not saw_terminal:
+                        # Clean socket close but no terminal event -> truncated.
+                        _LOG.warning("codex stream ended without a terminal "
+                                     "response event -> signalling truncation")
+                        yield _xlate.responses_truncation_error_sse()
                     return
                 else:
                     nxt = None
+                    tail = (tail + chunk)[-256:]
+                    if _xlate.tail_has_terminal_event(tail):
+                        saw_terminal = True
                     yield chunk
                     break
     except asyncio.CancelledError:
@@ -365,7 +420,9 @@ def build_app(provider=None) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> JSONResponse:  # noqa: D401
         try:
-            token = provider.get_access_token()
+            # Off the event loop: get_access_token may block on a sync httpx
+            # token refresh; one refresh must not freeze every concurrent request.
+            token = await asyncio.to_thread(provider.get_access_token)
             return JSONResponse({"ok": True, "token_prefix": token[:12] + "...",
                                  "account_prefix": provider.account_id[:8] + "..."})
         except CredentialsError as e:
@@ -378,53 +435,179 @@ def build_app(provider=None) -> FastAPI:
         return JSONResponse({"multi_account": False,
                              "account_prefix": provider.account_id[:8] + "..."})
 
-    def _auth_or_401(request: Request):
+    def _reject_unauthorized(request: Request) -> Optional[Response]:
         if not _client_authorized(request):
             return JSONResponse({"error": {"message": "bridge: unauthorized (bad OPENAI_API_KEY)",
                                            "type": "authentication_error"}}, status_code=401)
-        try:
-            # Atomic: token + account_id from the SAME account (multi-account safe).
-            return provider.get_token_and_account()
-        except CredentialsError as e:
-            return JSONResponse({"error": {"message": f"bridge: {e}", "type": "credentials_error"}},
-                                status_code=503)
+        return None
 
-    async def _open_upstream(request: Request, body: bytes, token: str, account: str):
-        """POST the prepared body to the codex backend; return (upstream, None) or
-        (None, error_Response)."""
-        headers = _forward_headers(request, token, account)
-        url = _upstream_base() + RESPONSES_PATH
-        upstream_req = client.build_request("POST", url, content=body, headers=headers)
-        try:
-            upstream = await client.send(upstream_req, stream=True)
-        except httpx.HTTPError as e:
-            return None, JSONResponse(
-                {"error": {"message": f"bridge: upstream request failed: {e}",
-                           "type": "upstream_error"}}, status_code=502)
-        if upstream.status_code >= 400:
+    async def _open_upstream(request: Request, body: bytes):
+        """POST the prepared body to the codex backend, WITH in-request account
+        failover for a multi-account pool.
+
+        Returns ``(upstream, None)`` once a 2xx stream opens, or
+        ``(None, error_Response)`` on a fatal / non-failover-able error.
+
+        On a per-account failure (cap / rate-limit -> cooldown+rotate, or a 401
+        AUTH -> permanently invalidate the slot) with a pool that still has a
+        healthy account, we RE-FETCH a fresh token and retry inline rather than
+        forwarding the first cap straight to the client. A ``_tried_tokens`` spin
+        guard (B9) stops us re-driving a slot whose marking didn't stick. This
+        ports agent/claude_code/bridge.py::_forward_non_streaming / _stream_with_failover.
+        """
+        multi = isinstance(provider, MultiAccountCredentialProvider)
+        max_retries = _max_inline_retries()
+        attempt = 0
+        tried_tokens: set[str] = set()
+        last_err_resp: Optional[Response] = None
+
+        while True:
+            try:
+                # Atomic (token + account_id from the SAME slot) and off the event
+                # loop (a sync httpx refresh must not freeze concurrent requests).
+                token, account = await asyncio.to_thread(provider.get_token_and_account)
+            except CredentialsError as e:
+                if last_err_resp is not None:
+                    # Pool drained mid-failover: surface the real upstream error.
+                    return None, last_err_resp
+                return None, JSONResponse(
+                    {"error": {"message": f"bridge: {e}", "type": "credentials_error"}},
+                    status_code=503)
+
+            # B9: never re-drive an account already burned this call (its
+            # cooldown/invalid marking didn't stick) — stop rather than spin.
+            if token in tried_tokens and last_err_resp is not None:
+                _LOG.warning("codex failover re-selected an already-failed account; "
+                             "stopping to avoid a spin (tried %d)", len(tried_tokens))
+                return None, last_err_resp
+
+            headers = _forward_headers(request, token, account)
+            url = _upstream_base() + RESPONSES_PATH
+            upstream_req = client.build_request("POST", url, content=body, headers=headers)
+            try:
+                upstream = await client.send(upstream_req, stream=True)
+            except httpx.HTTPError as e:
+                return None, JSONResponse(
+                    {"error": {"message": f"bridge: upstream request failed: {e}",
+                               "type": "upstream_error"}}, status_code=502)
+            if upstream.status_code < 400:
+                return upstream, None
+
             err = await upstream.aread()
             await upstream.aclose()
             classified = classify_openai_error(
                 upstream.status_code, err, dict(upstream.headers))
             _LOG.warning("codex upstream %s [%s]: %s",
                          upstream.status_code, classified.kind.value, err[:300])
-            # On a cap / rate-limit, cool down the active account and rotate so the
-            # NEXT request uses a healthy one (multi-account pools only).
-            if classified.should_rotate_account and isinstance(provider, MultiAccountCredentialProvider):
-                provider.penalize(classified.retry_after or 900)
             media = upstream.headers.get("content-type", "application/json")
-            return None, Response(content=err, status_code=upstream.status_code, media_type=media)
-        return upstream, None
+            err_resp = Response(content=err, status_code=upstream.status_code, media_type=media)
+
+            # In-request failover applies only to a multi-account pool on a
+            # per-account failure. A cap/rate-limit cools the slot; a 401 AUTH
+            # permanently invalidates it (its refresh token is revoked).
+            account_problem = classified.should_rotate_account or classified.should_refresh_token
+            if multi and account_problem:
+                tried_tokens.add(token)
+                if classified.should_refresh_token:
+                    provider.mark_invalid(token)
+                else:
+                    provider.mark_exhausted(token, classified.retry_after or 900)
+                last_err_resp = err_resp
+                # Retry with the next account only if a healthy slot is usable now
+                # (next_reset_at() is None) and we're within budget; else surface
+                # the upstream error. Floor the retry so a marking-miss can't spin.
+                if attempt < max_retries and provider.next_reset_at() is None:
+                    attempt += 1
+                    await asyncio.sleep(0.05)
+                    continue
+                return None, last_err_resp
+
+            # Non-failover error (400/404/single-account/etc.): return immediately.
+            return None, err_resp
+
+    async def _stream_buffered_with_retry(request: Request, body: bytes) -> Response:
+        """Option D — buffer the ENTIRE upstream Responses SSE stream and re-issue
+        on a mid-stream drop, so the client only ever receives a COMPLETE response
+        (or a clean error), never a truncated one. Opt-in via
+        KAIJU_CODEX_BUFFER_AND_RETRY. Parity port of claude_code's
+        _stream_buffered_with_retry (which buffers Anthropic SSE the same way).
+
+        Trade vs the incremental keep-alive path: no incremental token delivery
+        (the whole response replays at once), so the harness inactivity watchdog
+        sees a frozen log for the turn — hence default-off. SSE keep-alive
+        comments keep the client<->bridge socket warm while buffering/retrying.
+        """
+        max_retries = _max_stream_buffer_retries()
+
+        async def _capture() -> tuple[str, bytes]:
+            """(kind, body) where kind in {'ok','error','incomplete'}. 'ok' body
+            is a complete Responses SSE stream ready to replay verbatim."""
+            attempt = 0
+            while True:
+                # _open_upstream owns token acquisition + in-request account
+                # failover, so buffered mode inherits pool failover for free.
+                upstream, err_resp = await _open_upstream(request, body)
+                if err_resp is not None:
+                    return ("error", getattr(err_resp, "body", b"") or b"")
+                buf = bytearray()
+                tail = b""
+                saw_terminal = False
+                try:
+                    async for chunk in upstream.aiter_raw():
+                        buf += chunk
+                        tail = (tail + chunk)[-256:]
+                        if _xlate.tail_has_terminal_event(tail):
+                            saw_terminal = True
+                except Exception as e:  # noqa: BLE001 — mid-stream read/connect drop
+                    _LOG.warning("codex buffered stream: upstream drop (attempt %d/%d): %s",
+                                 attempt + 1, max_retries, e)
+                finally:
+                    await upstream.aclose()
+                if saw_terminal:
+                    return ("ok", bytes(buf))  # complete stream captured
+                attempt += 1
+                if attempt > max_retries:
+                    _LOG.error("codex buffered stream: still incomplete after %d retries",
+                               max_retries)
+                    return ("incomplete", b"")
+                await asyncio.sleep(min(2 ** attempt, 30))
+                _LOG.info("codex buffered stream: re-issuing upstream (attempt %d/%d)",
+                          attempt, max_retries)
+
+        async def event_stream():
+            task = asyncio.create_task(_capture())
+            try:
+                while not task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(task), timeout=_STREAM_KEEPALIVE_SECS)
+                    except asyncio.TimeoutError:
+                        yield _KEEPALIVE_LINE  # keep the client<->bridge socket warm
+                kind, captured = task.result()
+                if kind == "ok":
+                    yield captured
+                elif kind == "error":
+                    yield _xlate.responses_truncation_error_sse(
+                        "kaiju-bridge: upstream error (buffered)")
+                else:  # incomplete
+                    yield _xlate.responses_truncation_error_sse(
+                        "kaiju-bridge: upstream stream incomplete after retries")
+            finally:
+                if not task.done():
+                    task.cancel()
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream",
+                                 headers={"X-Kaiju-Bridge-Mode": "buffer-and-retry"})
 
     async def _proxy_responses(request: Request) -> Response:
-        auth = _auth_or_401(request)
-        if isinstance(auth, Response):
-            return auth
-        token, account = auth
+        unauth = _reject_unauthorized(request)
+        if unauth is not None:
+            return unauth
 
         raw = await request.body()
         body, client_wanted_stream = _prepare_body(raw)
-        upstream, err_resp = await _open_upstream(request, body, token, account)
+        if client_wanted_stream and _buffer_and_retry_enabled():
+            return await _stream_buffered_with_retry(request, body)
+        upstream, err_resp = await _open_upstream(request, body)
         if err_resp is not None:
             return err_resp
 
@@ -449,10 +632,9 @@ def build_app(provider=None) -> FastAPI:
         litellm without responses-mode registration, the openai SDK) drive the
         codex backend, which only speaks the Responses API.
         """
-        auth = _auth_or_401(request)
-        if isinstance(auth, Response):
-            return auth
-        token, account = auth
+        unauth = _reject_unauthorized(request)
+        if unauth is not None:
+            return unauth
 
         try:
             chat_req = json.loads(await request.body() or b"{}")
@@ -471,7 +653,7 @@ def build_app(provider=None) -> FastAPI:
         except json.JSONDecodeError:
             pass
 
-        upstream, err_resp = await _open_upstream(request, prepared, token, account)
+        upstream, err_resp = await _open_upstream(request, prepared)
         if err_resp is not None:
             return err_resp
 

@@ -234,21 +234,52 @@ def _apply_thinking_capture_patches(
     coder.show_usage_report = patched_show_usage_report
     coder.clone = patched_clone
 
-    _original_send = coder.send
+    # Patch 6: ContextVar propagation into aider's chat-history summarizer thread.
+    # aider.coders.base_coder.summarize_start spawns a bare ``threading.Thread``
+    # which does NOT inherit Python ContextVar state. Our cost subsystem's
+    # ``_current_log`` binding (set by capture_module_calls) is invisible to the
+    # worker, so every summarizer call was silently dropped. Wrap the thread
+    # target with ``contextvars.copy_context().run(...)`` so the active log
+    # propagates into the worker.
+    import contextvars as _contextvars
+    import threading as _threading
 
-    def patched_send(messages: Any, model: Any = None, functions: Any = None) -> Any:
-        from aider.coders.base_coder import FinishReasonLength
+    def patched_summarize_start() -> None:
+        if not coder.summarizer.too_big(coder.done_messages):
+            return
+        coder.summarize_end()
+        if getattr(coder, "verbose", False):
+            coder.io.tool_output("Starting to summarize chat history.")
+        ctx = _contextvars.copy_context()
+        coder.summarizer_thread = _threading.Thread(
+            target=lambda: ctx.run(coder.summarize_worker)
+        )
+        coder.summarizer_thread.start()
 
-        try:
-            yield from _original_send(messages, model=model, functions=functions)
-        except FinishReasonLength:
+    coder.summarize_start = patched_summarize_start
+
+    from agent.llm_cost_capture import register_active_coder
+    register_active_coder(coder)
+
+    # A coder without a ``send`` method (e.g. a minimal test double) cannot raise
+    # FinishReasonLength, so there is nothing to wrap — skip defensively. Real
+    # aider coders always expose ``send``, so production behaviour is unchanged.
+    _original_send = getattr(coder, "send", None)
+    if _original_send is not None:
+
+        def patched_send(messages: Any, model: Any = None, functions: Any = None) -> Any:
+            from aider.coders.base_coder import FinishReasonLength
+
             try:
-                coder.calculate_and_show_tokens_and_cost(messages, None)
-            except Exception:
-                pass
-            raise
+                yield from _original_send(messages, model=model, functions=functions)
+            except FinishReasonLength:
+                try:
+                    coder.calculate_and_show_tokens_and_cost(messages, None)
+                except Exception:
+                    pass
+                raise
 
-    coder.send = patched_send
+        coder.send = patched_send
 
     _original_apply_updates = coder.apply_updates
 

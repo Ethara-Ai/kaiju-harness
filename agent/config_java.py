@@ -51,6 +51,23 @@ class JavaAgentConfig:
     strip_non_stubs: bool = False
     inject_test_files_readonly: bool = True
 
+    # QC-C5-001/C5-002: canonical accessor parity. Every other language reuses
+    # agent.class_types.AgentConfig, whose model field is `model_name`; Java is
+    # the only config that names it `model`. Renaming the stored field would
+    # require a coordinated edit of the non-config call sites
+    # (commit0/cli_java.py, agent/agents_java.py, agent/run_agent_java.py) and
+    # the existing .commit0.java construction path, so instead we expose
+    # `model_name` as a read/write alias. This lets any code (present or future)
+    # treat JavaAgentConfig like the shared schema via `.model_name` without
+    # breaking the established `.model` accessor.
+    @property
+    def model_name(self) -> str:
+        return self.model
+
+    @model_name.setter
+    def model_name(self, value: str) -> None:
+        self.model = value
+
     def __post_init__(self):
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError(

@@ -152,6 +152,31 @@ def load_credentials() -> CodexCredentials:
     )
 
 
+def _atomic_write_json(path: Path, data, *, mode: int = 0o600) -> None:
+    """Atomically write ``data`` as JSON to ``path`` with ``mode`` perms and no
+    TOCTOU exposure window.
+
+    Creates the temp file at ``mode`` from the start via ``os.open`` — ``write_text``
+    would create it at the process umask default (typically 0644) and briefly
+    expose the OAuth access_token/refresh_token world-readable before any chmod.
+    Near-verbatim port of agent/claude_code/credentials.py ``_atomic_write_creds``
+    so both credential providers share the same 0600 discipline.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+
+
 def refresh_credentials(creds: CodexCredentials) -> CodexCredentials:
     """Exchange the refresh token for a fresh access token.
 
@@ -201,6 +226,14 @@ class CredentialProvider:
 
     def __init__(self, persist_path: Optional[str] = None) -> None:
         self._lock = threading.Lock()
+        # B14: a SEPARATE lock for the slow refresh (network POST, 30s timeout).
+        # Holding `_lock` across `refresh_credentials` would serialize every token
+        # read — even threads whose cached token is still valid, and the
+        # `account_id` reader — behind one in-flight refresh. We hold `_lock` only
+        # for the brief field read/write and `_refresh_lock` (which dedupes
+        # concurrent refreshes) during the network call. Ported from the
+        # claude_code CredentialProvider.
+        self._refresh_lock = threading.Lock()
         self._creds = load_credentials()
         # Where to write refreshed tokens back (default: the source auth.json, so
         # the codex CLI and the bridge stay in sync). Disable with persist=False.
@@ -229,30 +262,51 @@ class CredentialProvider:
     def get_access_token(self) -> str:
         """Return a valid access token, refreshing if it's near expiry."""
         with self._lock:
-            if not self._creds.is_expired():
-                return self._creds.access_token
-            # Near expiry: refresh (holding the lock so callers don't stampede).
-            if self._creds.refresh_token:
-                try:
-                    self._creds = refresh_credentials(self._creds)
-                    self._persist(self._creds)
-                    _LOG.info("Codex access token refreshed (exp in %ss)",
-                              int(self._creds.seconds_remaining() or 0))
-                except CredentialsError as e:
-                    # If the on-disk token was updated out-of-band (e.g. the codex
-                    # CLI refreshed it), reload before giving up.
-                    _LOG.warning("refresh failed (%s); reloading from disk", e)
-                    self._creds = load_credentials()
-                    if self._creds.is_expired():
-                        raise
-            else:
-                self._creds = load_credentials()
-                if self._creds.is_expired():
-                    raise CredentialsError(
-                        "access token expired and no refresh token available — "
-                        "re-authenticate with `codex login`."
-                    )
-            return self._creds.access_token
+            creds = self._creds
+        if not creds.is_expired():
+            return creds.access_token
+        # B14: refresh OUTSIDE `_lock` so valid-token readers (and `account_id`)
+        # don't block on the slow network refresh. `_refresh_lock` dedupes
+        # concurrent refreshes so callers don't stampede the OAuth endpoint.
+        with self._refresh_lock:
+            # Double-check: another thread may have refreshed while we waited.
+            with self._lock:
+                creds = self._creds
+            if not creds.is_expired():
+                return creds.access_token
+            return self._refresh_locked(creds)
+
+    def _refresh_locked(self, creds: CodexCredentials) -> str:
+        """Perform the refresh while holding ``_refresh_lock`` (never ``_lock``).
+        Stores the result under ``_lock`` and returns the fresh access token."""
+        if creds.refresh_token:
+            try:
+                new = refresh_credentials(creds)
+                self._persist(new)
+                with self._lock:
+                    self._creds = new
+                _LOG.info("Codex access token refreshed (exp in %ss)",
+                          int(new.seconds_remaining() or 0))
+                return new.access_token
+            except CredentialsError as e:
+                # If the on-disk token was updated out-of-band (e.g. the codex
+                # CLI refreshed it), reload before giving up.
+                _LOG.warning("refresh failed (%s); reloading from disk", e)
+                reloaded = load_credentials()
+                with self._lock:
+                    self._creds = reloaded
+                if reloaded.is_expired():
+                    raise
+                return reloaded.access_token
+        reloaded = load_credentials()
+        with self._lock:
+            self._creds = reloaded
+        if reloaded.is_expired():
+            raise CredentialsError(
+                "access token expired and no refresh token available — "
+                "re-authenticate with `codex login`."
+            )
+        return reloaded.access_token
 
     def _persist(self, creds: CodexCredentials) -> None:
         """Best-effort write-back of the refreshed token to auth.json, preserving
@@ -269,9 +323,9 @@ class CredentialProvider:
                 tokens["refresh_token"] = creds.refresh_token
             tokens["account_id"] = creds.account_id
             data["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            tmp = p.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, indent=2))
-            os.replace(tmp, p)
+            # 0600 + atomic: the file carries the OAuth access/refresh tokens, so
+            # it must never be created world-readable (see _atomic_write_json).
+            _atomic_write_json(p, data)
         except Exception as e:  # noqa: BLE001 — persistence is best-effort
             _LOG.debug("token write-back skipped: %s", e)
 
@@ -282,6 +336,7 @@ class _FileCredentialProvider(CredentialProvider):
 
     def __init__(self, path: str) -> None:
         self._lock = threading.Lock()
+        self._refresh_lock = threading.Lock()  # B14: slow refresh off the read lock
         p = Path(path).expanduser()
         if not p.is_file():
             raise CredentialsError(f"account auth.json not found: {path}")
@@ -308,6 +363,16 @@ class MultiAccountCredentialProvider:
         self._lock = threading.Lock()
         self._idx = 0
         self._cooldown_until: list[float] = [0.0] * len(providers)
+        # A slot is marked invalid (dropped from rotation permanently) when its
+        # account/refresh token is revoked (a 401 AUTH). Unlike a cap cooldown,
+        # an invalid slot is NEVER re-selected — mirrors the claude_code pool's
+        # `_AccountSlot.invalid`. Not persisted: a restart clears it (a 401 may
+        # have been a transient rotation since fixed), matching claude_code.
+        self._invalid: list[bool] = [False] * len(providers)
+        # The exact access token most recently handed out from each slot, so an
+        # upstream error can be attributed back to the right account without a
+        # low-entropy prefix match (mirrors claude_code `_AccountSlot.last_token`).
+        self._last_token: list[Optional[str]] = [None] * len(providers)
         self._state_path = state_path or os.environ.get("KAIJU_CODEX_POOL_STATE_PATH")
         self._load_state()
 
@@ -326,29 +391,51 @@ class MultiAccountCredentialProvider:
         if not self._state_path:
             return
         try:
-            Path(self._state_path).write_text(json.dumps({"cooldown_until": self._cooldown_until}))
+            # Only the time-bounded cooldown is persisted (not `invalid`): a 401
+            # may have been a transient token rotation since fixed, so we don't
+            # want a restart to keep an account permanently drained. 0600 for
+            # consistency with the credential files (and atomic against a
+            # concurrent pool writer). Matches claude_code's restore policy.
+            _atomic_write_json(Path(self._state_path),
+                               {"cooldown_until": self._cooldown_until})
         except Exception:  # noqa: BLE001
             pass
 
     def _pick(self, now: float) -> int:
-        """Return the index of the next slot not on cooldown; if all are cooling
-        down, return the one whose cooldown expires soonest."""
+        """Return the index of the next usable slot.
+
+        Skips invalid (revoked) slots entirely and slots still on cooldown. If
+        every slot is invalid, DRAIN — raise so the caller stops retrying a dead
+        pool (mirrors claude_code `_select_slot_locked`). If none are available
+        but some are only cooling down, return the one whose cooldown expires
+        soonest (so a single-shot caller still gets a token to try)."""
         n = len(self._providers)
         for step in range(n):
             i = (self._idx + step) % n
-            if self._cooldown_until[i] <= now:
+            if not self._invalid[i] and self._cooldown_until[i] <= now:
                 self._idx = i
                 return i
-        # all cooling down: the soonest-free
-        i = min(range(n), key=lambda j: self._cooldown_until[j])
+        # No slot is immediately available.
+        candidates = [j for j in range(n) if not self._invalid[j]]
+        if not candidates:
+            raise CredentialsError(
+                f"all {n} codex accounts are invalid (revoked/401); "
+                "re-authenticate with `codex login`."
+            )
+        # Some are only cooling down: the soonest-free among the still-valid ones.
+        i = min(candidates, key=lambda j: self._cooldown_until[j])
         self._idx = i
         return i
 
     def get_access_token(self) -> str:
         with self._lock:
             i = self._pick(time.time())
+            provider = self._providers[i]
         # get_access_token does its own (per-provider) refresh + locking.
-        return self._providers[i].get_access_token()
+        token = provider.get_access_token()
+        with self._lock:
+            self._last_token[i] = token
+        return token
 
     def get_token_and_account(self) -> tuple[str, str]:
         """Return (token, account_id) from the SAME slot, atomically.
@@ -360,7 +447,11 @@ class MultiAccountCredentialProvider:
         with self._lock:
             i = self._pick(time.time())
             provider = self._providers[i]
-        return provider.get_access_token(), provider.account_id
+        token = provider.get_access_token()
+        account = provider.account_id
+        with self._lock:
+            self._last_token[i] = token
+        return token, account
 
     @property
     def account_id(self) -> str:
@@ -368,14 +459,66 @@ class MultiAccountCredentialProvider:
             i = self._idx
         return self._providers[i].account_id
 
+    def _find_slot_by_token(self, token: str) -> Optional[int]:
+        """Attribute an upstream error to the slot that produced ``token`` by an
+        exact match against the token we last handed out. Caller holds ``_lock``."""
+        if not token:
+            return None
+        for i in range(len(self._providers)):
+            if self._last_token[i] and self._last_token[i] == token:
+                return i
+        return None
+
     def penalize(self, seconds: float) -> None:
-        """Put the ACTIVE slot on cooldown for `seconds` and advance the cursor."""
+        """Put the ACTIVE slot on cooldown for `seconds` and advance the cursor.
+
+        Legacy active-slot API. Prefer ``mark_exhausted(token, seconds)`` from the
+        bridge so the cooldown is attributed to the exact account that failed even
+        under concurrency."""
         with self._lock:
             i = self._idx
             self._cooldown_until[i] = time.time() + max(1.0, seconds)
             self._idx = (self._idx + 1) % len(self._providers)
             self._save_state()
         _LOG.warning("codex account %d cooled down for %ss; rotating", i, int(seconds))
+
+    def mark_exhausted(self, token: str, seconds: float) -> None:
+        """Cool down the slot that produced ``token`` (cap / rate-limit)."""
+        with self._lock:
+            i = self._find_slot_by_token(token)
+            if i is None:
+                return
+            self._cooldown_until[i] = max(self._cooldown_until[i],
+                                          time.time() + max(1.0, seconds))
+            self._save_state()
+        _LOG.warning("codex account %d cooled down for %ss", i, int(seconds))
+
+    def mark_invalid(self, token: str) -> None:
+        """Permanently drop the slot that produced ``token`` from rotation (a 401
+        AUTH means its account/refresh token is revoked). Mirrors the claude_code
+        pool's ``mark_account_invalid`` — without this a revoked account is
+        re-tried forever after each cooldown."""
+        with self._lock:
+            i = self._find_slot_by_token(token)
+            if i is None:
+                return
+            self._invalid[i] = True
+            self._save_state()
+        _LOG.warning("codex account %d marked invalid (revoked/401); will not be retried", i)
+
+    def next_reset_at(self) -> Optional[float]:
+        """Soonest Unix-time at which any account becomes available, or ``None``
+        if at least one valid slot is usable RIGHT NOW (or the pool is fully
+        drained). The bridge uses ``None`` as 'a healthy slot exists, worth an
+        in-request failover'. Mirrors claude_code's ``next_reset_at``."""
+        with self._lock:
+            now = time.time()
+            if any((not self._invalid[i]) and self._cooldown_until[i] <= now
+                   for i in range(len(self._providers))):
+                return None
+            future = [self._cooldown_until[i] for i in range(len(self._providers))
+                      if not self._invalid[i]]
+            return min(future) if future else None
 
     def status(self) -> dict:
         now = time.time()
@@ -384,7 +527,8 @@ class MultiAccountCredentialProvider:
                 "active": self._idx,
                 "accounts": [
                     {"account_prefix": p.account_id[:8] + "...",
-                     "cooldown_remaining": max(0, round(self._cooldown_until[i] - now, 1))}
+                     "cooldown_remaining": max(0, round(self._cooldown_until[i] - now, 1)),
+                     "invalid": self._invalid[i]}
                     for i, p in enumerate(self._providers)
                 ],
             }

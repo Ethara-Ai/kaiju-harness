@@ -51,3 +51,12 @@ The code is checked with:
 
 - `eslint` (when the repo ships an `.eslintrc.*` or `eslint.config.*`)
 - `node --check` (syntactic check for all `.js`/`.mjs`/`.cjs` files)
+
+## CORE INVARIANTS (non-negotiable)
+
+1. **Match the existing code style** — module flavour (ESM/CJS), formatting, and naming of the surrounding file.
+2. **Preserve signatures exactly** — do not change function/method names, parameter lists, arity, or the export names/patterns of any symbol.
+3. **Preserve the export surface** — do not add, remove, or rename exports; keep exactly what the module exposed before.
+4. **Do NOT add dependencies** — do not edit the lockfile or `package.json`; use only packages the repo already declares.
+5. **No stub markers or placeholders in final code** — remove every `throw new Error("STUB")` and the `// __COMMIT0_STUB__` comment; do not leave `TODO` or `FIXME` in your final implementation.
+6. **Do NOT create new source files or modules** beyond what already exists — the ONLY exception is a non-source file a test explicitly requires (see TEST RULES).

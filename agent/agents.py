@@ -773,21 +773,25 @@ def _apply_thinking_capture_patches(
     # Upstream aider bug: send() calls calculate_and_show_tokens_and_cost()
     # AFTER show_send_output_stream(), but FinishReasonLength raised inside
     # the stream skips the cost line. We wrap send() to catch it.
-    _original_send = coder.send
+    # A coder without a ``send`` method (e.g. a minimal test double) cannot raise
+    # FinishReasonLength, so there is nothing to wrap — skip defensively. Real
+    # aider coders always expose ``send``, so production behaviour is unchanged.
+    _original_send = getattr(coder, "send", None)
+    if _original_send is not None:
 
-    def patched_send(messages: Any, model: Any = None, functions: Any = None) -> Any:
-        from aider.coders.base_coder import FinishReasonLength
+        def patched_send(messages: Any, model: Any = None, functions: Any = None) -> Any:
+            from aider.coders.base_coder import FinishReasonLength
 
-        try:
-            yield from _original_send(messages, model=model, functions=functions)
-        except FinishReasonLength:
             try:
-                coder.calculate_and_show_tokens_and_cost(messages, None)
-            except Exception:
-                pass
-            raise
+                yield from _original_send(messages, model=model, functions=functions)
+            except FinishReasonLength:
+                try:
+                    coder.calculate_and_show_tokens_and_cost(messages, None)
+                except Exception:
+                    pass
+                raise
 
-    coder.send = patched_send
+        coder.send = patched_send
 
     _original_apply_updates = coder.apply_updates
 

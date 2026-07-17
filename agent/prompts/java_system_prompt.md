@@ -17,3 +17,12 @@ You are implementing part of a Java library. You are given ONE source file to co
 - Preserve null-safety annotations (@Nullable, @NonNull)
 - Handle checked exceptions declared in throws clause
 - Use existing utility methods in the codebase before writing your own
+
+## Core Invariants (non-negotiable)
+
+1. **Match the existing code style** — indentation, naming, and conventions of the surrounding file.
+2. **Preserve signatures exactly** — do not change method/constructor names, parameter lists, return types, annotations, or class declarations.
+3. **Preserve visibility / access modifiers** — do not change `public`/`protected`/`private`/package-private on any member.
+4. **Do NOT add dependencies** — use only what is already declared in `pom.xml`/`build.gradle`.
+5. **No stub markers or placeholders in final code** — remove every `throw new UnsupportedOperationException("STUB: not implemented")`; do not leave `TODO` or `FIXME` in your final implementation.
+6. **Do NOT create new files or classes** beyond what already exists — implement only inside the file added to the chat.

@@ -422,6 +422,11 @@ def _run_agent_for_repo_impl(
                         ),
                     )
                 )
+                _mark_module_done(test_log_dir)
+                # Write THIS module's output.json now (crash-resilient): a worker
+                # killed after this point keeps output.json for the module. Mark
+                # .done FIRST so resume never re-runs (and double-counts) a module
+                # whose write already happened — matches all sibling runners.
                 _write_module_output(
                     thinking_capture=thinking_capture,
                     module_log_dir=test_log_dir,
@@ -433,7 +438,6 @@ def _run_agent_for_repo_impl(
                     instance_id=module_instance_id,
                     metadata=metadata,
                 )
-                _mark_module_done(test_log_dir)
         elif agent_config.run_entire_dir_lint:
             update_queue.put(("start_repo", (repo_name, len(lint_files))))
             # when unit test feedback is available, iterate over test files
@@ -503,6 +507,10 @@ def _run_agent_for_repo_impl(
                         (repo_name, lint_file, agent_return.last_cost),
                     )
                 )
+                _mark_module_done(lint_log_dir)
+                # Write THIS module's output.json now (crash-resilient): mark
+                # .done FIRST so resume never re-runs (and double-counts) a module
+                # whose write already happened — matches all sibling runners.
                 _write_module_output(
                     thinking_capture=thinking_capture,
                     module_log_dir=lint_log_dir,
@@ -514,7 +522,6 @@ def _run_agent_for_repo_impl(
                     instance_id=module_instance_id,
                     metadata=metadata,
                 )
-                _mark_module_done(lint_log_dir)
         else:
             # when unit test feedback is not available, iterate over target files to edit
             message, spec_costs = get_message(
@@ -589,6 +596,10 @@ def _run_agent_for_repo_impl(
                         (repo_name, file_name, file_cost),
                     )
                 )
+                _mark_module_done(file_log_dir)
+                # Write THIS module's output.json now (crash-resilient): mark
+                # .done FIRST so resume never re-runs (and double-counts) a module
+                # whose write already happened — matches all sibling runners.
                 _write_module_output(
                     thinking_capture=thinking_capture,
                     module_log_dir=file_log_dir,
@@ -600,7 +611,6 @@ def _run_agent_for_repo_impl(
                     instance_id=module_instance_id,
                     metadata=metadata,
                 )
-                _mark_module_done(file_log_dir)
     if agent_config.record_test_for_each_commit:
         try:
             with open(experiment_log_dir / "eval_results.json", "w") as f:
@@ -616,6 +626,39 @@ def _run_agent_for_repo_impl(
     # Stage-wise cumulative patch alongside the per-module output.json.
     from agent.stage_patch import write_stage_patch
     write_stage_patch(local_repo, example["base_commit"], experiment_log_dir, logger)
+
+    # IDEMPOTENT BACKSTOP (not the primary write). output.json is now written
+    # per-module inside each stage loop the moment the module finishes, so a
+    # worker killed mid-run keeps output.json for every completed module. This
+    # backstop only fills output.json for a turn-bearing module that STILL
+    # lacks one (e.g. a module marked `.done` by a PRIOR run that predates the
+    # in-loop write and is skipped by `_is_module_done` on resume, or whose
+    # in-loop write raised and was swallowed). It NEVER touches a module that
+    # already has output.json, so it cannot double-write or double-count.
+    if thinking_capture is not None:
+        modules_seen: set[str] = set()
+        for turn in thinking_capture.turns:
+            if turn.module and turn.module not in modules_seen:
+                modules_seen.add(turn.module)
+        for module_name in modules_seen:
+            module_log_dir = experiment_log_dir / module_name
+            if (module_log_dir / "output.json").exists():
+                continue  # already written in-loop; don't rewrite / double-count
+            module_turns = thinking_capture.get_module_turns(module_name)
+            if not module_turns:
+                continue
+            stage = module_turns[0].stage or "unknown"
+            _write_module_output(
+                thinking_capture=thinking_capture,
+                module_log_dir=module_log_dir,
+                module_name=module_name,
+                stage=stage,
+                local_repo=local_repo,
+                base_commit=example["base_commit"],
+                module_rel_files=module_rel_files,
+                instance_id=module_instance_id,
+                metadata=metadata,
+            )
 
     update_queue.put(("finish_repo", repo_name))
 

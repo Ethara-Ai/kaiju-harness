@@ -245,7 +245,7 @@ def run_eval_after_each_commit(
         return e.stdout if e.stdout else str(e)
 
 
-def run_agent_for_repo(
+def _run_agent_for_repo_impl(
     repo_base_dir: str,
     agent_config: AgentConfig,
     example: dict,
@@ -753,6 +753,51 @@ def run_agent_for_repo(
     update_queue.put(("finish_repo", repo_name))
 
 
+def run_agent_for_repo(
+    repo_base_dir: str,
+    agent_config: AgentConfig,
+    example: dict,
+    branch: str,
+    update_queue: multiprocessing.Queue,
+    override_previous_changes: bool = False,
+    backend: str = "modal",
+    log_dir: str = str(RUN_AGENT_LOG_DIR.resolve()),
+    commit0_config_file: str = "",
+) -> "tuple[str, bool]":
+    """Run the Go agent for one repo with per-repo error isolation.
+
+    Any failure inside the worker is caught and logged so that one bad repo
+    cannot tear down the whole parallel batch. Always emits a ``finish_repo``
+    update for the display and returns ``(repo_name, ok)`` instead of raising,
+    matching the canonical Python runner and its 6 other siblings.
+    """
+    _, repo_name = example["repo"].split("/")
+    try:
+        _run_agent_for_repo_impl(
+            repo_base_dir,
+            agent_config,
+            example,
+            branch,
+            update_queue,
+            override_previous_changes,
+            backend,
+            log_dir,
+            commit0_config_file,
+        )
+        return repo_name, True
+    except Exception:
+        logger.error(
+            "Go agent worker for %s failed; isolating so the batch continues",
+            repo_name,
+            exc_info=True,
+        )
+        try:
+            update_queue.put(("finish_repo", repo_name))
+        except Exception:
+            logger.debug("Could not emit finish_repo for %s", repo_name)
+        return repo_name, False
+
+
 def run_agent(
     branch: str,
     override_previous_changes: bool,
@@ -887,19 +932,32 @@ def run_agent(
                 # failures (mirrors run_rust_agent.py's E8) so one bad repo can't
                 # sink the batch; only a TOTAL wipeout is treated as systemic.
                 n_failed = 0
+                failed_repos: list = []
                 for result in results:
                     try:
-                        result.get()
+                        value = result.get()
                     except Exception as werr:  # noqa: BLE001
                         n_failed += 1
                         logger.error(
-                            "Go agent worker failed: %s", werr, exc_info=True
+                            "Go agent worker raised before returning a status: %s",
+                            werr,
+                            exc_info=True,
                         )
+                        continue
+                    if isinstance(value, tuple) and len(value) == 2:
+                        _repo_name, ok = value
+                        if not ok:
+                            n_failed += 1
+                            failed_repos.append(_repo_name)
                 logger.info(
                     "All %d agent workers completed (%d failed)",
                     len(results),
                     n_failed,
                 )
+                if failed_repos:
+                    logger.error(
+                        "Go agent workers failed for: %s", ", ".join(failed_repos)
+                    )
                 if n_failed and n_failed == len(results):
                     raise RuntimeError(
                         f"All {len(results)} Go agent workers failed — "

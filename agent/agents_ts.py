@@ -22,19 +22,31 @@ from agent._source_pool import derive_source_pool
 
 _logger = logging.getLogger(__name__)
 
-_TS_SYSTEM_PROMPT_PATH = Path(__file__).parent / "ts_system_prompt.md"
+# Canonical location: agent/prompts/ts_system_prompt.md — parity with every
+# sibling language (c/cpp/go/java/js/rust all load from agent/prompts/). The
+# legacy path (agent/ts_system_prompt.md) is kept as a read fallback so an
+# out-of-order checkout or a stale deploy can't silently blank the TS prompt.
+_TS_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "ts_system_prompt.md"
+_TS_SYSTEM_PROMPT_LEGACY_PATH = Path(__file__).parent / "ts_system_prompt.md"
 
 
 def _load_ts_system_prompt() -> str:
-    """Load the TS-specific system prompt from the markdown file."""
-    try:
-        return _TS_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        _logger.warning(
-            "TS system prompt not found at %s — using empty string",
-            _TS_SYSTEM_PROMPT_PATH,
-        )
-        return ""
+    """Load the TS-specific system prompt from the markdown file.
+
+    Reads the canonical ``agent/prompts/`` location first, then falls back to the
+    legacy ``agent/`` location for resilience.
+    """
+    for path in (_TS_SYSTEM_PROMPT_PATH, _TS_SYSTEM_PROMPT_LEGACY_PATH):
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+    _logger.warning(
+        "TS system prompt not found at %s (or legacy %s) — using empty string",
+        _TS_SYSTEM_PROMPT_PATH,
+        _TS_SYSTEM_PROMPT_LEGACY_PATH,
+    )
+    return ""
 
 
 class TsAiderAgents(AiderAgents):
