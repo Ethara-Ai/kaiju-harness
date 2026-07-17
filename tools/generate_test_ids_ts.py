@@ -38,6 +38,7 @@ from tools.generate_test_ids import (
 )
 
 from commit0.harness.constants_ts import CONTAINER_WORKDIR
+from tools._test_id_sentinel import BASE_VALIDATION_FAILED_MSG, result_count
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -1198,27 +1199,24 @@ def generate_for_ts_dataset(
                         repo, exc,
                     )
 
-            # 8. Validate base commit if requested
+            # 8. Validate base commit if requested (QC-C6-005 shared sentinel)
+            base_count = None
             if validate_base and use_docker:
-                base_collected, stderr = validate_ts_base_commit_docker(
+                base_count, stderr = validate_ts_base_commit_docker(
                     repo_name=repo_name,
                     test_dir=test_dir,
                     framework=framework,
                     timeout=timeout,
                 )
-                if base_collected == 0:
-                    logger.warning(
-                        "  BASE COMMIT VALIDATION FAILED: 0 tests collected at base_commit "
-                        "(stubbed code). The import chain is broken -- pipeline will produce "
-                        "0%% pass rate."
-                    )
+                if base_count == 0:
+                    logger.warning("  %s", BASE_VALIDATION_FAILED_MSG)
                     logger.warning("  Last output: %s", stderr[:200])
-                    results[repo_name] = -len(test_ids)
                 else:
                     logger.info(
                         "  Base commit validation OK: %d tests collected at base_commit",
-                        base_collected,
+                        base_count,
                     )
+                results[repo_name] = result_count(test_ids, base_count)
         else:
             logger.warning("  No test IDs collected for %s", repo_name)
             results[repo_name] = 0

@@ -97,6 +97,8 @@ __all__ = [
     "ensure_pm",
     "ensure_node",
     "build_env_for_repo",
+    "resolve_install_command",
+    "yarn_major",
     "doctor",
     "uninstall",
     "list_installed",
@@ -276,7 +278,7 @@ def _env_bool(env: Mapping[str, str], name: str, default: bool = False) -> bool:
     v = env.get(name, "").strip().lower()
     if v in ("1", "true", "yes", "on"):
         return True
-    if v in ("0", "false", "no", "off", ""):
+    if v in ("0", "false", "no", "off"):
         return False
     return default
 
@@ -616,8 +618,9 @@ def _installed_version(tool: str) -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    out = (proc.stdout or proc.stderr or "").strip()
-    # Most tools emit "vX.Y.Z" or "X.Y.Z"; strip leading v
+    stdout = proc.stdout if isinstance(proc.stdout, str) else ""
+    stderr = proc.stderr if isinstance(proc.stderr, str) else ""
+    out = (stdout or stderr or "").strip()
     if out.startswith("v"):
         out = out[1:]
     m = re.match(r"^(\d+\.\d+\.\d+(?:[-.+][A-Za-z0-9.]+)?)", out)
@@ -681,6 +684,118 @@ def _parse_package_manager_field(raw: str) -> tuple[str, str, str | None]:
     return pm, ver, integrity
 
 
+def _read_package_manager_field(repo_root: Path) -> str | None:
+    """Return the raw ``packageManager`` string from package.json, or None."""
+    pj = repo_root / "package.json"
+    if not pj.exists():
+        return None
+    try:
+        data = json.loads(pj.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    val = data.get("packageManager")
+    return val if isinstance(val, str) else None
+
+
+def yarn_major(repo_root: Path) -> int | None:
+    """Best-effort Yarn MAJOR version for *repo_root*.
+
+    Yarn Classic (v1) and Berry (v2+) take DIFFERENT install flags, so callers
+    that build an install command must know which generation is in play.
+    Detection order, most authoritative first:
+
+    1. ``packageManager`` pin (``yarn@4.13.0`` -> 4) — the source of truth
+       Corepack itself uses.
+    2. ``.yarnrc.yml`` presence — a Berry-only config file (Classic uses the
+       extension-less ``.yarnrc``), so it implies >= 2.
+    3. ``yarn --version`` run WITH cwd=repo_root, so a repo-pinned
+       ``yarnPath`` release answers instead of a global classic shim.
+
+    Returns None when yarn can't be resolved; callers should treat None as
+    "assume Classic" (the historical default, and the safe flag set).
+    """
+    raw = _read_package_manager_field(repo_root)
+    if raw and raw.strip().lower().startswith("yarn@"):
+        try:
+            _, ver, _ = _parse_package_manager_field(raw)
+            return int(ver.split(".")[0])
+        except (ToolchainError, ValueError):
+            pass
+    if (repo_root / ".yarnrc.yml").exists():
+        return 2
+    yarn_bin = _which("yarn")
+    if yarn_bin:
+        try:
+            proc = subprocess.run(
+                [yarn_bin, "--version"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=_VERSION_QUERY_TIMEOUT_SEC,
+                check=False,
+            )
+            out = (proc.stdout or "").strip()
+            if out:
+                return int(out.split(".")[0])
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    return None
+
+
+def resolve_install_command(
+    pkg_manager: str, repo_root: Path, *, frozen: bool
+) -> list[str]:
+    """Return the lockfile-driven install argv for *pkg_manager* in *repo_root*.
+
+    Single source of truth so prepare_repo_js / prepare_repo_ts (and any future
+    caller) can't drift into passing Yarn-Classic flags to a Yarn-Berry repo.
+    That mistake makes ``yarn install --frozen-lockfile --ignore-scripts`` die
+    with "Unsupported option name (--ignore-scripts)"; under ``check=False`` the
+    failure is swallowed and node_modules is left EMPTY, which silently breaks
+    the tsc compilability check and test-id discovery (0 IDs on a repo that
+    actually has tests).
+
+    ``frozen=True`` -> reproducible install against the committed lockfile.
+    ``frozen=False`` -> generating install (no committed lockfile) that resolves
+    and writes one. ``--ignore-scripts`` / Berry ``--mode=skip-build`` keep
+    arbitrary lifecycle scripts from running during preparation.
+    """
+    _validate_tool_name(pkg_manager)
+    if pkg_manager == "npm":
+        if frozen:
+            return ["npm", "ci", "--no-audit", "--no-fund", "--ignore-scripts"]
+        return [
+            "npm", "install", "--no-audit", "--no-fund",
+            "--ignore-scripts", "--package-lock=true",
+        ]
+    if pkg_manager == "pnpm":
+        cmd = ["pnpm", "install", "--ignore-scripts"]
+        if frozen:
+            cmd.append("--frozen-lockfile")
+        return cmd
+    if pkg_manager == "bun":
+        cmd = ["bun", "install", "--ignore-scripts"]
+        if frozen:
+            cmd.append("--frozen-lockfile")
+        return cmd
+    if pkg_manager == "yarn":
+        major = yarn_major(repo_root)
+        if major is not None and major >= 2:
+            # Berry: --immutable == frozen-lockfile; --mode=skip-build is the
+            # equivalent of --ignore-scripts (Berry rejects both classic flags).
+            cmd = ["yarn", "install", "--mode=skip-build"]
+            if frozen:
+                cmd.insert(2, "--immutable")
+            return cmd
+        # Classic (v1), or unknown -> assume Classic (safe historical default).
+        cmd = ["yarn", "install", "--ignore-scripts"]
+        if frozen:
+            cmd.insert(2, "--frozen-lockfile")
+        return cmd
+    # Unreachable: _validate_tool_name only admits the four PMs above.
+    return [pkg_manager, "install"]
+
+
 
 
 def _install_pm_via_npm(pm: str, version: str | None, config: ToolchainConfig) -> tuple[str, str]:
@@ -688,7 +803,7 @@ def _install_pm_via_npm(pm: str, version: str | None, config: ToolchainConfig) -
     if not config.allow_global_npm:
         raise ToolchainInstallFailedError(
             f"`npm install -g {pm}` needs a user-writable npm prefix. "
-            f"Detected system npm (Linux) — set `KAIJU_TOOLCHAIN_ALLOW_GLOBAL_NPM=1` "
+            f"Detected system npm on {sys.platform} with non-user-writable prefix — set `KAIJU_TOOLCHAIN_ALLOW_GLOBAL_NPM=1` "
             f"if you know sudo/root is safe, or run manually: "
             f"`sudo npm install -g {pm}` (Invariant I2: this module never invokes sudo)."
         )
@@ -1130,8 +1245,20 @@ def _do_install(
 ) -> tuple[str, str, InstallMethod, str]:
     """Called under lock. Returns (journal_id, install_path, method, version_installed)."""
     if pm == "bun":
-        path, err, method, actual_version, cmd = _install_bun_hybrid(cfg)
-        journal_id = _record_intent(cfg, pm, actual_version, method, cmd)
+        version, entry = _resolve_bun_version(cfg)
+        npm = _which("npm")
+        if npm is not None and not cfg.allow_bun_install_script:
+            planned_cmd = [npm, "install", "-g", f"bun@{entry['npm_package_version']}"]
+            planned_method = InstallMethod.NPM_GLOBAL
+        else:
+            planned_cmd = ["curl", "-fsSL", entry["installer_url"], "|", "sha256verify", "|", "bash"]
+            planned_method = InstallMethod.BUN_INSTALLER_SCRIPT
+        journal_id = _record_intent(cfg, "bun", version, planned_method, planned_cmd)
+        try:
+            path, err, method, actual_version, _cmd = _install_bun_hybrid(cfg)
+        except ToolchainError as exc:
+            _record_outcome(cfg, journal_id, "failure", "", str(exc))
+            raise
         _record_outcome(cfg, journal_id, "success", path, err)
         return journal_id, path, method, actual_version
 

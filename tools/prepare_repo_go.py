@@ -757,7 +757,7 @@ def prepare_single_repo(
 
         repo_name = full_name.split("/")[-1]
         entry = {
-            "instance_id": f"{full_name.replace('/', '_')}_go",
+            "instance_id": f"commit-0/{repo_name}",
             "id": str(_uuid_mod.uuid4()),
             "repo": forked_name,
             "original_repo": full_name,

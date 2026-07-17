@@ -39,7 +39,7 @@ from commit0.harness.constants_js import (
     SUPPORTED_NODE_VERSIONS,
     SUPPORTED_PACKAGE_MANAGERS,
 )
-from tools._git_auth import fork_repo, setup_git_credentials
+from tools._git_auth import fork_repo, git, push_to_fork, setup_git_credentials
 from tools.node_version import (
     detect as _detect_node_version,
     resolve_engines_floor as _resolve_engines_floor,
@@ -48,8 +48,6 @@ from tools.prepare_repo import (
     full_clone,
     get_default_branch,
     get_head_sha,
-    git,
-    push_to_fork,
 )
 from tools.stub_js_runner import run_stub_js
 from tools.validate_js import (
@@ -189,25 +187,10 @@ def _validate_stubber_deps() -> None:
         logger.info("Stubber deps installed at %s", _STUBBER_DIR)
 
 
-_FROZEN_INSTALL_CMDS: dict[str, tuple[str, ...]] = {
-    "npm": ("npm", "ci", "--no-audit", "--no-fund", "--ignore-scripts"),
-    "pnpm": ("pnpm", "install", "--frozen-lockfile", "--ignore-scripts"),
-    "yarn": ("yarn", "install", "--frozen-lockfile", "--ignore-scripts"),
-    "bun": ("bun", "install", "--frozen-lockfile", "--ignore-scripts"),
-}
-
-# Generating installs: run when NO committed lockfile exists. They resolve the
-# dependency tree and WRITE a lockfile, which prepare then commits into the
-# stubbed branch so downstream frozen installs (npm ci) are reproducible.
-_GENERATING_INSTALL_CMDS: dict[str, tuple[str, ...]] = {
-    # `--package-lock=true` FORCES the lockfile even when the repo ships an
-    # `.npmrc` with `package-lock=false` (common in small libs, e.g. sindresorhus)
-    # — a CLI flag overrides `.npmrc`, so npm still writes package-lock.json.
-    "npm": ("npm", "install", "--no-audit", "--no-fund", "--ignore-scripts", "--package-lock=true"),
-    "pnpm": ("pnpm", "install", "--ignore-scripts"),
-    "yarn": ("yarn", "install", "--ignore-scripts"),
-    "bun": ("bun", "install", "--ignore-scripts"),
-}
+# Install commands (frozen vs generating, per package manager, Yarn-generation
+# aware) live in tools/_toolchain.resolve_install_command — the single source of
+# truth shared with prepare_repo_ts so neither can drift into passing
+# Yarn-Classic flags to a Yarn-Berry repo.
 
 # Lockfile filename produced by each package manager, for detection + git add.
 _LOCKFILE_BY_PM: dict[str, str] = {
@@ -265,24 +248,6 @@ def _neutralize_npmrc_lockfile_disable(repo_dir: Path) -> str | None:
         return None
     npmrc.write_text(neutralized)
     return original
-
-
-def _frozen_install_cmd(pkg_manager: str) -> list[str]:
-    try:
-        return list(_FROZEN_INSTALL_CMDS[pkg_manager])
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported package manager for frozen install: {pkg_manager!r}"
-        ) from exc
-
-
-def _generating_install_cmd(pkg_manager: str) -> list[str]:
-    try:
-        return list(_GENERATING_INSTALL_CMDS[pkg_manager])
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported package manager for generating install: {pkg_manager!r}"
-        ) from exc
 
 
 # A PM may emit more than one lockfile filename across versions (bun switched from
@@ -794,8 +759,10 @@ def _capture_js_test_ids(
     ``jest --listTests`` / ``vitest list`` / etc.) and BEFORE stubbing, since
     stubbed source throws at import time and yields zero discovered tests.
 
-    Best-effort: any failure just leaves ``evaluate_js`` to fall back to the
-    observed test count as its denominator. Never raises.
+    Best-effort for import/collection errors (falls back to the observed test
+    count), but RAISES when the repo has test files yet 0 IDs were captured —
+    that signals a toolchain/install failure and must not ship a non-canonical
+    row silently (override: KAIJU_REQUIRE_INVENTORY=0).
     """
     try:
         from tools.generate_test_ids_js import (
@@ -826,10 +793,28 @@ def _capture_js_test_ids(
         )
         return
     if not ids:
+        # Distinguish a genuinely test-free repo from an infra failure: test
+        # files present but 0 IDs captured almost always means the dependency
+        # install/toolchain failed (empty node_modules -> jest/vitest can't run).
+        # Fail LOUD here instead of shipping an inventory-less row that dies at
+        # the run-stage guard later. Override: KAIJU_REQUIRE_INVENTORY=0 (matches
+        # the run stage) for the rare genuinely-uncollectable runner.
+        has_test_files = bool(detect_js_test_dirs(repo_dir))
+        require_inventory = os.environ.get("KAIJU_REQUIRE_INVENTORY", "1") != "0"
+        if has_test_files and require_inventory:
+            raise RuntimeError(
+                f"JS test-id capture found test files for {repo_basename} but "
+                f"discovered 0 test IDs. This dataset row would FAIL the run-stage "
+                f"inventory guard (a wrong, non-reproducible denominator), almost "
+                f"always due to a toolchain/install failure (empty node_modules?). "
+                f"Check the dependency install log above. To ship a NON-CANONICAL "
+                f"row anyway, re-run with KAIJU_REQUIRE_INVENTORY=0."
+            )
         logger.warning(
-            "  No JS test IDs discovered for %s; the evaluator will use the "
+            "  No JS test IDs discovered for %s%s; the evaluator will use the "
             "observed test count.",
             repo_basename,
+            "" if has_test_files else " (no test files found in repo)",
         )
         return
     out_dir = (
@@ -961,24 +946,26 @@ def create_js_stubbed_branch(
     if (repo_dir / "package.json").exists():
         _ensure_pkg_manager(pkg_manager)
         has_lockfile = _has_committed_lockfile(repo_dir)
+        # resolve_install_command is Yarn-generation aware: Berry (v2+) rejects
+        # the classic --frozen-lockfile/--ignore-scripts flags. A committed
+        # lockfile -> frozen (reproducible) install; otherwise a generating
+        # install that CREATES a lockfile we commit onto the stubbed branch so
+        # downstream frozen installs (npm ci) are reproducible. This also
+        # unblocks the many small JS libs that .gitignore their lockfile.
         if has_lockfile:
-            # Reproducible path: repo committed a lockfile -> frozen install.
             logger.info("  Installing dependencies via %s (frozen)...", pkg_manager)
-            install_cmd = _frozen_install_cmd(pkg_manager)
         else:
-            # No committed lockfile: run a generating install to CREATE one, then
-            # commit it into the stubbed branch so downstream frozen installs
-            # (npm ci) are reproducible. This unblocks the many small JS libs
-            # that intentionally .gitignore their lockfile.
             logger.info(
                 "  No committed lockfile; installing via %s (generating lockfile)...",
                 pkg_manager,
             )
-            install_cmd = _generating_install_cmd(pkg_manager)
-        from tools._toolchain import ToolchainError, build_env_for_repo
+        from tools._toolchain import build_env_for_repo, resolve_install_command
+        install_cmd = resolve_install_command(
+            pkg_manager, repo_dir, frozen=has_lockfile
+        )
         try:
             _install_env = build_env_for_repo(repo_dir)
-        except ToolchainError as _exc:
+        except Exception as _exc:
             logger.warning("  Node auto-switch skipped: %s", _exc)
             _install_env = None
         install_result = subprocess.run(
@@ -1352,16 +1339,16 @@ def prepare_js_repo(
                     reference_commit[:12],
                 )
             else:
-                logger.error(
-                    "  Push to %s failed AND no remote branch resolvable; "
-                    "refusing to emit a dataset row whose base_commit=%s and "
-                    "reference_commit=%s exist only in the local clone. "
-                    "Downstream setup_js.clone_repo cannot fetch unpushed SHAs.",
-                    fork_name,
-                    base_commit[:12],
-                    reference_commit[:12],
-                )
-                return None
+                raise RuntimeError(
+                    f"Push to {fork_name} FAILED and no usable "
+                    f"'{JS_DATASET_BRANCH}' branch exists on the fork. The "
+                    f"container build clones this fork and fetches "
+                    f"base/reference commits from it, so a dataset built from "
+                    f"un-pushed local commits is UNBUILDABLE ('not our ref'). "
+                    f"Ensure your token has WRITE access to the fork org "
+                    f"(run_trajectory.sh: --org / $KAIJU_FORK_ORG).\n"
+                    f"Original push error: {e}"
+                ) from e
 
     # README-based spec doc — parity with TS (prepare_repo_ts.py). Generates
     # specs/<repo>_readme_spec.pdf.bz2 so the host-side copy_inference_inputs stages

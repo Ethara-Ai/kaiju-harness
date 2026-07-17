@@ -27,13 +27,11 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 from tools.prepare_repo import (
-    git,
     full_clone,
-    push_to_fork,
     get_head_sha,
     get_default_branch,
 )
-from tools._git_auth import setup_git_credentials, fork_repo
+from tools._git_auth import fork_repo, git, push_to_fork, setup_git_credentials
 from tools.stub_ts_runner import run_stub_ts
 
 # H2, H3, H4, H11: reuse the hardened npm/pnpm/yarn helpers from the JS
@@ -948,32 +946,27 @@ def create_ts_stubbed_branch(
         # H2: prefer frozen install when a lockfile is committed (mirrors JS).
         # Falling back to plain `install` is a GENERATING install that can
         # silently resolve to different versions than what the repo shipped.
-        _frozen_by_pm = {
-            "npm":  ["npm", "ci", "--ignore-scripts"],
-            "pnpm": ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
-            "yarn": ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"],
-            "bun":  ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
-        }
+        # resolve_install_command is Yarn-generation aware: Berry (v2+) rejects
+        # the classic --frozen-lockfile/--ignore-scripts flags, and under the
+        # check=False install below a rejected command leaves node_modules EMPTY,
+        # which silently breaks tsc + test-id discovery. See tools/_toolchain.
+        from tools._toolchain import build_env_for_repo, resolve_install_command
         _has_lock = _has_committed_lockfile(repo_dir)
-        if _has_lock:
-            install_cmd = _frozen_by_pm.get(pkg_manager, [pkg_manager, "install"])
-        else:
-            install_cmd = [pkg_manager, "install"]
-            if pkg_manager != "bun":
-                install_cmd.append("--ignore-scripts")
+        install_cmd = resolve_install_command(
+            pkg_manager, repo_dir, frozen=_has_lock
+        )
         # H3: neutralise .npmrc `package-lock=false` / `lockfile=false` for the
         # generating install, then restore verbatim (try/finally). Without this,
         # repos that ship such .npmrc suppress lockfile generation and downstream
         # frozen installs fail with a cryptic "no lockfile" error.
         _orig_npmrc = None if _has_lock else _neutralize_npmrc_lockfile_disable(repo_dir)
         try:
-            from tools._toolchain import ToolchainError, build_env_for_repo
             try:
                 _install_env = build_env_for_repo(repo_dir)
-            except ToolchainError as _exc:
+            except Exception as _exc:
                 logger.warning("  Node auto-switch skipped: %s", _exc)
                 _install_env = None
-            subprocess.run(
+            _install_res = subprocess.run(
                 install_cmd,
                 cwd=str(repo_dir),
                 capture_output=True,
@@ -982,6 +975,22 @@ def create_ts_stubbed_branch(
                 check=False,
                 env=_install_env,
             )
+            # Fail LOUD on a nonzero install: check=False keeps prepare going so
+            # a flaky postinstall doesn't abort the whole run, but a broken
+            # install (e.g. wrong PM flags) that leaves node_modules empty MUST
+            # be visible — every downstream step (tsc, test-id capture) degrades
+            # to a misleading "no tests / unknown" otherwise.
+            if _install_res.returncode != 0:
+                _tail = (_install_res.stderr or _install_res.stdout or "").strip()[-800:]
+                logger.warning(
+                    "  Dependency install FAILED (%s exit=%s): %s -- node_modules "
+                    "may be empty; tsc + test-id discovery will be unreliable.",
+                    pkg_manager,
+                    _install_res.returncode,
+                    " ".join(install_cmd),
+                )
+                if _tail:
+                    logger.warning("  install stderr tail: %s", _tail)
         finally:
             if _orig_npmrc is not None:
                 (repo_dir / ".npmrc").write_text(_orig_npmrc)
@@ -1258,10 +1267,30 @@ def _capture_ts_test_ids(
                 logger.warning("  Could not restore working tree after capture: %s", e)
 
     if not ids:
+        # Distinguish a genuinely test-free repo from an infra failure. If the
+        # repo HAS test files but capture found 0 IDs, dependency install /
+        # toolchain almost certainly failed (e.g. Yarn-Berry flag mismatch left
+        # node_modules empty so jest never ran). Shipping the row anyway just
+        # defers the failure to the run-stage inventory guard ~30 min later with
+        # far less context. Fail LOUD here — unless the operator explicitly opted
+        # into warn-only via KAIJU_REQUIRE_INVENTORY=0 (same override the run
+        # stage honors, for the rare genuinely-uncollectable runner).
+        has_test_files = bool(detect_ts_test_dirs(repo_dir))
+        require_inventory = os.environ.get("KAIJU_REQUIRE_INVENTORY", "1") != "0"
+        if has_test_files and require_inventory:
+            raise RuntimeError(
+                f"TS test-id capture found test files for {repo} but discovered "
+                f"0 test IDs. This dataset row would FAIL the run-stage inventory "
+                f"guard (a wrong, non-reproducible denominator). This is almost "
+                f"always a toolchain/install failure — check the dependency "
+                f"install log above (empty node_modules?). To ship a "
+                f"NON-CANONICAL row anyway, re-run with KAIJU_REQUIRE_INVENTORY=0."
+            )
         logger.warning(
-            "  No TS test IDs discovered for %s; the evaluator will use the "
+            "  No TS test IDs discovered for %s%s; the evaluator will use the "
             "observed test count.",
             repo,
+            "" if has_test_files else " (no test files found in repo)",
         )
         return
 
@@ -1324,7 +1353,9 @@ def prepare_ts_repo(
     # Capture the canonical test inventory -> commit0/data/test_ids/<repo>.bz2 (the
     # AUTHORITATIVE denominator evaluate_ts reads). Runs AFTER
     # create_ts_stubbed_branch because test listing needs node_modules, which that
-    # step installs. Best-effort -- never aborts prep.
+    # step installs, and BEFORE the push below so a capture failure aborts prep
+    # instead of shipping an inventory-less row (raises when test files exist but
+    # 0 IDs were captured; override with KAIJU_REQUIRE_INVENTORY=0).
     _capture_ts_test_ids(
         repo_dir=repo_dir,
         repo=full_name,

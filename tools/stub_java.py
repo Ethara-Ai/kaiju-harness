@@ -40,7 +40,12 @@ def stub_java_sources(
     src_dir: str,
     marker: str = 'throw new UnsupportedOperationException("STUB: not implemented")',
     write_in_place: bool = True,
-    preserve_javadoc: bool = True,
+    # QC-C6-008: default to STRIPPING Javadoc from stubs. This is a
+    # training-data/leaderboard engine — a Javadoc block that spells out the
+    # algorithm hands the model the answer for free and inflates the score. The
+    # method CONTRACT still lives in the spec/test signals; the stub itself must
+    # not carry implementation prose. Matches StubConfig.java's default.
+    preserve_javadoc: bool = False,
     stub_private_methods: bool = False,
     stub_constructors: bool = False,
     max_file_lines: int = 50000,

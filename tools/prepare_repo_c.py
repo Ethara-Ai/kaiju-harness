@@ -11,7 +11,8 @@ For each validated C candidate:
 
 Optional behaviour gated behind flags:
 * ``--fork-org <org>`` — fork to a GitHub org via ``gh repo fork``.
-* ``--push`` — push the ``commit0`` branch to the fork.
+* ``--dry-run`` — skip fork+push (local-only). Push is DEFAULT-ON (parity with
+  the 7 sibling preparers); a dry run emits an UNBUILDABLE dataset by design.
 * ``--scrape-spec`` — scrape a PDF spec from ``--spec-url`` (best-effort),
   compress to ``spec.pdf.bz2``, and commit it into the stubbed branch so it
   becomes part of ``base_commit`` (mirrors the Python ``prepare_repo.py``).
@@ -92,18 +93,29 @@ def clone_repo(slug: str, dest: Path) -> Path:
         shutil.rmtree(target, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     logger.info("Cloning %s -> %s", slug, target)
+    # timeout= (parity with every sibling preparer: prepare_repo.py:184,
+    # _go.py:146, _rust.py:171, _java.py:94) — a hung git clone must abort the
+    # run loudly (TimeoutExpired) rather than block prepare forever (CWE-834).
     subprocess.run(
         ["git", "clone", "--depth", "1", f"https://github.com/{slug}.git", str(target)],
         check=True,
+        timeout=600,
     )
     # H1: Unshallow so we can checkout history-tracking branches. Silent
     # unshallow failure previously left the clone shallow with no signal;
     # downstream `git fetch origin <commit>` then failed with a cryptic
     # "not our ref". Log the stderr breadcrumb so operators can spot it.
-    _un = subprocess.run(
-        ["git", "-C", str(target), "fetch", "--unshallow"],
-        check=False, capture_output=True, text=True,
-    )
+    try:
+        _un = subprocess.run(
+            ["git", "-C", str(target), "fetch", "--unshallow"],
+            check=False, capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "  git fetch --unshallow timed out (>300s) for %s;"
+            " clone stays shallow — history-tracking checkouts may fail", slug,
+        )
+        return target
     if _un.returncode != 0:
         logger.warning(
             "  git fetch --unshallow failed for %s (rc=%s stderr=%s);"
@@ -571,7 +583,7 @@ def prepare_one(
     slug: str,
     clone_dir: Path,
     fork_org: str = DEFAULT_ORG,
-    push: bool = False,
+    dry_run: bool = False,
     branch: str = "commit0_all",
     cmake_flags: str = "",
     skip_spec: bool = False,
@@ -711,13 +723,13 @@ def prepare_one(
 
     target_repo_slug = f"{fork_org}/{slug.split('/')[-1]}" if fork_org else slug
 
-    if push and fork_org:
-        # The containerized C build clones this fork and runs
-        #   git fetch origin <env_setup_commit> <base_commit>
-        # so BOTH commits MUST be reachable on the fork. A failed push therefore
-        # cannot be a warning: it would emit a dataset whose base_commit only
-        # exists locally, and the image build later dies with the opaque
-        # "upload-pack: not our ref". Fail fast here with an actionable message.
+    # QC-C1-002: push is DEFAULT-ON (opt-out via --dry-run), matching all 7
+    # sibling preparers. The containerized C build clones this fork and runs
+    #   git fetch origin <env_setup_commit> <base_commit>
+    # so BOTH commits MUST be reachable on the fork — an un-pushed dataset row is
+    # UNBUILDABLE ('not our ref'). Hence a failed push is a hard error, never a
+    # warning.
+    if not dry_run and fork_org:
         try:
             fork_repo(slug, fork_org)
             push_to_fork(repo_path, target_repo_slug, branch, remote_name="origin")
@@ -732,9 +744,19 @@ def prepare_one(
                 f"<account-you-can-push-to> (run_trajectory.sh: --org / "
                 f"$KAIJU_FORK_ORG).\nUnderlying error: {exc}"
             ) from exc
+    elif not dry_run and not fork_org:
+        # Push wanted (not dry-run) but no fork org to push to: the row would
+        # reference a commit that exists only locally -> UNBUILDABLE. Warn loudly.
+        logger.warning(
+            "%s: no --fork-org set and not --dry-run — the emitted dataset row "
+            "(repo=%s, base_commit=%s) references a stubbed commit that exists "
+            "ONLY in the local clone. This dataset is UNBUILDABLE ('not our ref'). "
+            "Pass --fork-org <org-you-can-push-to>.",
+            slug, target_repo_slug, base_commit[:12],
+        )
 
     entry = {
-        "instance_id": f"{slug.split('/')[-1]}_c",
+        "instance_id": f"commit-0/{slug.split('/')[-1]}",
         "id": str(_uuid_mod.uuid4()),
         "repo": target_repo_slug,
         "original_repo": slug,
@@ -799,9 +821,11 @@ def main() -> None:
         help=f"GitHub org to fork into (default: {DEFAULT_ORG})",
     )
     parser.add_argument(
-        "--push",
+        "--dry-run",
         action="store_true",
-        help="Push commit0 branch to the fork (requires --fork-org and gh CLI)",
+        help="Skip fork+push (local-only). By default the commit0 branch IS "
+        "pushed to the fork; a dry run emits a dataset that is UNBUILDABLE by "
+        "design (base/reference commits exist only in the local clone).",
     )
     parser.add_argument(
         "--branch",
@@ -865,7 +889,7 @@ def main() -> None:
 
     args.repo = args.repo or args.upstream
 
-    setup_git_credentials(dry_run=not args.push)
+    setup_git_credentials(dry_run=args.dry_run)
 
     candidates: list[str] = []
     if args.repo:
@@ -891,7 +915,7 @@ def main() -> None:
                 slug,
                 args.clone_dir,
                 fork_org=args.fork_org,
-                push=args.push,
+                dry_run=args.dry_run,
                 branch=args.branch,
                 cmake_flags=args.cmake_flags,
                 skip_spec=args.skip_spec,

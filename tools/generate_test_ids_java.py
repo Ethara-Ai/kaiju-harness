@@ -40,6 +40,7 @@ from commit0.harness.constants_java import (
     JAVA_BASE_IMAGE_PREFIX,
     detect_build_system,
 )
+from tools._test_id_sentinel import BASE_VALIDATION_FAILED_MSG, result_count
 from commit0.harness.spec_java import Commit0JavaSpec
 from commit0.harness.docker_utils import get_docker_platform
 from commit0.harness.get_java_test_ids import (
@@ -434,6 +435,9 @@ def generate_for_dataset(
             logger.info("  Saved %d test IDs to %s", len(test_ids), out_file)
             results[repo_name] = len(test_ids)
 
+            # QC-C6-005: V5 gate via the shared negative-sentinel contract. Java
+            # validates by COMPILE (bool) rather than enumerate; map to the
+            # count contract (0 => degenerate) so the sentinel is identical.
             if validate_base and use_docker:
                 base_compiled, stderr = validate_base_commit_docker(
                     repo_name=repo_name,
@@ -441,16 +445,15 @@ def generate_for_dataset(
                     timeout=timeout,
                 )
                 if not base_compiled:
-                    logger.warning(
-                        "  BASE COMMIT VALIDATION FAILED: stubbed code does not compile."
-                        " Pipeline will produce 0%% pass rate."
-                    )
+                    logger.warning("  %s", BASE_VALIDATION_FAILED_MSG)
                     logger.warning("  Last output: %s", stderr[:200])
-                    results[repo_name] = -len(test_ids)
                 else:
                     logger.info(
                         "  Base commit validation: compilation succeeded at base_commit"
                     )
+                results[repo_name] = result_count(
+                    test_ids, len(test_ids) if base_compiled else 0
+                )
         else:
             logger.warning("  No test IDs collected for %s", repo_name)
             results[repo_name] = 0

@@ -25,6 +25,8 @@ import os
 import re
 import subprocess
 import sys
+
+from tools._test_id_sentinel import BASE_VALIDATION_FAILED_MSG, result_count
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -421,6 +423,7 @@ def generate_for_dataset(
     output_dir: Path | None = None,
     strategy: str = "auto",
     base_dir: str = "repos",
+    validate_base: bool = False,
 ) -> dict[str, int]:
     raw = Path(dataset_path).read_text().strip()
     entries = json.loads(raw)
@@ -440,15 +443,20 @@ def generate_for_dataset(
             continue
 
         logger.info("Collecting test IDs for %s...", repo_name)
+        # C++ enumerates against the LOCAL checkout, which after prepare IS the
+        # stubbed base_commit — so 0 tests here already means a degenerate base.
         ids = collect_test_ids_local(repo_dir, strategy=strategy, entry=entry)
         if ids:
             save_test_ids(repo_name, ids, output_dir)
+        elif validate_base:
+            # QC-C6-005: shared negative-sentinel contract for a degenerate base.
+            logger.error("  %s", BASE_VALIDATION_FAILED_MSG)
         else:
             logger.warning(
                 "  [SKIP] %s: extraction returned 0 tests; not installing bz2",
                 repo_name,
             )
-        results[repo_name] = len(ids)
+        results[repo_name] = result_count(ids, len(ids) if validate_base else None)
 
     return results
 
@@ -508,6 +516,12 @@ def main() -> None:
         action="store_true",
         help="Copy test IDs to commit0/data/cpp_test_ids/",
     )
+    parser.add_argument(
+        "--validate-base",
+        action="store_true",
+        help="QC-C6-005: flag a degenerate stubbed base (0 enumerable tests) "
+        "with the shared negative sentinel (parity with c/go/java/js/ts/py).",
+    )
 
     args = parser.parse_args()
 
@@ -528,6 +542,7 @@ def main() -> None:
             output_dir=args.output_dir,
             strategy=args.strategy,
             base_dir=args.base_dir,
+            validate_base=args.validate_base,
         )
         total = sum(results.values())
         print(f"\nCollected {total} test IDs across {len(results)} repos:")

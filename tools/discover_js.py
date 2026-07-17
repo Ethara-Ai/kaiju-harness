@@ -121,14 +121,11 @@ def _search_js_repos(
         url = f"{GITHUB_API}/search/repositories?{params}"
         logger.info("  Fetching page %d ...", page)
 
-        try:
-            data = _gh_request(url, token)
-        except HTTPError as e:
-            if e.code == 403:
-                logger.warning("Rate limited. Waiting 60s...")
-                time.sleep(60)
-                continue
-            raise
+        # _gh_request bounds 403/rate-limit handling internally (waits until
+        # X-RateLimit-Reset, capped at `retries`, then raises RuntimeError) — the
+        # old fixed-60s outer retry loop was dead code, removed for parity with
+        # discover_c.py / discover_go.py (QC-C8-001).
+        data = _gh_request(url, token)
 
         items = data.get("items", [])
         if not items:

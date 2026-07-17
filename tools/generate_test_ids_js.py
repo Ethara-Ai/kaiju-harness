@@ -26,6 +26,7 @@ from commit0.harness.constants_js import (
     CONTAINER_WORKDIR,
     SUPPORTED_TEST_FRAMEWORKS,
 )
+from tools._test_id_sentinel import BASE_VALIDATION_FAILED_MSG, result_count
 from tools.generate_test_ids import (
     _find_docker_image,
     _find_repo_dir,
@@ -654,7 +655,8 @@ def generate_for_js_dataset(
         if test_ids:
             out_file = save_test_ids(test_ids, repo_name, output_dir)
             logger.info("  Saved %d test IDs to %s", len(test_ids), out_file)
-            results[repo_name] = len(test_ids)
+            # QC-C6-005: V5 gate via the shared negative-sentinel contract.
+            base_count = None
             if validate_base and use_docker:
                 base_count, snippet = validate_js_base_commit_docker(
                     repo_name=repo_name,
@@ -663,17 +665,14 @@ def generate_for_js_dataset(
                     timeout=timeout,
                 )
                 if base_count == 0:
-                    logger.warning(
-                        "  BASE COMMIT VALIDATION FAILED: 0 tests at base_commit "
-                        "(stubbed). Pipeline will produce 0%% pass rate."
-                    )
+                    logger.warning("  %s", BASE_VALIDATION_FAILED_MSG)
                     logger.warning("  Last output: %s", snippet[:200])
-                    results[repo_name] = -len(test_ids)
                 else:
                     logger.info(
                         "  Base commit validation OK: %d tests at base_commit",
                         base_count,
                     )
+            results[repo_name] = result_count(test_ids, base_count)
         else:
             logger.warning("  No test IDs collected for %s", repo_name)
             results[repo_name] = 0

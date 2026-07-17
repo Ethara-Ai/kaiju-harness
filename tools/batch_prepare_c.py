@@ -88,7 +88,6 @@ def prepare_single_repo(
     org: str,
     cmake_flags: str,
     spec_url: str,
-    push: bool = False,
     scrape_spec: bool = False,
     specs_dir: Path = Path("specs"),
     dry_run: bool = False,
@@ -112,14 +111,19 @@ def prepare_single_repo(
         print("  [DRY RUN] Would clone, stub, and create dataset entry.")
         return None
 
+    # We only reach here when NOT in preview mode (the `dry_run` early-return
+    # above), so we are actually preparing — push by default (dry_run=False),
+    # matching the main preparer's opt-out policy (QC-C1-002). A batch preview
+    # is `--dry-run`; there is no batch "prepare-but-don't-push" mode (use the
+    # single-repo `tools.prepare_repo_c --dry-run` for that).
     entry = prepare_one(
         full_name,
         clone_dir,
         fork_org=org or None,
-        push=push,
-        branch="commit0",
+        dry_run=False,
+        branch="commit0_all",
         cmake_flags=cmake_flags,
-        scrape_spec_flag=scrape_spec,
+        skip_spec=not scrape_spec,
         spec_url=spec_url,
         specs_dir=specs_dir,
     )
@@ -299,11 +303,8 @@ CSV format (required columns + optional cmake_flags, spec_url):
         default="",
         help="GitHub org for forks (overridden by CSV 'Organization Name')",
     )
-    parser.add_argument(
-        "--push",
-        action="store_true",
-        help="Fork + push the commit0 branch to the org",
-    )
+    # QC-C1-002: push is DEFAULT-ON. A batch run forks+pushes every prepared
+    # repo (an un-pushed row is UNBUILDABLE); use --dry-run for a preview.
     parser.add_argument(
         "--scrape-spec",
         action="store_true",
@@ -410,7 +411,6 @@ CSV format (required columns + optional cmake_flags, spec_url):
                 org=org,
                 cmake_flags=repo_info["cmake_flags"],
                 spec_url=repo_info["spec_url"],
-                push=args.push,
                 scrape_spec=args.scrape_spec,
                 specs_dir=args.specs_dir,
                 dry_run=args.dry_run,

@@ -5,12 +5,46 @@ import re
 import subprocess
 from typing import List, Dict
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+
+# SSRF / arg-injection defense (parity with discover_{c,go,js}.py, QC-C8-001).
+# Java reaches the network via `requests` (Maven Central) and the `gh` CLI
+# (GitHub), so instead of the shared _safe_request it validates the Maven host
+# up front and validates every owner/repo interpolated into a `gh api` path.
+_ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+_MAVEN_HOSTS: frozenset[str] = frozenset({"search.maven.org"})
+_OWNER_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _validate_host(url: str, allowed_hosts: frozenset[str]) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(f"Refusing non-http(s) URL scheme: {parsed.scheme!r}")
+    if parsed.port is not None:
+        raise ValueError(f"Refusing URL with explicit port: {parsed.port!r}")
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in allowed_hosts:
+        raise ValueError(f"Refusing unexpected host: {hostname!r}")
+
+
+def _owner_repo_from_url(repo_url: str) -> str | None:
+    """Extract and validate an ``owner/repo`` from a GitHub URL.
+
+    Returns None (caller falls back to its safe default) if the string is not a
+    clean ``owner/repo`` slug, so no attacker-controlled value can be spliced
+    into a ``gh api`` path or CLI argument.
+    """
+    owner_repo = repo_url.replace("https://github.com/", "").strip("/")
+    if not _OWNER_REPO_RE.match(owner_repo):
+        logger.warning("Refusing gh call for malformed owner/repo: %r", owner_repo)
+        return None
+    return owner_repo
 
 
 @dataclass
@@ -35,6 +69,7 @@ def search_maven_central(
         "rows": rows,
         "wt": "json",
     }
+    _validate_host(MAVEN_SEARCH_URL, _MAVEN_HOSTS)
     resp = requests.get(MAVEN_SEARCH_URL, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json().get("response", {}).get("docs", [])
@@ -96,7 +131,9 @@ def _detect_build_system_from_gh(repo_url: str) -> str:
     if not repo_url:
         return "unknown"
 
-    owner_repo = repo_url.replace("https://github.com/", "")
+    owner_repo = _owner_repo_from_url(repo_url)
+    if owner_repo is None:
+        return "unknown"
     for filename, system in [("pom.xml", "maven"), ("build.gradle", "gradle"), ("build.gradle.kts", "gradle")]:
         cmd = ["gh", "api", f"repos/{owner_repo}/contents/{filename}"]
         try:
@@ -111,7 +148,9 @@ def _detect_build_system_from_gh(repo_url: str) -> str:
 def _estimate_test_count_from_gh(repo_url: str) -> int:
     if not repo_url:
         return 0
-    owner_repo = repo_url.replace("https://github.com/", "")
+    owner_repo = _owner_repo_from_url(repo_url)
+    if owner_repo is None:
+        return 0
     cmd = [
         "gh", "api",
         f"search/code?q=repo:{owner_repo}+filename:Test.java+path:src/test",
@@ -129,7 +168,9 @@ def _estimate_test_count_from_gh(repo_url: str) -> int:
 def _detect_java_version_from_gh(repo_url: str, build_system: str) -> str:
     if not repo_url or build_system not in ("maven", "gradle"):
         return ""
-    owner_repo = repo_url.replace("https://github.com/", "")
+    owner_repo = _owner_repo_from_url(repo_url)
+    if owner_repo is None:
+        return ""
     if build_system == "maven":
         cmd = ["gh", "api", f"repos/{owner_repo}/contents/pom.xml", "--jq", ".content"]
     else:

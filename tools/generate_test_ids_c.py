@@ -31,6 +31,8 @@ from pathlib import Path
 import docker
 import docker.errors
 
+from tools._test_id_sentinel import BASE_VALIDATION_FAILED_MSG, result_count
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -293,6 +295,9 @@ def main() -> None:
         entries = entries["data"]
 
     total_ids = 0
+    # QC-C6-005: machine-readable base-validation summary (repo -> sentinel
+    # count; negative == degenerate base). Mirrors JS/TS/Java's results dict.
+    _base_validation: dict[str, int] = {}
     for entry in entries:
         repo = entry.get("repo", "")
         repo_name = repo.split("/")[-1]
@@ -309,14 +314,13 @@ def main() -> None:
                 continue
             ids = _enumerate_docker(repo_name, image_tag)
             if args.validate_base:
+                # QC-C6-005: apply the shared negative-sentinel contract so a
+                # degenerate base is flagged identically across all languages.
                 count, note = validate_base_commit_docker(repo_name, image_tag)
+                _sentinel = result_count(ids, count)
                 if count == 0:
-                    logger.error(
-                        "validate-base FAILED for %s: %s -- stubs likely "
-                        "broke the build / test registration",
-                        repo_name,
-                        note,
-                    )
+                    logger.error("%s (%s)", BASE_VALIDATION_FAILED_MSG, note)
+                    _base_validation[repo_name] = _sentinel
                 else:
                     logger.info(
                         "validate-base OK for %s: stubbed base_commit "
@@ -324,6 +328,7 @@ def main() -> None:
                         repo_name,
                         count,
                     )
+                    _base_validation[repo_name] = _sentinel
         else:
             local_dir = Path("repos") / repo_name
             if not local_dir.exists():
@@ -344,6 +349,12 @@ def main() -> None:
         total_ids += len(ids)
 
     logger.info("Total test IDs written: %d", total_ids)
+    _degenerate = [r for r, c in _base_validation.items() if c < 0]
+    if _degenerate:
+        logger.error(
+            "V5 gate: %d degenerate base(s) (negative sentinel) — EXCLUDE from "
+            "scoring: %s", len(_degenerate), ", ".join(sorted(_degenerate)),
+        )
 
     if args.install:
         installed = install_c_test_ids(args.output_dir)

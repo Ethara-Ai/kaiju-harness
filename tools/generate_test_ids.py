@@ -39,6 +39,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from tools._test_id_sentinel import BASE_VALIDATION_FAILED_MSG, result_count
 from tools.python_runtime import (
     NoRuntimeError,
     TestCollectionResult,
@@ -623,6 +624,10 @@ def generate_for_dataset(
 
         upload = _should_upload(result.status, lenient)
 
+        # QC-C6-005: base-validation count for the shared negative-sentinel
+        # contract (None = --validate-base not run).
+        base_collected = None
+
         if result.status == TestCollectionStatus.OK:
             out_file = save_test_ids(result.test_ids, repo_name, output_dir)
             logger.info("  Saved %d test IDs to %s", len(result.test_ids), out_file)
@@ -634,9 +639,7 @@ def generate_for_dataset(
                     timeout=timeout,
                 )
                 if base_collected == 0:
-                    logger.warning(
-                        "  ⚠ BASE COMMIT VALIDATION FAILED: 0 tests collected at base_commit (stubbed code)."
-                    )
+                    logger.warning("  %s", BASE_VALIDATION_FAILED_MSG)
                     logger.warning("  Last output: %s", stderr[:200])
         else:
             logger.warning(
@@ -671,7 +674,9 @@ def generate_for_dataset(
 
         results[repo_name] = {
             "status": result.status.value,
-            "count": len(result.test_ids),
+            # QC-C6-005: negative sentinel when the stubbed base is degenerate
+            # (base_collected == 0), identical semantics to c/cpp/go/js/ts/java.
+            "count": result_count(result.test_ids, base_collected),
             "source": result.failing_module or "",
         }
 

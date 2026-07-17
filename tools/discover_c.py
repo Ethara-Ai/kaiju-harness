@@ -19,7 +19,7 @@ import os
 import time
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -30,14 +30,59 @@ EXISTING_C_REPOS: set[str] = set()
 
 GITHUB_API = "https://api.github.com"
 
+# SSRF defense (parity with discover_js.py::_safe_request / _gh_request, QC-C8-001).
+# Kept textually identical across discover_{c,go,js}.py so the same guarantees
+# hold for every language; discover_java.py mirrors these via _validate_host /
+# _validate_owner_repo since it goes through requests + the gh CLI instead.
+_ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+_GITHUB_HOSTS: frozenset[str] = frozenset({"api.github.com"})
 
-def _gh_request(url: str, token: str | None = None) -> dict:
+
+def _safe_request(
+    url: str,
+    headers: dict[str, str],
+    allowed_hosts: frozenset[str] = _GITHUB_HOSTS,
+    timeout: int = 30,
+) -> bytes:
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(f"Refusing non-http(s) URL scheme: {parsed.scheme!r}")
+    if parsed.port is not None:
+        raise ValueError(f"Refusing URL with explicit port: {parsed.port!r}")
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in allowed_hosts:
+        raise ValueError(f"Refusing unexpected host: {hostname!r}")
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=timeout) as resp:  # nosec B310 - scheme + host validated via _ALLOWED_SCHEMES / _GITHUB_HOSTS allowlists above; raises ValueError before reaching this call otherwise
+        return resp.read()
+
+
+def _gh_request(url: str, token: str | None = None, retries: int = 5) -> dict:
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = Request(url, headers=headers)
-    with urlopen(req, timeout=30) as resp:  # nosec B310 - URL is hardcoded https://api.github.com base (see GITHUB_API); no file:// or other-scheme reachable
-        return json.loads(resp.read())
+    for attempt in range(retries):
+        try:
+            body = _safe_request(url, headers)
+            return json.loads(body)
+        except HTTPError as e:
+            if e.code == 403:
+                reset_time = int(e.headers.get("X-RateLimit-Reset", "0"))
+                wait = max(0, reset_time - int(time.time())) + 2
+                logger.warning(
+                    "GitHub rate limited (403); waiting %ds until X-RateLimit-Reset...",
+                    wait,
+                )
+                time.sleep(wait)
+            elif e.code == 422:
+                logger.error("GitHub API validation error: %s", e.read().decode())
+                raise
+            else:
+                if attempt < retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    raise
+    raise RuntimeError(f"_gh_request: exhausted {retries} retries for {url}")
 
 
 def _search_c_repos(
@@ -66,14 +111,10 @@ def _search_c_repos(
         url = f"{GITHUB_API}/search/repositories?{params}"
         logger.info("  Fetching page %d ...", page)
 
-        try:
-            data = _gh_request(url, token)
-        except HTTPError as e:
-            if e.code == 403:
-                logger.warning("Rate limited. Waiting 60s...")
-                time.sleep(60)
-                continue
-            raise
+        # _gh_request now bounds 403/rate-limit handling internally (waits until
+        # X-RateLimit-Reset, capped at `retries`, then raises RuntimeError) — no
+        # unbounded fixed-60s retry loop here anymore (QC-C8-001).
+        data = _gh_request(url, token)
 
         items = data.get("items", [])
         if not items:

@@ -71,7 +71,7 @@ CPPSTUBBER = TOOLS_DIR / "cppstubber" / "build" / "cppstubber"
 DATA_DIR = PROJECT_ROOT / "commit0" / "data"
 TEST_IDS_DIR = DATA_DIR / "cpp_test_ids"
 CONSTANTS_CPP_FILE = PROJECT_ROOT / "commit0" / "harness" / "constants_cpp.py"
-SPECS_DIR = PROJECT_ROOT / "specs_cpp"
+SPECS_DIR = PROJECT_ROOT / "specs"
 
 DEFAULT_ORG = "Zahgon"
 

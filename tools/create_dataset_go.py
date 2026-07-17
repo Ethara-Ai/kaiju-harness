@@ -329,8 +329,6 @@ def main() -> None:
         print(yaml_content)
 
     if args.upload:
-        import os
-
         token = args.hf_token or os.environ.get("HF_TOKEN")
         if not token:
             raise EnvironmentError(
