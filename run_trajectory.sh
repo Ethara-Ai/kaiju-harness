@@ -343,20 +343,42 @@ fi
 UUID=$(python -c "import json,sys; d=json.load(open('$DATASET')); print(d[0]['id']) if (isinstance(d,list) and d and d[0].get('id')) else sys.exit(1)" 2>/dev/null) \
   || { echo "ERROR: $DATASET has no valid entries — prepare produced nothing (the repo was likely rejected by $LNG validation; see prepare output above)"; exit 1; }
 echo "== id=$UUID =="
-python - "$DATASET" <<'PY'
-import json,glob,sys
+python - "$DATASET" "$LNG" <<'PY'
+import json,glob,os,sys
 e=json.load(open(sys.argv[1]))[0]
+lng=sys.argv[2] if len(sys.argv)>2 else ""
 bc=e.get("base_compiles")
+def _uniq(paths):
+    # collapse path strings that resolve to the SAME file (a case-insensitive FS
+    # matches both the raw and normalized-key globs against one on-disk inventory)
+    seen={}
+    for p in paths:
+        try: k=os.stat(p).st_ino
+        except OSError: k=p
+        seen.setdefault(k,p)
+    return sorted(seen.values())
 # Already staged under the consolidated datasets dir?
 inv=glob.glob(f"outputs/{e['id']}/datasets/*_test_ids.bz2")
 # Not staged yet — the per-language prepare writes the inventory under
 # commit0/data/<subdir>/<repo>.bz2 and the containerized runner stages it at run
 # time (copy_inference_inputs). Check that source so this isn't a false "MISSING".
+# The inventory is stored under the NORMALIZED key (lower + dot->hyphen, per
+# kaiju.paths.normalize_test_ids_key); globbing the RAW basename silently misses
+# it on a case-sensitive FS (Linux CI), so check both raw and normalized keys.
 if not inv:
     reponame=e.get("repo","/").split("/")[-1]
-    inv=glob.glob(f"commit0/data/*/{reponame}.bz2")
+    key=reponame.lower().replace(".","-")
+    inv=_uniq(glob.glob(f"commit0/data/*/{reponame}.bz2")+glob.glob(f"commit0/data/*/{key}.bz2"))
 print("   base_compiles:", bc, "" if bc is not False else "  <-- WARNING: base does NOT compile; a 0% is infra not model")
-print("   test-id inventory:", inv or "MISSING (containerized eval will fall back to observed count)")
+if inv:
+    print("   test-id inventory:", _uniq(inv))
+elif lng in ("python","java"):
+    # python/java have no deps-free inline lister in prepare; their inventory is
+    # generated later at step [3b/5] (after build) and staged at run time. NOT a
+    # failure here — just not frozen yet at this point in the run.
+    print(f"   test-id inventory: not yet frozen — {lng} generates it at step [3b/5] (after build), then stages it at run time")
+else:
+    print("   test-id inventory: MISSING (containerized eval will fall back to observed count)")
 PY
 
 # ---- 2. bridge ----
