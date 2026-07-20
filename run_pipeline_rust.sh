@@ -49,7 +49,13 @@ STRIP_AUX_DOCS="false"
 BLIND_LINT="false"
 BLIND_TESTS="false"
 STRIP_NON_STUBS="false"
-INJECT_TEST_FILES_READONLY="true"
+# Test-SOURCE files are NOT injected into the agent prompt by default (QC): reading
+# the exact test bodies is answer-leakage (the model reverse-engineers expected
+# values) AND on test-heavy repos it ballooned the prompt to ~315k tokens -> empty
+# completions. The agent still RUNS the tests and sees SUMMARIZED results
+# (max_test_output_length), and it can NEVER edit test files (GuardedInputOutput
+# protected_paths is independent of this flag). Opt back in with --test-files-readonly.
+INJECT_TEST_FILES_READONLY="false"
 NAMES_ONLY_TESTS="false"
 PER_EDIT_COMPILE_GATE="false"
 COMPILE_GATE_MAX_RETRIES=2
@@ -131,7 +137,8 @@ Options:
   --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
   --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
   --names-only-tests         Stage 3 shows only failed test names, not tracebacks (default: full output)
-  --no-test-files-readonly   Do not inject test files as read-only reference (default: inject)
+  --no-test-files-readonly   Disable test-source read-only context (now the DEFAULT)
+  --test-files-readonly           Inject test SOURCE as read-only context (opt-in; leaky)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
   --per-edit-compile-gate    Run `cargo check` after each aider edit; revert + retry on regression (default: off)
   --compile-gate-max-retries <n>  Retries before reverting a module (default: 2)
@@ -171,6 +178,7 @@ while [[ $# -gt 0 ]]; do
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --test-files-readonly) INJECT_TEST_FILES_READONLY="true"; shift ;;
         --per-edit-compile-gate) PER_EDIT_COMPILE_GATE="true"; shift ;;
         --compile-gate-max-retries) [[ $# -lt 2 ]] && { echo "Error: --compile-gate-max-retries requires a value"; exit 1; }; COMPILE_GATE_MAX_RETRIES="$2"; shift 2 ;;
         --no-stage3-skip-if-broken) STAGE3_SKIP_IF_BROKEN="false"; shift ;;

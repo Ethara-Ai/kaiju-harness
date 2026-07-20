@@ -68,7 +68,13 @@ SKIP_TO_STAGE=""
 RESUME="false"
 NUM_SAMPLES=1
 MAX_TEST_OUTPUT_LENGTH=15000
-INJECT_TEST_FILES_READONLY="true"
+# Test-SOURCE files are NOT injected into the agent prompt by default (QC): reading
+# the exact test bodies is answer-leakage (the model reverse-engineers expected
+# values) AND on test-heavy repos it ballooned the prompt to ~315k tokens -> empty
+# completions. The agent still RUNS the tests and sees SUMMARIZED results
+# (max_test_output_length), and it can NEVER edit test files (GuardedInputOutput
+# protected_paths is independent of this flag). Opt back in with --test-files-readonly.
+INJECT_TEST_FILES_READONLY="false"
 BLIND_LINT="false"
 BLIND_TESTS="false"
 NAMES_ONLY_TESTS="false"
@@ -108,7 +114,8 @@ Options:
   --no-strict-inventory      Warn (do not FATAL) when a repo's frozen test-id inventory is missing
   --num-samples    <n>       Number of independent samples to run (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages)
-  --no-test-files-readonly       Disable read-only test file injection
+  --no-test-files-readonly       Disable test-source read-only context (now the DEFAULT)
+  --test-files-readonly           Inject test SOURCE as read-only context (opt-in; leaky)
   --blind-lint                   Hide full lint output from agent (default: false)
   --blind-tests                  Hide full test output from agent (default: false)
   --names-only-tests             Show only failed test names, not tracebacks (default: false)
@@ -141,6 +148,7 @@ while [[ $# -gt 0 ]]; do
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --test-files-readonly) INJECT_TEST_FILES_READONLY="true"; shift ;;
         --blind-lint) BLIND_LINT="true"; shift ;;
         --blind-tests) BLIND_TESTS="true"; shift ;;
         --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;

@@ -159,8 +159,9 @@ class TestTsAiderAgentsRun:
         mock_coder_cls.create.return_value = coder
         agent = self._make_agent()
 
-        # Default (inject_test_files_readonly=True): test files are read-only
-        # reference material, so the prompt warns NEVER to edit them.
+        # Opt-in read-only mode (inject_test_files_readonly=True): test files are
+        # read-only reference material, so the prompt warns NEVER to edit them.
+        # (This is no longer the default — the default is spec-driven, below.)
         with patch("builtins.open", mock_open()):
             agent.run(
                 message="msg",
@@ -168,6 +169,7 @@ class TestTsAiderAgentsRun:
                 lint_cmd="",
                 fnames=[],
                 log_dir=Path("/tmp/test_logs_ts"),
+                inject_test_files_readonly=True,
             )
 
         assert "NEVER edit test files" in coder.gpt_prompts.main_system

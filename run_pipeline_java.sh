@@ -62,7 +62,13 @@ RESUME="false"
 NUM_SAMPLES=1
 MAX_PARALLEL_REPOS=1
 MAX_TEST_OUTPUT_LENGTH=15000
-INJECT_TEST_FILES_READONLY="true"
+# Test-SOURCE files are NOT injected into the agent prompt by default (QC): reading
+# the exact test bodies is answer-leakage (the model reverse-engineers expected
+# values) AND on test-heavy repos it ballooned the prompt to ~315k tokens -> empty
+# completions. The agent still RUNS the tests and sees SUMMARIZED results
+# (max_test_output_length), and it can NEVER edit test files (GuardedInputOutput
+# protected_paths is independent of this flag). Opt back in with --test-files-readonly.
+INJECT_TEST_FILES_READONLY="false"
 BLIND_LINT="false"
 BLIND_TESTS="false"
 NAMES_ONLY_TESTS="false"
@@ -108,7 +114,8 @@ Options:
   --max-test-output-length <n>  Max test output length (default: 15000)
   --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
   --max-parallel-repos <n>     Max repos to run in parallel (default: 1, >1 enables batch mode)
-  --no-test-files-readonly        Disable test file injection as read-only context
+  --no-test-files-readonly        Disable test-source read-only context (now the DEFAULT)
+  --test-files-readonly           Inject test SOURCE as read-only context (opt-in; leaky)
   --blind-lint                    Stage 2: show only lint count, not details
   --blind-tests                   Stage 3: show only test summary line, not tracebacks
   --names-only-tests              Stage 3: show only failed test names, not assertion text
@@ -155,6 +162,7 @@ while [[ $# -gt 0 ]]; do
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --test-files-readonly) INJECT_TEST_FILES_READONLY="true"; shift ;;
         --blind-lint)             BLIND_LINT="true"; shift ;;
         --blind-tests)            BLIND_TESTS="true"; shift ;;
         --names-only-tests)       NAMES_ONLY_TESTS="true"; shift ;;

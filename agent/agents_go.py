@@ -336,7 +336,7 @@ class GoAgents(ABC):
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
         test_files_readonly: Optional[list[str]] = None,
-        inject_test_files_readonly: bool = True,
+        inject_test_files_readonly: bool = False,
         # Fix 1 audit: extra read-scope for aider's "Add file to chat?" prompts.
         # `fnames` restricts EDITS to the target stub; this param widens the READ
         # scope so aider can pull sibling source files (util.rs, header.h, .d.ts,
@@ -448,7 +448,7 @@ class AiderGoAgents(GoAgents):
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
         test_files_readonly: Optional[list[str]] = None,
-        inject_test_files_readonly: bool = True,
+        inject_test_files_readonly: bool = False,
         # Fix 1 audit: extra read-scope for aider's "Add file to chat?" prompts.
         # `fnames` restricts EDITS to the target stub; this param widens the READ
         # scope so aider can pull sibling source files (util.rs, header.h, .d.ts,
@@ -693,14 +693,20 @@ class AiderGoAgents(GoAgents):
         # run_with_recovery, which recognizes TransientLLMError as transient and
         # re-runs the whole module with backoff. Only fires on the transient
         # signal list — a genuine model/edit failure is NOT retried this way.
-        from agent.agents import raise_if_transient_llm_error
+        from agent.agents import raise_if_transient_llm_error, transient_scan_lines_from_chat_history
 
         # Scan ALL streams aider may record a swallowed transient in — aider.log
         # AND the chat/llm history. A MidStreamFallbackError lands in
         # .aider.chat.history.md but NOT aider.log, so reading only log_file
         # missed it -> no retry -> silently incomplete module.
         session_text = ""
-        for _p in (log_file, chat_history_file, log_dir / "llm_history.txt"):
+        # QC: do NOT scan llm_history.txt — it is the PROMPT (source/test code +
+        # spec), not aider error output. Any module whose code mentions
+        # "timed out"/"timeout" (HTTP, middleware, retries — very common) was
+        # false-matched as a transient network error -> a 900s retry loop with
+        # ZERO progress. Genuine swallowed transients land in aider.log /
+        # .aider.chat.history.md (MidStreamFallbackError), which we still scan.
+        for _p in (log_file, chat_history_file):
             try:
                 # Read ONLY the bytes appended during THIS attempt (from the
                 # offset captured before the run) so a prior attempt's persisted
@@ -708,7 +714,8 @@ class AiderGoAgents(GoAgents):
                 _start = _scan_start_offsets.get(_p, 0)
                 with open(_p, "r", errors="replace") as _fh:
                     _fh.seek(_start)
-                    session_text += "\n" + _fh.read()
+                    _chunk = _fh.read()
+                    session_text += "\n" + (transient_scan_lines_from_chat_history(_chunk) if _p == chat_history_file else _chunk)
             except OSError:
                 continue
         raise_if_transient_llm_error(

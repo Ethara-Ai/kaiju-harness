@@ -143,11 +143,24 @@ def apply_llm_resilience(model: "Model") -> None:
     logger.info("LLM resilience: num_retries=%s timeout=%ss (extra_params)", num_retries, timeout_s)
 
 
+def transient_scan_lines_from_chat_history(chunk: str) -> str:
+    """Keep only aider's OWN output (`> ` blockquote lines) from a chat-history
+    chunk. The chat history ALSO contains the model's response (its SEARCH/REPLACE
+    code + prose); scanning that for transient phrases false-matches any module
+    whose CODE deals with timeouts (HTTP/middleware/retries). aider prints its own
+    errors — including MidStreamFallbackError — as `> ` lines, so those are kept."""
+    return "\n".join(
+        ln for ln in chunk.splitlines() if ln.lstrip().startswith(">")
+    )
+
+
 def raise_if_transient_llm_error(text: str, context: str = "") -> None:
     """(c) backstop: if aider SWALLOWED a transient LLM error (printed it into the
     session output instead of re-raising), raise TransientLLMError so
     run_with_recovery re-runs the module. Only fires on the transient signal list
-    — a genuine model/edit failure is NOT retried this way."""
+    — a genuine model/edit failure is NOT retried this way. Callers must pass
+    aider's OWN output (aider.log + chat-history `> ` lines), NOT the prompt or the
+    model's response, or code that merely mentions 'timeout' would mis-fire."""
     if not text:
         return
     low = text.lower()
@@ -904,7 +917,7 @@ class AiderAgents(Agents):
         max_test_output_length: int = 0,
         spec_summary_max_tokens: int = 4000,
         test_files_readonly: Optional[list[str]] = None,
-        inject_test_files_readonly: bool = True,
+        inject_test_files_readonly: bool = False,
         # Fix 1 audit: extra read-scope for aider's "Add file to chat?" prompts.
         # `fnames` restricts EDITS to the target stub; this param widens the READ
         # scope so aider can pull sibling source files (util.rs, header.h, .d.ts,
@@ -1144,9 +1157,16 @@ class AiderAgents(Agents):
         # read") lands in .aider.chat.history.md but NOT aider.log. Placed OUTSIDE
         # the try/finally so it propagates to the recovery wrapper.
         _session_text = ""
-        for _p in (log_file, chat_history_file, log_dir / "llm_history.txt"):
+        # QC: do NOT scan llm_history.txt — it is the PROMPT (source/test code +
+        # spec), not aider error output. Any module whose code mentions
+        # "timed out"/"timeout" (HTTP, middleware, retries — very common) was
+        # false-matched as a transient network error -> a 900s retry loop with
+        # ZERO progress. Genuine swallowed transients land in aider.log /
+        # .aider.chat.history.md (MidStreamFallbackError), which we still scan.
+        for _p in (log_file, chat_history_file):
             try:
-                _session_text += "\n" + Path(_p).read_text(errors="replace")
+                _chunk = Path(_p).read_text(errors="replace")
+                _session_text += "\n" + (transient_scan_lines_from_chat_history(_chunk) if _p == chat_history_file else _chunk)
             except OSError:
                 continue
         raise_if_transient_llm_error(_session_text, context=f"module {fnames}")

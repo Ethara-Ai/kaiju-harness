@@ -62,7 +62,13 @@ MAX_PARALLEL_REPOS=1
 BLIND_LINT="false"
 BLIND_TESTS="false"
 NAMES_ONLY_TESTS="false"
-INJECT_TEST_FILES_READONLY="true"
+# Test-SOURCE files are NOT injected into the agent prompt by default (QC): reading
+# the exact test bodies is answer-leakage (the model reverse-engineers expected
+# values) AND on test-heavy repos it ballooned the prompt to ~315k tokens -> empty
+# completions. The agent still RUNS the tests and sees SUMMARIZED results
+# (max_test_output_length), and it can NEVER edit test files (GuardedInputOutput
+# protected_paths is independent of this flag). Opt back in with --test-files-readonly.
+INJECT_TEST_FILES_READONLY="false"
 STRIP_NON_STUBS="false"
 
 print_usage() {
@@ -102,7 +108,8 @@ Options:
   --blind-lint               Stage 2 sees only "lint failed: N issues" (default: full output)
   --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
   --names-only-tests         Stage 3 sees only failed test node IDs + count (default: full output)
-  --no-test-files-readonly   Remove test source files from read-only agent context (default: injected)
+  --no-test-files-readonly   Disable test-source read-only context (now the DEFAULT)
+  --test-files-readonly           Inject test SOURCE as read-only context (opt-in; leaky)
   -h, --help                 Show this help
   --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
 USAGE
@@ -132,6 +139,7 @@ while [[ $# -gt 0 ]]; do
         --blind-tests) BLIND_TESTS="true"; shift ;;
         --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --test-files-readonly) INJECT_TEST_FILES_READONLY="true"; shift ;;
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         --max-parallel-repos) [[ $# -lt 2 ]] && { echo "Error: --max-parallel-repos requires a value"; exit 1; }; MAX_PARALLEL_REPOS="$2"; shift 2 ;;

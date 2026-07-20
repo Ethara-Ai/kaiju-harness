@@ -49,7 +49,7 @@ class JavaAgentConfig:
     blind_tests: bool = False
     names_only_tests: bool = False
     strip_non_stubs: bool = False
-    inject_test_files_readonly: bool = True
+    inject_test_files_readonly: bool = False  # QC: no test-source leakage by default
 
     # QC-C5-001/C5-002: canonical accessor parity. Every other language reuses
     # agent.class_types.AgentConfig, whose model field is `model_name`; Java is

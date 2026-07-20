@@ -77,7 +77,13 @@ BLIND_LINT="false"
 BLIND_TESTS="false"
 NAMES_ONLY_TESTS="false"
 STRIP_NON_STUBS="false"
-INJECT_TEST_FILES_READONLY="true"
+# Test-SOURCE files are NOT injected into the agent prompt by default (QC): reading
+# the exact test bodies is answer-leakage (the model reverse-engineers expected
+# values) AND on test-heavy repos it ballooned the prompt to ~315k tokens -> empty
+# completions. The agent still RUNS the tests and sees SUMMARIZED results
+# (max_test_output_length), and it can NEVER edit test files (GuardedInputOutput
+# protected_paths is independent of this flag). Opt back in with --test-files-readonly.
+INJECT_TEST_FILES_READONLY="false"
 
 print_usage() {
     cat <<'USAGE'
@@ -118,7 +124,8 @@ Options:
   --blind-tests              Stage 3 sees only summary line, no per-test failures (default: full output)
   --names-only-tests         Stage 3 sees only failed test node IDs + count (default: full output)
   --strip-non-stubs          Hide non-stubbed source files from agent context (default: visible)
-  --no-test-files-readonly   Remove test source files from read-only agent context (default: injected)
+  --no-test-files-readonly   Disable test-source read-only context (now the DEFAULT)
+  --test-files-readonly           Inject test SOURCE as read-only context (opt-in; leaky)
   -h, --help                 Show this help
   --use-claude-code        Route anthropic/* models through the local Claude Code OAuth bridge
 USAGE
@@ -151,6 +158,7 @@ while [[ $# -gt 0 ]]; do
         --names-only-tests) NAMES_ONLY_TESTS="true"; shift ;;
         --strip-non-stubs) STRIP_NON_STUBS="true"; shift ;;
         --no-test-files-readonly) INJECT_TEST_FILES_READONLY="false"; shift ;;
+        --test-files-readonly) INJECT_TEST_FILES_READONLY="true"; shift ;;
         --resume)      RESUME="true"; shift ;;
         -h|--help)     print_usage ;;
         --use-claude-code) USE_CLAUDE_CODE="true"; shift ;;

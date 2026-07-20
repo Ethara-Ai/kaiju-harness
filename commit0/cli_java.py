@@ -338,7 +338,22 @@ def agent(
     log_dir: str = typer.Option("logs/agent", help="Log directory"),
     override_previous: bool = typer.Option(False, help="Reset to base commit"),
     use_unit_tests_info: bool = typer.Option(True, help="Include unit test context in prompts"),
+    inject_test_files_readonly: bool = typer.Option(
+        False,
+        "--inject-test-files-readonly/--no-inject-test-files-readonly",
+        help="Inject test SOURCE files as read-only context. Default OFF: reading "
+        "the test bodies is answer-leakage and blows the prompt; anti-cheat "
+        "protection of test files is unaffected. run_pipeline_java.sh passes "
+        "--no-inject-test-files-readonly by default.",
+    ),
     use_spec_info: bool = typer.Option(False, help="Include spec/README info in prompts"),
+    # Ablation flags (parity with run_pipeline_java.sh, which passes these). They
+    # exist on JavaAgentConfig but were not exposed on the CLI, so the pipeline
+    # errored on --blind-tests/--names-only-tests/--strip-non-stubs when enabled.
+    blind_lint: bool = typer.Option(False, help="Ablation: agent sees only lint summary, not per-error detail"),
+    blind_tests: bool = typer.Option(False, help="Ablation: agent sees only the test summary line, not per-test failures"),
+    names_only_tests: bool = typer.Option(False, help="Ablation: agent sees only failed test node IDs + counts, no tracebacks"),
+    strip_non_stubs: bool = typer.Option(False, help="Ablation: strip non-stub source from context"),
     compile_check: bool = typer.Option(True, help="Run compile check before submitting"),
     cache_prompts: bool = typer.Option(True, help="Enable prompt caching"),
     max_test_output_length: int = typer.Option(15000, help="Max test output length in chars"),
@@ -372,7 +387,12 @@ def agent(
         run_tests=run_tests,
         run_entire_dir_lint=run_entire_dir_lint,
         use_unit_tests_info=use_unit_tests_info,
+        inject_test_files_readonly=inject_test_files_readonly,
         use_spec_info=use_spec_info,
+        blind_lint=blind_lint,
+        blind_tests=blind_tests,
+        names_only_tests=names_only_tests,
+        strip_non_stubs=strip_non_stubs,
         compile_check=compile_check,
         cache_prompts=cache_prompts,
         max_test_output_length=max_test_output_length,

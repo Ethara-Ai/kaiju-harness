@@ -41,7 +41,7 @@ class AgentConfig:
     blind_tests: bool = False  # If True, Stage 3 sees only summary line not per-test failures
     names_only_tests: bool = False  # If True, Stage 3 sees only failed test node IDs + counts (no tracebacks)
     strip_non_stubs: bool = False  # If True, hide non-stubbed source from agent context
-    inject_test_files_readonly: bool = True  # If False, test source bodies are NOT injected as aider read-only context; removes oracle access to test assertions during generation
+    inject_test_files_readonly: bool = False  # QC default OFF: test source bodies are NOT injected as aider read-only context (removes oracle access to test assertions + avoids prompt bloat). Anti-cheat protection of test files is independent of this. Opt in via the pipeline --test-files-readonly flag.
 
     # --- Per-edit compile gate (Rust-specific; opt-in via --per-edit-compile-gate)
     # When True, agent.run() is wrapped: after each aider edit we run `cargo check`,
