@@ -744,9 +744,16 @@ def main(argv=None) -> int:
             # killed mid-run. Just report what landed.
             n_runs = len(list((host_out / "runs").rglob("pipeline_results.json"))) if (host_out / "runs").is_dir() else 0
             n_atif = len(list((Path("Harbor_Data") / "Trajectory").rglob("trajectory.json"))) if (Path("Harbor_Data") / "Trajectory").is_dir() else 0
+            # The pipeline now writes each run's ATIF trajectory to a per-experiment
+            # Harbor_Data dir under outputs/<uuid>/ (self-contained, travels with the
+            # run) and mirrors it to the shared top-level Harbor_Data. Report both.
+            _perid_harbor = host_out / "Harbor_Data" / "Trajectory"
+            n_atif_perid = len(list(_perid_harbor.rglob("trajectory.json"))) if _perid_harbor.is_dir() else 0
             logger.info("Outputs host-mounted — persisted live to %s (%d result file(s)); "
-                        "%d ATIF trajectory file(s) in Harbor_Data/Trajectory", host_out.resolve(), n_runs, n_atif)
-            if n_atif == 0:
+                        "%d ATIF trajectory file(s) in %s/Harbor_Data/Trajectory "
+                        "(%d in the shared top-level Harbor_Data/Trajectory)",
+                        host_out.resolve(), n_runs, n_atif_perid, host_out.name, n_atif)
+            if n_atif_perid == 0 and n_atif == 0:
                 logger.warning("No ATIF trajectory produced (Harbor_Data/Trajectory empty) — check the ATIF step")
         else:
             # Fallback (mount unavailable): copy outputs/<dataset-id>/ back at the end.

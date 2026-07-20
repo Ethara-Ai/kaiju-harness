@@ -31,6 +31,7 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/_load_env_whitelist.sh
 source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
+source "${BASE_DIR}/scripts/_pipeline_failure.sh"
 REPO_BASE_JS="${BASE_DIR}/repos_js"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
@@ -1448,6 +1449,33 @@ stage_1_draft_js() {
     cost_source="${_co#* }"
     log "  Stage 1 cost: \$${cost} (source: ${cost_source})"
 
+    if _agent_crashed_pre_llm "$stage_log_dir" "$rc"; then
+        log "  Stage 1 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under ${stage_log_dir}). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Draft (no feedback)" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost "$cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage1 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd: $cost,
+                cost_source: $cost_source,
+                returncode: $rc,
+                runtime: 0,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                eval_status: "not_run",
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
+
     run_evaluate_js "$BRANCH_NAME" "stage1"
     local eval_time="$EVAL_ELAPSED"
 
@@ -1506,6 +1534,35 @@ stage_2_lint_js() {
     total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental") || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
     log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost}) (source: ${cost_source})"
+
+    if _agent_crashed_pre_llm "$stage_log_dir" "$rc"; then
+        log "  Stage 2 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under ${stage_log_dir}). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Lint refine" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost_inc "$s2_incremental" \
+            --argjson cost_cum "$total_cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage2 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd_incremental: $cost_inc,
+                cost_usd_cumulative: $cost_cum,
+                cost_source: $cost_source,
+                returncode: $rc,
+                runtime: 0,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                eval_status: "not_run",
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
 
     run_evaluate_js "$BRANCH_NAME" "stage2"
     local eval_time="$EVAL_ELAPSED"
@@ -1573,6 +1630,35 @@ stage_3_test_js() {
     total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental") || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
     log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost}) (source: ${cost_source})"
+
+    if _agent_crashed_pre_llm "$stage_log_dir" "$rc"; then
+        log "  Stage 3 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under ${stage_log_dir}). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Test refine" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost_inc "$s3_incremental" \
+            --argjson cost_cum "$total_cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage3 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd_incremental: $cost_inc,
+                cost_usd_cumulative: $cost_cum,
+                cost_source: $cost_source,
+                returncode: $rc,
+                runtime: 0,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                eval_status: "not_run",
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
 
     run_evaluate_js "$BRANCH_NAME" "stage3"
     local eval_time="$EVAL_ELAPSED"
@@ -1862,6 +1948,36 @@ run_single_sample() {
     log "run_${sample_idx} results saved to: ${PIPELINE_LOG}"
 
     SAMPLE_RESULT_FILES+=("$PIPELINE_LOG")
+    if [[ -x "${BASE_DIR}/.venv/bin/python" ]]; then
+        # ATIF conversion (was MISSING for JS — runs produced no Harbor/trajectory
+        # data at all). Output goes to a PER-EXPERIMENT Harbor_Data dir so each
+        # run's converted trajectory is self-contained under outputs/<uuid>/ (next
+        # to runs/, configs/, datasets/); non-consolidated layouts fall back to the
+        # shared top-level path.
+        if is_consolidated; then
+            _HARBOR_TRAJ_OUT="$(experiment_dir "$DATASET_UUID")/Harbor_Data/Trajectory"
+        else
+            _HARBOR_TRAJ_OUT="${BASE_DIR}/Harbor_Data/Trajectory"
+        fi
+        "${BASE_DIR}/.venv/bin/python" "${BASE_DIR}/scripts/commit0_to_atif_v2.py" \
+            "$LOG_BASE" \
+            "$_HARBOR_TRAJ_OUT" \
+            --kaiju-mode \
+            --pipeline "$PIPELINE_LOG" \
+            --task-name "$DATASET_DIR_NAME" \
+            && log "ATIF conversion complete for run_${sample_idx} -> ${_HARBOR_TRAJ_OUT}" \
+            || log "[WARN] ATIF conversion failed for run_${sample_idx}"
+        # Mirror into the shared top-level Harbor_Data/Trajectory (accumulates
+        # across runs; kept for existing consumers — run_pipeline_containerized
+        # reporting + fallback copy-back read this path).
+        if is_consolidated && [[ -d "$_HARBOR_TRAJ_OUT" ]]; then
+            mkdir -p "${BASE_DIR}/Harbor_Data/Trajectory"
+            cp -R "$_HARBOR_TRAJ_OUT/." "${BASE_DIR}/Harbor_Data/Trajectory/" 2>/dev/null \
+                && log "Mirrored ATIF trajectory -> ${BASE_DIR}/Harbor_Data/Trajectory" \
+                || log "[WARN] could not mirror ATIF trajectory to top-level Harbor_Data"
+        fi
+    fi
+    [[ -z "$pipeline_error" ]] || return 1
 }
 
 print_pass_at_k_summary() {
@@ -1961,3 +2077,5 @@ main_js() {
 
 cd "$BASE_DIR"
 main_js
+
+[[ "$PIPELINE_SUCCESS" == "true" ]] || exit 1

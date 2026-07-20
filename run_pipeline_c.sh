@@ -29,6 +29,7 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/_load_env_whitelist.sh
 source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
+source "${BASE_DIR}/scripts/_pipeline_failure.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 
 REPO_BASE="${BASE_DIR}/repos"
@@ -1303,6 +1304,34 @@ stage_1_draft() {
     cost="${_co%% *}"; cost_source="${_co#* }"
     log "  Stage 1 cost: \$${cost} (source: ${cost_source})"
 
+    if _agent_crashed_pre_llm "$LOG_BASE/stage1_draft" "$rc"; then
+        log "  Stage 1 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under $LOG_BASE/stage1_draft). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Draft (no feedback)" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost "$cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage1 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd: $cost,
+                cost_source: $cost_source,
+                returncode: $rc,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                runtime: 0,
+                mean_compile_errors: 0,
+                eval_status: "not_run",
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
+
     run_evaluate "stage1"
     local eval_time="$EVAL_ELAPSED"
     log "  Stage 1 results: ${EVAL_NUM_PASSED}/${EVAL_NUM_TESTS} ($(format_pct "$EVAL_PASS_RATE"))"
@@ -1352,6 +1381,36 @@ stage_2_lint_refine() {
     local total_cost
     total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental")
     log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
+
+    if _agent_crashed_pre_llm "$LOG_BASE/stage2_lint" "$rc"; then
+        log "  Stage 2 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under $LOG_BASE/stage2_lint). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Lint refine (clang-tidy+cppcheck)" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost_inc "$s2_incremental" \
+            --argjson cost_cum "$total_cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage2 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd_incremental: $cost_inc,
+                cost_usd_cumulative: $cost_cum,
+                cost_source: $cost_source,
+                returncode: $rc,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                runtime: 0,
+                mean_compile_errors: 0,
+                eval_status: "not_run",
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
 
     run_evaluate "stage2"
     local eval_time="$EVAL_ELAPSED"
@@ -1406,6 +1465,36 @@ stage_3_test_refine() {
     local total_cost
     total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental")
     log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
+
+    if _agent_crashed_pre_llm "$LOG_BASE/stage3_test" "$rc"; then
+        log "  Stage 3 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under $LOG_BASE/stage3_test). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Test refine (CTest feedback)" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost_inc "$s3_incremental" \
+            --argjson cost_cum "$total_cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage3 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd_incremental: $cost_inc,
+                cost_usd_cumulative: $cost_cum,
+                cost_source: $cost_source,
+                returncode: $rc,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                runtime: 0,
+                mean_compile_errors: 0,
+                eval_status: "not_run",
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
 
     run_evaluate "stage3"
     local eval_time="$EVAL_ELAPSED"
@@ -1545,18 +1634,38 @@ run_single_sample() {
     cleanup
     log "Pipeline complete. Results: $PIPELINE_LOG"
     if [[ -x "${BASE_DIR}/.venv/bin/python" ]]; then
+        # ATIF output goes to a PER-EXPERIMENT Harbor_Data dir so each run's
+        # converted trajectory is self-contained under outputs/<uuid>/ (next to
+        # runs/, configs/, datasets/). Non-consolidated layouts have no per-uuid
+        # experiment dir, so fall back to the shared top-level path.
+        if is_consolidated; then
+            _HARBOR_TRAJ_OUT="$(experiment_dir "$DATASET_UUID")/Harbor_Data/Trajectory"
+        else
+            _HARBOR_TRAJ_OUT="${BASE_DIR}/Harbor_Data/Trajectory"
+        fi
         "${BASE_DIR}/.venv/bin/python" "${BASE_DIR}/scripts/commit0_to_atif_v2.py" \
             "$LOG_BASE" \
-            "${BASE_DIR}/Harbor_Data/Trajectory" \
+            "$_HARBOR_TRAJ_OUT" \
             --kaiju-mode \
             --pipeline "$PIPELINE_LOG" \
             --task-name "$DATASET_DIR_NAME" \
-            && log "ATIF conversion complete" \
+            && log "ATIF conversion complete -> ${_HARBOR_TRAJ_OUT}" \
             || log "[WARN] ATIF conversion failed"
+        # Mirror into the shared top-level Harbor_Data/Trajectory (accumulates
+        # across runs; kept for existing consumers — run_pipeline_containerized
+        # reporting + fallback copy-back read this path).
+        if is_consolidated && [[ -d "$_HARBOR_TRAJ_OUT" ]]; then
+            mkdir -p "${BASE_DIR}/Harbor_Data/Trajectory"
+            cp -R "$_HARBOR_TRAJ_OUT/." "${BASE_DIR}/Harbor_Data/Trajectory/" 2>/dev/null \
+                && log "Mirrored ATIF trajectory -> ${BASE_DIR}/Harbor_Data/Trajectory" \
+                || log "[WARN] could not mirror ATIF trajectory to top-level Harbor_Data"
+        fi
     fi
+    [[ -z "$pipeline_error" ]] || return 1
 }
 
 main() {
+    local any_failed=0
     mkdir -p "${BASE_DIR}/logs"
     # 1-indexed (mirrors run_pipeline_go.sh) so the first sample lands in run_1.
     for sample_idx in $(seq 1 "$NUM_SAMPLES"); do
@@ -1568,8 +1677,13 @@ main() {
         trap 'exit 130' INT
         trap 'exit 143' TERM
         log "===== Sample ${sample_idx} / ${NUM_SAMPLES} ====="
-        run_single_sample "$sample_idx"
+        if ! run_single_sample "$sample_idx"; then
+            any_failed=1
+            log "WARNING: sample ${sample_idx} failed — continuing with remaining samples."
+        fi
     done
+    return $any_failed
 }
 
 main "$@"
+[[ $? -eq 0 ]] || exit 1

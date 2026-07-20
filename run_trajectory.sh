@@ -625,7 +625,9 @@ if needs_retry:
 else:
     print("   needs_retry: none (all modules completed)")
 print("   turns.jsonl files:", len(glob.glob(f"outputs/{uuid}/runs/*/agent/run_1/**/turns.jsonl", recursive=True)))
-print("   ATIF trajectory files:", len(glob.glob(f"Harbor_Data/Trajectory/**/*{split}*/trajectory.json", recursive=True)))
+_atif_perid = len(glob.glob(f"outputs/{uuid}/Harbor_Data/Trajectory/**/trajectory.json", recursive=True))
+_atif_shared = len(glob.glob(f"Harbor_Data/Trajectory/**/*{split}*/trajectory.json", recursive=True))
+print(f"   ATIF trajectory files: {_atif_perid} in outputs/{uuid}/Harbor_Data/Trajectory ({_atif_shared} in shared top-level Harbor_Data)")
 PY
 if [[ "${REUSE_BRIDGE:-0}" == "1" ]]; then
   echo "== done. outputs/$UUID  (bridge LEFT RUNNING per --reuse-bridge; stop manually with 'bash scripts/claude_code_bridge.sh stop' or 'pkill -f openai_codex') =="

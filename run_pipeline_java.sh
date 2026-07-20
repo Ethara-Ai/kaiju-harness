@@ -27,6 +27,7 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/_load_env_whitelist.sh
 source "${BASE_DIR}/scripts/_load_env_whitelist.sh"
 source "${BASE_DIR}/scripts/_outputs_layout.sh"
+source "${BASE_DIR}/scripts/_pipeline_failure.sh"
 "${BASE_DIR}/scripts/generate_aider_config.sh"
 REPO_BASE="${BASE_DIR}/repos/java"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
@@ -512,6 +513,28 @@ get_mtime() {
         || echo "0"
 }
 
+# An INTENTIONAL rate-limit pause is not a hang (parity with go/rust/ts). While
+# the agent waits on the subscription cap to reset it writes no aider.log lines,
+# so the raw inactivity watchdog would misread the pause as a stuck agent and
+# kill it — exactly the kill/limbo/auto-resume loop observed on Java stage-3.
+# agent/claude_code/recovery.py drops a `.rate_limit_paused` marker (re-touched
+# each heartbeat) in the module log dir; run_agent_java passes _kaiju_log_dir so
+# it lands here. Returns 0 (true) iff a FRESH such marker (mtime within $2s of
+# now) exists under $1. The absolute wall-time cap still bounds an unbounded pause.
+_pause_marker_fresh() {
+    local search_dir="$1"
+    local fresh_within="$2"
+    local now mt newest_mt=0
+    now=$(date +%s)
+    while IFS= read -r marker; do
+        mt=$(get_mtime "$marker")
+        if [[ "$mt" -gt "$newest_mt" ]]; then newest_mt="$mt"; fi
+    done < <(find "$search_dir" -name ".rate_limit_paused" 2>/dev/null)
+    [[ "$newest_mt" -gt 0 ]] || return 1
+    local age=$(( now - newest_mt ))
+    [[ "$age" -lt "$fresh_within" ]]
+}
+
 get_newest_aider_log() {
     local search_dir="$1"
     local newest=""
@@ -726,6 +749,15 @@ watchdog_run() {
 
         # Inactivity timeout
         if [[ "$latest_mtime" -gt 0 ]] && [[ "$agent_active" == "false" ]]; then
+            # An intentional rate-limit pause is NOT a hang. If recovery left a
+            # fresh `.rate_limit_paused` marker (re-touched each heartbeat),
+            # suppress the inactivity kill — the agent is waiting on the provider,
+            # not stuck. The absolute wall-time cap (checked above) still bounds an
+            # unbounded pause, so this cannot hang forever.
+            if _pause_marker_fresh "$log_dir" "$(( inactivity_limit * 2 ))"; then
+                log "  WATCHDOG: log idle ${idle}s but a fresh rate-limit pause marker is present — intentionally paused, not stuck. Continuing."
+                continue
+            fi
             log "  WATCHDOG: No log activity for ${idle}s (limit: ${inactivity_limit}s). Agent appears stuck."
             log "  WATCHDOG: Killing agent (PID ${agent_pid})."
             kill_tree "$agent_pid" TERM
@@ -844,6 +876,12 @@ run_java_agent_loop() {
         return $rc
     fi
 
+    # Track worst rc across per-repo agent invocations so a single-repo crash
+    # propagates upward. Before this fix, rc was logged and thrown away: the loop
+    # returned 0 on `read` EOF, the caller reported "returncode=0", and doomed
+    # downstream evaluate produced garbage stats + false 'succeeded' at end of
+    # pipeline. See BUG 2a in the incident review.
+    local worst_rc=0
     while IFS= read -r repo; do
         [[ -z "$repo" ]] && continue
         log "  Running agent for repo: ${repo}"
@@ -853,8 +891,10 @@ run_java_agent_loop() {
         local repo_rc=$?
         if [[ $repo_rc -ne 0 ]]; then
             log "  Agent for ${repo} exited with rc=${repo_rc}"
+            (( repo_rc > worst_rc )) && worst_rc=$repo_rc
         fi
     done <<< "$REPOS"
+    return $worst_rc
 }
 
 # run_agent_java: wraps run_java_agent_loop with watchdog
@@ -1337,6 +1377,32 @@ stage_1_draft() {
     cost="${_co%% *}"; cost_source="${_co#* }"
     log "  Stage 1 cost: \$${cost} (source: ${cost_source})"
 
+    if _agent_crashed_pre_llm "$stage_log_dir" "$rc"; then
+        log "  Stage 1 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under ${stage_log_dir}). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Draft (no feedback)" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost "$cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage1 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd: $cost,
+                cost_source: $cost_source,
+                returncode: $rc,
+                runtime: 0,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
+
     run_evaluate_java "$BRANCH_NAME" "stage1"
     local eval_time="$EVAL_ELAPSED"
 
@@ -1398,6 +1464,34 @@ stage_2_lint_refine() {
     total_cost=$(bc_json "scale=4; $s1_cost + $s2_incremental") || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
     log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
+
+    if _agent_crashed_pre_llm "$stage_log_dir" "$rc"; then
+        log "  Stage 2 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under ${stage_log_dir}). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Lint refine" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost_inc "$s2_incremental" \
+            --argjson cost_cum "$total_cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage2 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd_incremental: $cost_inc,
+                cost_usd_cumulative: $cost_cum,
+                cost_source: $cost_source,
+                returncode: $rc,
+                runtime: 0,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
 
     run_evaluate_java "$BRANCH_NAME" "stage2"
     local eval_time="$EVAL_ELAPSED"
@@ -1472,6 +1566,34 @@ stage_3_test_refine() {
     total_cost=$(bc_json "scale=4; $s2_cumulative + $s3_incremental") || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
     log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost}, source: ${cost_source})"
+
+    if _agent_crashed_pre_llm "$stage_log_dir" "$rc"; then
+        log "  Stage 3 AGENT CRASHED PRE-LLM (rc=${rc}, no artifacts under ${stage_log_dir}). Skipping evaluate; see agent_run.log."
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+            --arg name "Test refine" \
+            --argjson elapsed "$elapsed" \
+            --argjson cost_inc "$s3_incremental" \
+            --argjson cost_cum "$total_cost" \
+            --arg cost_source "$cost_source" \
+            --argjson rc "$rc" \
+            '.stage3 = {
+                name: $name,
+                elapsed_s: $elapsed,
+                eval_time_s: 0,
+                cost_usd_incremental: $cost_inc,
+                cost_usd_cumulative: $cost_cum,
+                cost_source: $cost_source,
+                returncode: $rc,
+                runtime: 0,
+                num_passed: 0,
+                num_tests: 0,
+                pass_rate: 0,
+                sample_failed: true,
+                failure_reason: "agent_crashed_pre_llm"
+            }')
+        save_results
+        return 1
+    fi
 
     run_evaluate_java "$BRANCH_NAME" "stage3"
     local eval_time="$EVAL_ELAPSED"
@@ -1741,15 +1863,36 @@ run_single_sample() {
 
     SAMPLE_RESULT_FILES+=("$PIPELINE_LOG")
     if [[ -x "${BASE_DIR}/.venv/bin/python" ]]; then
+        # ATIF output goes to a PER-EXPERIMENT Harbor_Data dir so each run's
+        # converted trajectory is self-contained under outputs/<uuid>/ (next to
+        # runs/, configs/, datasets/). Non-consolidated layouts have no per-uuid
+        # experiment dir, so fall back to the shared top-level path.
+        if is_consolidated; then
+            _HARBOR_TRAJ_OUT="$(experiment_dir "$DATASET_UUID")/Harbor_Data/Trajectory"
+        else
+            _HARBOR_TRAJ_OUT="${BASE_DIR}/Harbor_Data/Trajectory"
+        fi
         "${BASE_DIR}/.venv/bin/python" "${BASE_DIR}/scripts/commit0_to_atif_v2.py" \
             "$LOG_BASE" \
-            "${BASE_DIR}/Harbor_Data/Trajectory" \
+            "$_HARBOR_TRAJ_OUT" \
             --kaiju-mode \
             --pipeline "$PIPELINE_LOG" \
             --task-name "$DATASET_DIR_NAME" \
-            && log "ATIF conversion complete for run_${sample_idx}" \
+            && log "ATIF conversion complete for run_${sample_idx} -> ${_HARBOR_TRAJ_OUT}" \
             || log "[WARN] ATIF conversion failed for run_${sample_idx}"
+        # Mirror into the shared top-level Harbor_Data/Trajectory (accumulates
+        # across runs; kept for existing consumers — run_pipeline_containerized
+        # reporting + fallback copy-back read this path).
+        if is_consolidated && [[ -d "$_HARBOR_TRAJ_OUT" ]]; then
+            mkdir -p "${BASE_DIR}/Harbor_Data/Trajectory"
+            cp -R "$_HARBOR_TRAJ_OUT/." "${BASE_DIR}/Harbor_Data/Trajectory/" 2>/dev/null \
+                && log "Mirrored ATIF trajectory -> ${BASE_DIR}/Harbor_Data/Trajectory" \
+                || log "[WARN] could not mirror ATIF trajectory to top-level Harbor_Data"
+        fi
     fi
+    # Propagate stage-level failures to main() so a pre-LLM crash (or any stage
+    # abort) doesn't silently count as a completed sample.
+    [[ -z "$pipeline_error" ]] || return 1
 }
 
 print_pass_at_k_summary() {
@@ -1845,3 +1988,8 @@ main() {
 
 cd "$BASE_DIR"
 main
+
+# Non-zero exit when NO samples completed successfully. Preserves partial-credit
+# behavior (any completed sample -> exit 0) while making a full-run crash
+# visible to callers/CI instead of hiding behind a bash implicit-0.
+[[ "$PIPELINE_SUCCESS" == "true" ]] || exit 1
