@@ -95,21 +95,57 @@ def _gh_cli_token() -> str | None:
     return result.stdout.strip() or None
 
 
+def _probe_token(token: str) -> str:
+    """Classify *token* against api.github.com: "ok" | "rejected" | "transient".
+
+    The distinction matters: a "rejected" verdict (GitHub actively refused the
+    token — Bad credentials / 401) means the token is bad and must not be used.
+    A "transient" verdict (network blip, DNS, 5xx, request timeout, gh binary
+    not found, locked keychain) means the probe was INCONCLUSIVE — the token may
+    be perfectly valid, we just couldn't confirm it right now. Callers treat the
+    two very differently: a transient probe of a keyring token that ``gh`` itself
+    handed us must NOT hard-fail the whole run (that turned a momentary network
+    hiccup at [1/5] prepare into a total abort). Transient probes are retried a
+    couple of times before giving up.
+    """
+    if not token:
+        return "rejected"
+    _AUTH_MARKERS = ("bad credentials", "401", "requires authentication",
+                     "must authenticate")
+    for _attempt in range(3):
+        try:
+            env = {**os.environ, "GH_TOKEN": token, "GIT_TERMINAL_PROMPT": "0"}
+            result = subprocess.run(
+                ["gh", "api", "user"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return "ok"
+            blob = f"{result.stdout}\n{result.stderr}".lower()
+            if any(m in blob for m in _AUTH_MARKERS):
+                return "rejected"  # GitHub actively refused it — do not retry
+            # non-auth failure (5xx, connection reset, DNS): retry then transient
+        except subprocess.TimeoutExpired:
+            pass  # slow network / locked keychain — retry
+        except FileNotFoundError:
+            return "transient"  # gh not on PATH here; can't confirm or deny
+    return "transient"
+
+
 def _token_authenticates(token: str) -> bool:
-    """Cheap pre-flight: does *token* authenticate against api.github.com?"""
+    """Cheap pre-flight: does *token* authenticate against api.github.com?
+
+    Thin back-compat wrapper over :func:`_probe_token`; True only on a confirmed
+    "ok". Callers that must distinguish transient from rejected use _probe_token.
+    """
     if not token:
         return False
     try:
-        env = {**os.environ, "GH_TOKEN": token, "GIT_TERMINAL_PROMPT": "0"}
-        result = subprocess.run(
-            ["gh", "api", "user"],
-            env=env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0
+        return _probe_token(token) == "ok"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
@@ -135,34 +171,74 @@ def get_github_token(required: bool = True) -> str | None:
     if _cached_resolved_token:
         return _cached_resolved_token
 
-    invalid_env_tokens: list[str] = []
+    rejected_env_tokens: list[str] = []
     for var in _TOKEN_ENV_VARS:
         token = os.environ.get(var)
         if not token:
             continue
-        if _token_authenticates(token):
+        verdict = _probe_token(token)
+        if verdict == "ok":
             _cached_resolved_token = token
             return token
-        invalid_env_tokens.append(var)
+        # A "transient" env-token probe is inconclusive; keep it as a last-resort
+        # candidate but prefer the keyring first (env tokens are the usual source
+        # of staleness). Only a "rejected" verdict is a definitive strike.
+        if verdict == "rejected":
+            rejected_env_tokens.append(var)
 
-    if invalid_env_tokens:
+    if rejected_env_tokens:
         logger.warning(
-            "Env GitHub token(s) %s failed validation; falling back to gh CLI keyring",
-            ", ".join(invalid_env_tokens),
+            "Env GitHub token(s) %s were rejected (bad credentials); falling back "
+            "to gh CLI keyring",
+            ", ".join(rejected_env_tokens),
         )
 
     keyring_token = _gh_cli_token()
-    if keyring_token and _token_authenticates(keyring_token):
-        if invalid_env_tokens:
-            logger.info("Using gh CLI keyring token (env token rejected)")
-        _cached_resolved_token = keyring_token
-        return keyring_token
+    if keyring_token:
+        verdict = _probe_token(keyring_token)
+        if verdict == "ok":
+            if rejected_env_tokens:
+                logger.info("Using gh CLI keyring token (env token rejected)")
+            _cached_resolved_token = keyring_token
+            return keyring_token
+        if verdict == "transient":
+            # gh itself vouches for this keyring token; the probe was inconclusive
+            # (network blip / slow-or-locked keychain / gh not on PATH in this
+            # subprocess). Do NOT abort the whole run over an unconfirmed probe —
+            # trust the keyring value and let the actual git/gh operation surface a
+            # real auth error if the token is genuinely bad. This is what turned a
+            # momentary hiccup at [1/5] prepare into a total failure.
+            logger.warning(
+                "gh keyring token could not be validated (network/keychain "
+                "transient); proceeding with it unvalidated — a later git push "
+                "will fail loudly if it is actually invalid."
+            )
+            _cached_resolved_token = keyring_token
+            return keyring_token
+        # verdict == "rejected": the keyring token is genuinely bad.
+
+    # Last resort: an env token whose probe was transient (never confirmed but
+    # never rejected). Better to try it than to abort outright.
+    for var in _TOKEN_ENV_VARS:
+        token = os.environ.get(var)
+        if token and var not in rejected_env_tokens and _probe_token(token) != "rejected":
+            logger.warning(
+                "Using env %s unvalidated (keyring unavailable, probe inconclusive)",
+                var,
+            )
+            _cached_resolved_token = token
+            return token
 
     if required:
+        _gh_present = _gh_cli_token() is not None
         raise GitAuthError(
             "No valid GitHub token available.\n"
-            "  Tried env vars: " + ", ".join(_TOKEN_ENV_VARS) + "\n"
-            "  Tried gh CLI keyring: empty or unauthenticated\n"
+            "  Tried env vars: " + ", ".join(_TOKEN_ENV_VARS)
+            + (" (rejected: " + ", ".join(rejected_env_tokens) + ")"
+               if rejected_env_tokens else " (none set)") + "\n"
+            "  gh CLI keyring: " + ("token present but REJECTED by GitHub "
+                                    "(re-auth needed)" if _gh_present
+                                    else "no token (empty or unauthenticated)") + "\n"
             "Fix one of:\n"
             "  - Run 'gh auth login' to authenticate the CLI keyring\n"
             "  - Export a valid Classic PAT (repo + admin:org scopes) from "
