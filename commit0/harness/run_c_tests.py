@@ -64,6 +64,30 @@ def _extract_build_errors(raw_output: str, max_length: int = 4000) -> str:
     return result
 
 
+def _compile_failure_masked_as_zero(log_dir, output: str) -> bool:
+    """True when compilation failed but ``test_exit_code.txt`` recorded 0.
+
+    The C test wrapper writes a 0 exit code on COMPILE_FAILED (the tests never
+    ran) and reports the failure via ``compile_errors.txt`` / stdout instead.
+    A raw 0 would tell the agent's stage-3 test-refine "all good", so ``main``
+    uses this to surface the build failure as a non-zero exit — WITHOUT which the
+    model never receives the compiler errors and a one-line fix scores 0%.
+    Eval is unaffected (it scores from test_report.xml + the compile-error count).
+    """
+    ce_path = Path(log_dir) / "compile_errors.txt"
+    ce_txt = (
+        ce_path.read_text(errors="replace")
+        if ce_path.exists() and ce_path.stat().st_size > 0
+        else ""
+    )
+    no_report = not (Path(log_dir) / "test_report.xml").exists()
+    return (
+        "COMPILE_FAILED" in ce_txt
+        or bool(_extract_build_errors(ce_txt))
+        or (no_report and bool(_extract_build_errors(output or "")))
+    )
+
+
 def main(
     dataset_name: str,
     dataset_split: str,
@@ -266,11 +290,20 @@ def main(
                 # refine against and just asks for "the complete test output". Print
                 # the raw build/test output to STDOUT so test-refine has real signal.
                 _raw = (output or "").strip()
+                # Surface the actual compiler diagnostics FIRST. The tail alone can
+                # miss them (a `file:line: error:` near the top of a long build log),
+                # and compile_errors.txt often holds only the COMPILE_FAILED sentinel
+                # — so stage-3 test-refine would see "build failed" with no reason to
+                # act on. _extract_build_errors pulls the gcc/clang/ld error lines
+                # out of the full output regardless of position.
+                _build_errs = _extract_build_errors(_raw)
                 _tail = "\n".join(_raw.splitlines()[-80:]) if _raw else ""
                 print(
                     "C tests produced NO test_report.xml — a test likely crashed/"
-                    "aborted or ctest could not run. Raw build/test output (tail):\n"
-                    f"{_tail if _tail else '(no output captured)'}"
+                    "aborted or ctest could not run.\n"
+                    + (f"Compiler errors:\n{_build_errs}\n\n" if _build_errs else "")
+                    + "Raw build/test output (tail):\n"
+                    + f"{_tail if _tail else '(no output captured)'}"
                 )
 
             compile_err_path = Path(log_dir / "compile_errors.txt")
@@ -284,10 +317,27 @@ def main(
         _module_logger.debug("Reading C test exit code from %s", exit_code_file)
         if exit_code_file.exists():
             exit_code = int(exit_code_file.read_text().strip() or "1")
-            return exit_code
         else:
             _module_logger.warning("test_exit_code.txt not found, assuming failure")
             return 1
+
+        # A COMPILE failure makes the test wrapper write test_exit_code=0 (the tests
+        # never ran), so a raw 0 tells the agent's stage-3 test-refine "all good" and
+        # it does nothing — the exact bug that let a missing `#include` score a
+        # permanent 0%. aider's cmd_test only hands output back to the model on a
+        # NON-ZERO exit, so surface a build failure as exit 1. The compiler
+        # diagnostics are already printed to stdout above, so the model then gets
+        # them and can fix the build. Eval scoring is unaffected: evaluate_c derives
+        # pass/fail from test_report.xml + the compile-errors count and only treats
+        # exit codes OUTSIDE {0,1} specially.
+        if exit_code == 0 and _compile_failure_masked_as_zero(log_dir, output):
+            _module_logger.warning(
+                "C compilation failed but test_exit_code.txt was 0 (tests never "
+                "ran); returning non-zero so stage-3 test-refine receives the "
+                "compiler errors."
+            )
+            return 1
+        return exit_code
     except EvaluationError as e:
         error_msg = (
             f"Error in running C tests for {repo_name}: {e}\n"
