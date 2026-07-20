@@ -1182,7 +1182,21 @@ def create_branch(repo: git.Repo, branch: str, from_commit: str) -> None:
         if branch in repo.heads:
             repo.git.checkout(branch)
         else:
-            repo.git.checkout(from_commit)
+            try:
+                repo.git.checkout(from_commit)
+            except git.exc.GitCommandError:  # type: ignore
+                # from_commit is usually a recorded base_commit SHA. A cached /
+                # stale agent image (no --rebuild-agent) bakes an OLDER repo tip
+                # where that SHA is legitimately absent; every prepare re-commits
+                # stubs+spec, minting a fresh base_commit. Rather than crash —
+                # which upstream isolates into a silent 0/0 $0 "success" — branch
+                # from the current HEAD (the baked repo's stub tip) and warn LOUD.
+                logger.warning(
+                    "create_branch: start point '%s' is unresolvable in this repo "
+                    "(stale agent image? re-run with --rebuild-agent) — branching "
+                    "from current HEAD instead.",
+                    from_commit,
+                )
             repo.git.checkout("-b", branch)
     except git.exc.GitCommandError as e:  # type: ignore
         raise RuntimeError(

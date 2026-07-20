@@ -32,6 +32,7 @@ from agent.llm_cost_capture import capture_module_calls
 from commit0.harness.constants_java import (
     JAVA_STUB_MARKER,
     JAVA_BASE_BRANCH,
+    JAVA_REMOTE_BRANCH,
     detect_build_system,
 )
 from agent.claude_code.recovery import run_with_recovery
@@ -358,17 +359,50 @@ def run_java_agent(
     # base_commit is the original library tag (pre-stub), so we must branch
     # from 'base' where the stubbed source files actually live.
     stub_branch = JAVA_BASE_BRANCH
-    if stub_branch in local_repo.heads:
-        stub_base = local_repo.commit(stub_branch).hexsha
-    else:
-        # Fallback: resolve base_commit (may be a tag name or SHA)
-        logger.warning(
-            "Branch '%s' not found in %s — falling back to base_commit",
-            stub_branch, repo_name,
+    # Resolve the stub base ROBUSTLY. Order matters:
+    #   1. commit0_java  — the local working branch (if some setup created it).
+    #   2. commit0_all / origin/commit0_all — the branch prepare_repo_java
+    #      actually creates and PUSHES, and the branch the baked repo is checked
+    #      out on. Resolving it by NAME is immune to base_commit SHA drift.
+    #   3. the RECORDED base_commit SHA — best effort only.
+    #   4. HEAD — always resolvable (the baked repo's current stub state).
+    #
+    # Why the SHA can't be trusted as the primary key: every prepare re-stubs and
+    # re-commits the spec, producing a NEW base_commit SHA. A cached agent image
+    # (no --rebuild-agent) bakes an OLDER commit0_all tip, so the dataset's
+    # recorded base_commit is legitimately ABSENT from that image. The old code
+    # dereferenced it unconditionally and died with GitPython's "SHA ... could
+    # not be resolved" BEFORE the first LLM call — a whole run of 0/0 / $0.
+    stub_base = None
+    _resolved_from = None
+    _candidates = [
+        (stub_branch, stub_branch in local_repo.heads),
+        (JAVA_REMOTE_BRANCH, True),
+        (f"origin/{JAVA_REMOTE_BRANCH}", True),
+        (instance.get("base_commit"), True),
+        ("HEAD", True),
+    ]
+    for _cand, _eligible in _candidates:
+        if not _cand or not _eligible:
+            continue
+        try:
+            stub_base = local_repo.commit(_cand).hexsha
+            _resolved_from = _cand
+            break
+        except Exception:  # noqa: BLE001 — try the next candidate
+            continue
+    if stub_base is None:
+        raise RuntimeError(
+            f"Could not resolve a stub base for {repo_name}: none of "
+            f"{[c for c, _ in _candidates if c]} exist in the repo. The agent "
+            f"image is likely stale (re-run with --rebuild-agent) or the fork was "
+            f"never pushed."
         )
-        stub_base = local_repo.commit(
-            instance.get("base_commit", "HEAD")
-        ).hexsha
+    if _resolved_from != stub_branch:
+        logger.warning(
+            "Branch '%s' not found in %s — resolved stub base from '%s' (%s)",
+            stub_branch, repo_name, _resolved_from, stub_base[:12],
+        )
 
     create_branch(local_repo, branch, stub_base)
 
