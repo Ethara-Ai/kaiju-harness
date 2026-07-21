@@ -899,6 +899,26 @@ def generate_setup_dict(repo_dir: Path, full_name: str) -> dict:
                 "original) and the build doesn't need generated .c files.", _skip_var,
             )
 
+    # PyPI pre-flight: drop deps that cannot install on public PyPI (non-existent
+    # / private / typo names) and warn on unsatisfiable version pins BEFORE the
+    # 60-180s docker build turns them into a cryptic "No matching distribution".
+    # Best-effort + fail-open; disable with KAIJU_SKIP_PYPI_PREFLIGHT=1.
+    _extracted = setup.get("pip_packages", [])
+    if _extracted:
+        try:
+            from tools.pypi_preflight import check_pip_packages
+
+            _kept, _report = check_pip_packages(_extracted, logger=logger)
+            if _report.dropped:
+                logger.warning(
+                    "  PyPI pre-flight dropped %d non-installable dep(s) for %s: %s",
+                    len(_report.dropped), full_name,
+                    ", ".join(name for name, _ in _report.dropped),
+                )
+            setup["pip_packages"] = _kept
+        except Exception as _e:  # noqa: BLE001 - never block prepare on the check
+            logger.debug("PyPI pre-flight skipped (%s)", _e)
+
     from commit0.harness.dockerfiles import detect_system_dependencies
 
     apt_pkgs = detect_system_dependencies(setup.get("pip_packages", []))
