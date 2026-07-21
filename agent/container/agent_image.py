@@ -117,21 +117,22 @@ def _agent_dockerfile(repo_image: str) -> str:
 def agent_image_key(repo_image_key: str, project_root: Optional[Path] = None) -> str:
     """Deterministic tag for the agent layer built on `repo_image_key`.
 
-    Keyed by (repo image + dockerfile + the packaging inputs pyproject/uv.lock)
-    so the layer rebuilds when either the base image or the dependency set
-    changes, and is cache-hit otherwise. Mirrors spec.repo_image_key's scheme:
+    Keyed by (repo image + dockerfile + the full byte-content of every file that
+    is COPY'd into the image via _iter_context_files) so the layer rebuilds on
+    ANY source change (Python, shell, YAML, packaging) and is cache-hit only when
+    the built image would be byte-identical. Mirrors spec.repo_image_key's scheme:
     `<name>.<hash>:<tag>` with `-agent` appended to the name.
     """
     root = Path(project_root) if project_root else _default_root()
     h = hashlib.sha256()
     h.update(repo_image_key.encode())
     h.update(_agent_dockerfile(repo_image_key).encode())
-    # Include the context file-list so adding/removing baked-in paths busts cache.
-    h.update(repr(sorted(CONTEXT_INCLUDE)).encode())
-    for rel in ("pyproject.toml", "uv.lock"):
-        p = root / rel
-        if p.exists():
-            h.update(p.read_bytes())
+    # Hash every byte of the baked-in context (agent/**, commit0/**, kaiju/**,
+    # scripts/**, run_pipeline_*.sh, .aider.model.*, pyproject.toml, uv.lock) so
+    # ANY source change busts the cache. Without this, `COPY . /opt/kaiju` would
+    # ship new code inside an old tag -> the cached image is silently reused
+    # (see agent_image_stale_code.md).
+    h.update(_context_content_digest(root))
     digest = h.hexdigest()[:22]
 
     # Split repo_image_key into name and tag: "commit0.repo.x.hash:v0".
@@ -165,6 +166,20 @@ def _iter_context_files(root: Path):
                 abs_path = Path(dirpath) / fn
                 arcname = str(abs_path.relative_to(root))
                 yield abs_path, arcname
+
+
+def _context_content_digest(root: Path) -> bytes:
+    """SHA-256 over every (arcname, bytes) pair in the same order the tarball
+    is built. Uses `_iter_context_files` verbatim so the cache key and the image
+    contents can never drift."""
+    h = hashlib.sha256()
+    items = sorted(_iter_context_files(root), key=lambda t: t[1])
+    for abs_path, arcname in items:
+        h.update(arcname.encode())
+        h.update(b"\0")
+        h.update(abs_path.read_bytes())
+        h.update(b"\0")
+    return h.digest()
 
 
 def build_context_tar(root: Optional[Path] = None) -> io.BytesIO:
