@@ -47,8 +47,8 @@ RUN npm install -g typescript@5.6.3 ts-node@10.9.2
 # at install time, so a Berry repo gets Berry and a classic repo gets classic.
 # Pre-warm pnpm best-effort so the common case is baked in; bun is not
 # corepack-managed, install it globally.
-RUN corepack enable && (corepack prepare pnpm@latest --activate || true)
-RUN npm install -g bun@latest || true
+RUN corepack enable && (corepack prepare pnpm@latest --activate || echo 'WARN: corepack pnpm prewarm failed; _toolchain will provision at runtime')
+RUN npm install -g bun@latest || echo 'WARN: bun prewarm failed; _toolchain will provision at runtime'
 
 # Cross-distro SSL cert symlinks for libraries that look in RHEL/Fedora paths
 RUN mkdir -p /etc/pki/tls/certs /etc/pki/tls /etc/pki/ca-trust/extracted/pem /etc/ssl/certs && \
