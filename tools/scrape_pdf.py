@@ -1184,6 +1184,14 @@ def main() -> None:
         default=None,
         help="Max repos to scrape specs for",
     )
+    parser.add_argument(
+        "--repo-dir",
+        type=str,
+        default=None,
+        help="Path to a local clone; when no --url is available, generate the "
+        "spec from the repo's README/docs links via scrape_readme_spec() "
+        "(README fallback). Use with --name.",
+    )
 
     args = parser.parse_args()
 
@@ -1193,6 +1201,23 @@ def main() -> None:
             print(f"Done: {result}")
         else:
             print("Failed to scrape spec")
+            exit(1)
+
+    elif args.repo_dir:
+        # README-fallback path: no documentation URL, scrape from the local clone.
+        # NOTE: scrape_readme_spec(repo_dir, specs_dir, repo_name, compress) — the
+        # 2nd positional is the OUTPUT dir, the 3rd is the repo name. Pass by
+        # keyword so the output dir is never mistaken for the name.
+        result, _crawled = scrape_readme_spec(
+            repo_dir=args.repo_dir,
+            specs_dir=args.output_dir,
+            repo_name=args.name or "",
+            compress=not args.no_compress,
+        )
+        if result:
+            print(f"Done: {result}")
+        else:
+            print("Failed to scrape README spec")
             exit(1)
 
     elif args.input:

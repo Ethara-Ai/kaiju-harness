@@ -342,6 +342,30 @@ def run_commit0_build(dataset_path: Path) -> bool:
         "build",
     ]
     result = _run(cmd, cwd=PROJECT_ROOT, timeout=1800)
+    if result.returncode != 0:
+        # `_run` captures stdout/stderr; a shard-wide build failure previously
+        # returned only False, so the actual diagnostic (missing base image,
+        # docker daemon error, a repo's build error) was discarded and the run
+        # log recorded a bare "commit0 build failed". Persist the real output so
+        # the failure is root-causable. Also drop it to a file next to the
+        # dataset for post-mortem when the console log rolls.
+        logger.error(
+            "commit0 build failed (rc=%d).\n----- stdout -----\n%s\n"
+            "----- stderr -----\n%s",
+            result.returncode,
+            (result.stdout or "").strip() or "(empty)",
+            (result.stderr or "").strip() or "(empty)",
+        )
+        try:
+            _log = Path(dataset_path).with_suffix(".build.log")
+            _log.write_text(
+                f"# commit0 build rc={result.returncode}\n"
+                f"## stdout\n{result.stdout or ''}\n## stderr\n{result.stderr or ''}\n",
+                encoding="utf-8",
+            )
+            logger.error("commit0 build output saved to %s", _log)
+        except Exception as _e:  # noqa: BLE001 - logging must not mask the failure
+            logger.debug("could not persist build log: %s", _e)
     return result.returncode == 0
 
 

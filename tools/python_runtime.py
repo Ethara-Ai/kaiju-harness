@@ -733,6 +733,14 @@ def find_docker_image_for_repo(repo_name: str) -> str | None:
     inventory. Agent images (tag contains ``-agent.``) are used only as a last
     resort when no repo image exists.
     """
+    # Exact override wins: a caller that already knows the built tag (it holds the
+    # Spec, so it has repo_image_key) can hand us the exact image and bypass the
+    # ambiguous short-name search entirely. This is the safe disambiguator for the
+    # short-name collision below.
+    expected = os.environ.get("KAIJU_EXPECTED_REPO_IMAGE", "").strip()
+    if expected:
+        return expected
+
     try:
         import docker
 
@@ -742,8 +750,13 @@ def find_docker_image_for_repo(repo_name: str) -> str | None:
     short_name = repo_name.split("/")[-1].split("__")[-1].split("-")[0].lower()
     needle = f"commit0.repo.{short_name}."
     fallback = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
-    repo_match: str | None = None
-    agent_match: str | None = None
+    # The short_name is NOT injective: `py-evm` and `py-pde` both collapse to `py`
+    # (via `.split("-")[0]`), so a plain "first tag that startswith needle" would
+    # silently return whichever `commit0.repo.py.<hash>:v0` the daemon lists first
+    # and CONTAMINATE one repo's test-id inventory with another's. Collect all
+    # distinct matches and refuse to guess when the short-name is ambiguous.
+    repo_matches: list[str] = []
+    agent_matches: list[str] = []
     try:
         for image in client.images.list():
             for tag in image.tags:
@@ -753,12 +766,33 @@ def find_docker_image_for_repo(repo_name: str) -> str | None:
                     # ``commit0.repo.<name>.<hash>-agent.<hash>:v0`` is the agent
                     # image; ``commit0.repo.<name>.<hash>:v0`` is the repo image.
                     if "-agent." in tag:
-                        agent_match = agent_match or tag
+                        agent_matches.append(tag)
                     else:
-                        repo_match = repo_match or tag
+                        repo_matches.append(tag)
     except Exception:  # noqa: BLE001
         return None
-    return repo_match or agent_match
+
+    repo_matches = sorted(set(repo_matches))
+    agent_matches = sorted(set(agent_matches))
+    if len(repo_matches) > 1:
+        logger.warning(
+            "find_docker_image_for_repo(%r): short-name %r is AMBIGUOUS — %d "
+            "distinct repo images match (%s). Refusing to guess (would "
+            "cross-contaminate test-id inventories). Set KAIJU_EXPECTED_REPO_IMAGE "
+            "to the exact tag, or pass image_name explicitly.",
+            repo_name, short_name, len(repo_matches), ", ".join(repo_matches),
+        )
+        return None
+    if repo_matches:
+        return repo_matches[0]
+    if len(agent_matches) > 1:
+        logger.warning(
+            "find_docker_image_for_repo(%r): no repo image; short-name %r matches "
+            "%d distinct AGENT images (%s). Refusing to guess.",
+            repo_name, short_name, len(agent_matches), ", ".join(agent_matches),
+        )
+        return None
+    return agent_matches[0] if agent_matches else None
 
 
 def resolve_runtime(

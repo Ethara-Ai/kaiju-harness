@@ -85,6 +85,42 @@ class TestFindDockerImageForRepo:
         _patch_docker(monkeypatch, ["commit0.repo.other.deadbeef:v0"])
         assert find_docker_image_for_repo("x/BlackSheep") is None
 
+    def test_ambiguous_short_name_refuses_to_guess(self, monkeypatch) -> None:
+        # py-evm and py-pde both collapse to short-name `py`. Two distinct repo
+        # images exist; picking either silently cross-contaminates test-id
+        # inventories, so the function must REFUSE (return None) rather than guess.
+        _patch_docker(
+            monkeypatch,
+            [
+                "commit0.repo.py.99d2e5280a72afef0c8c16:v0",  # py-evm
+                "commit0.repo.py.696daf1438b9745f7030e6:v0",  # py-pde
+            ],
+        )
+        assert find_docker_image_for_repo("Zahgon/py-evm") is None
+
+    def test_expected_repo_image_override_bypasses_search(self, monkeypatch) -> None:
+        # A caller that knows the exact tag disambiguates via the env override,
+        # even when the daemon holds a colliding set.
+        monkeypatch.setenv(
+            "KAIJU_EXPECTED_REPO_IMAGE", "commit0.repo.py.99d2e5280a72afef0c8c16:v0"
+        )
+        _patch_docker(
+            monkeypatch,
+            [
+                "commit0.repo.py.99d2e5280a72afef0c8c16:v0",
+                "commit0.repo.py.696daf1438b9745f7030e6:v0",
+            ],
+        )
+        assert (
+            find_docker_image_for_repo("Zahgon/py-evm")
+            == "commit0.repo.py.99d2e5280a72afef0c8c16:v0"
+        )
+
+    def test_single_match_still_returned(self, monkeypatch) -> None:
+        # Non-colliding short-name with one repo image is unaffected.
+        _patch_docker(monkeypatch, ["commit0.repo.flask.abc123:v0"])
+        assert find_docker_image_for_repo("pallets/flask") == "commit0.repo.flask.abc123:v0"
+
 
 # ---------------------------------------------------------------------------
 # P0-C: breadcrumb writer
