@@ -464,6 +464,15 @@ _TRANSIENT_BUILD_ERROR_MARKERS = (
     "429 too many requests",
     "unexpected eof",
     "reset by peer",
+    # buildx/daemon socket dropped mid-build (e.g. a parallel shard tore down the
+    # shared builder, or the daemon briefly restarted). buildkit surfaces this as a
+    # gRPC handshake/socket error at listWorkers; the build itself is healthy, so a
+    # re-run on the same cached layers succeeds. Observed: "listing workers for
+    # Build: ... error reading server preface: read unix @->/run/docker.sock: use
+    # of closed network connection".
+    "use of closed network connection",
+    "error reading server preface",
+    "server preface",
 )
 
 

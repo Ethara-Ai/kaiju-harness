@@ -6,6 +6,41 @@ from typing import List, Optional
 from commit0.harness.constants import DOCKERFILES_DIR, SUPPORTED_PYTHON_VERSIONS
 from commit0.harness.health_check import pip_to_import
 
+
+def _posix_single_quote(s: str) -> str:
+    """POSIX-safe single-quote for embedding an arbitrary string in a shell word.
+
+    Wraps *s* in single quotes and escapes any embedded single quote via the
+    canonical ``'\\''`` idiom, so the string reaches the command VERBATIM — no
+    word-splitting, no glob, no variable expansion, and (critically for PEP 508
+    dependency markers) no consumption of embedded double quotes. This is what
+    lets ``pkg ; python_version >= "3.10"`` survive Docker's ``/bin/sh -c`` layer
+    intact instead of arriving as ``pkg ; python_version >= 3.10`` (unquoted
+    marker), which uv/pip reject with "Failed to parse".
+    """
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _requirements_install_run(specs: List[str], req_path: str) -> str:
+    """Emit a single ``RUN`` that materializes *specs* into a requirements file
+    and installs it with uv (pip fallback).
+
+    Passing PEP 508 specs as inline shell args is unsafe: markers carry double
+    quotes (``python_version >= "3.10"``, ``platform_python_implementation ==
+    "CPython"``) that the shell strips, corrupting the marker. Writing one
+    single-quoted spec per line to a file and installing with ``-r`` sidesteps
+    the shell entirely — the resolver reads the file bytes as written.
+    """
+    # `printf '%s\n' 'a' 'b' …` writes each (verbatim, single-quoted) arg on its
+    # own line. `\\n` here becomes a literal `\n` in the Dockerfile, which the
+    # in-container /bin/sh printf then interprets as a newline.
+    quoted = " ".join(_posix_single_quote(s) for s in specs)
+    return (
+        f"RUN printf '%s\\n' {quoted} > {req_path} "
+        f"&& (uv pip install --system -r {req_path} "
+        f"|| pip install --no-cache-dir -r {req_path})"
+    )
+
 # ---------------------------------------------------------------------------
 # System-library detection: Python pip package → Debian/Ubuntu apt packages.
 # To add support for a new package, add one line to NATIVE_DEP_MAP.
@@ -43,14 +78,34 @@ NATIVE_DEP_MAP: dict[str, list[str]] = {
     "pygit2": ["libgit2-dev"],
     # FFI
     "greenlet": ["libffi-dev"],
+    # Geospatial — rasterio/fiona bind GDAL and need gdal-config at build time.
+    "rasterio": ["gdal-bin", "libgdal-dev"],
+    "fiona": ["gdal-bin", "libgdal-dev"],
+    # Numerical optimizer bindings — ipyopt needs Ipopt's C++ dev headers.
+    "ipyopt": ["coinor-libipopt-dev"],
+    # NOTE: these fire only when the package is a DIRECT dependency in the repo's
+    # pip list. When pulled in transitively (e.g. rasterio via icevision[all],
+    # ipyopt via zfit[all]) the name never reaches NATIVE_DEP_MAP — those cases are
+    # a dataset-spec issue (the heavy extra should be excluded), not a mapping gap.
 }
 
 # Packages already installed in the base Dockerfile templates.
-# Keep in sync with Dockerfile.python3.{10,12,13}.
+# Keep in sync with Dockerfile.python3.{7,8,9,10,11,12,13} apt block.
 _BASE_APT_PACKAGES: frozenset[str] = frozenset(
     {
         "git",
         "build-essential",
+        # Common C/C++-extension build toolchain (small, near-universally needed
+        # for source builds). autotools+pkg-config fix packages like h5py (needs
+        # pkg-config) and autotools C extensions (btclib_libsecp256k1 -> autoreconf);
+        # cmake covers CMake-based builds. Added to the base so a TRANSITIVE build
+        # dep — which never appears in the repo's pip list and so can't be resolved
+        # by NATIVE_DEP_MAP — still finds its toolchain.
+        "autoconf",
+        "automake",
+        "cmake",
+        "libtool",
+        "pkg-config",
         "ca-certificates",
         "curl",
         "jq",
@@ -174,11 +229,13 @@ def get_dockerfile_repo(
         lines.append("")
 
     if pip_packages:
-        escaped = " ".join(f'"{p}"' for p in pip_packages)
-        lines.append(
-            f"RUN uv pip install --system {escaped} "
-            f"|| pip install --no-cache-dir {escaped}"
-        )
+        # Install via a generated requirements file, NOT inline args. Inline
+        # double-quoting each spec (the old approach) let Docker's /bin/sh strip
+        # the inner quotes of PEP 508 markers — uv/pip then saw an unquoted marker
+        # (`python_version >= 3.10`, `platform_python_implementation == CPython`)
+        # and failed with "Failed to parse". The requirements file preserves every
+        # spec byte-for-byte.
+        lines.append(_requirements_install_run(pip_packages, "/tmp/kaiju-pip-requirements.txt"))
         lines.append("")
 
     if install_cmd:

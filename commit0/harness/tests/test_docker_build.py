@@ -897,3 +897,36 @@ class TestUnsubstitutedPlaceholderGuard:
                     "linux/amd64", MagicMock(), Path("/tmp"),
                 )
             once.assert_not_called()
+
+
+class TestTransientBuildErrorClassification:
+    """Regression for wave5 SmartSim: a buildx/daemon socket drop mid-build must
+    be classified transient so build_image retries, while genuine build defects
+    (parse errors, missing distributions, compile failures) must NOT be retried."""
+
+    def test_docker_socket_drop_is_transient(self) -> None:
+        from commit0.harness.docker_build import _is_transient_build_error
+
+        msg = (
+            "Multi-arch OCI build failed (fatal for multi-arch): rc=1 ERROR: "
+            "failed to build: listing workers for Build: failed to list workers: "
+            'Unavailable: connection error: desc = "error reading server preface: '
+            'read unix @->/run/docker.sock: use of closed network connection"'
+        )
+        assert _is_transient_build_error(msg) is True
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "error: Failed to parse: `dishka ; python_version >= 3.10`",
+            "ERROR: No matching distribution found for pypandoc_binary==1.12",
+            "process \"/bin/sh -c pip install --no-cache-dir uv\" did not "
+            "complete successfully: exit code: 1",
+            "autoreconf: command not found",
+            "fatal error: IpIpoptApplication.hpp: No such file or directory",
+        ],
+    )
+    def test_real_build_defects_are_not_transient(self, msg: str) -> None:
+        from commit0.harness.docker_build import _is_transient_build_error
+
+        assert _is_transient_build_error(msg) is False

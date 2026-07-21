@@ -97,10 +97,32 @@ class TestGetDockerfileRepo:
         assert "pip install --no-cache-dir -r requirements.txt" in result
 
     def test_with_pip_packages(self) -> None:
+        # pip_packages are materialized into a requirements file (single-quoted,
+        # one per line) and installed with -r, so PEP 508 markers survive the
+        # shell layer. See test_pep508_markers_survive_shell for the bug this fixes.
         result = get_dockerfile_repo("img:tag", pip_packages=["numpy", "pandas"])
-        assert '"numpy"' in result
-        assert '"pandas"' in result
-        assert "pip install --no-cache-dir" in result
+        assert "printf '%s\\n' 'numpy' 'pandas'" in result
+        assert "uv pip install --system -r" in result
+        assert "pip install --no-cache-dir -r" in result
+
+    def test_pep508_markers_survive_shell(self) -> None:
+        """Quoted PEP 508 markers must reach the resolver intact (regression:
+        inline double-quoting let /bin/sh strip the inner quotes -> uv/pip saw an
+        unquoted marker and failed to parse). The requirements-file form keeps the
+        spec byte-for-byte."""
+        specs = [
+            'dishka ; python_version >= "3.10"',
+            'PyDispatcher>=2.0.5; platform_python_implementation == "CPython"',
+        ]
+        result = get_dockerfile_repo("img:tag", pip_packages=specs)
+        # each spec is single-quoted verbatim (double quotes preserved)
+        assert "'dishka ; python_version >= \"3.10\"'" in result
+        assert (
+            "'PyDispatcher>=2.0.5; platform_python_implementation == \"CPython\"'"
+            in result
+        )
+        # and NOT emitted as a bare double-quoted arg (the old, broken form)
+        assert '"dishka ; python_version >= "3.10""' not in result
 
     def test_with_install_cmd_uses_uv_primary_pip_fallback(self) -> None:
         # Python installs now prefer uv (fast) with a pip fallback. A `uv pip
@@ -128,8 +150,7 @@ class TestGetDockerfileRepo:
         assert "gcc" in result
         assert "RUN wget http://x.com/f" in result
         assert "pip install --no-cache-dir -r requirements.txt" in result
-        assert '"requests"' in result
-        assert '"flask"' in result
+        assert "printf '%s\\n' 'requests' 'flask'" in result
         assert "pip install" in result
         assert "-e .[dev]" in result
         # uv is now the primary python installer (with a pip fallback).

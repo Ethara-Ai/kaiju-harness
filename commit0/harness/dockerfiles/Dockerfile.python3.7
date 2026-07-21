@@ -25,6 +25,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    pkg-config \
     ca-certificates \
     curl \
     jq \
@@ -36,7 +41,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir --upgrade pip
 # uv provides the fast installer used for the repo's python deps
 # (get_dockerfile_repo runs `uv pip install --system … || pip …`).
-RUN pip install --no-cache-dir uv
+# NON-FATAL on 3.7 ONLY: every published uv release requires Python >=3.8, so
+# `pip install uv` cannot succeed here and would otherwise break the base image
+# (and every 3.7 repo built on it) before a single repo layer runs. When uv is
+# absent the repo layers' `uv pip install … || pip …` fallback resolves via pip.
+# (3.8+ templates keep this fatal so a genuine uv breakage still fails loud.)
+RUN pip install --no-cache-dir uv \
+    || echo "WARN: uv unavailable on Python 3.7 (requires >=3.8); repo layers fall back to pip."
 
 # Cross-distro SSL cert symlinks for libraries that look in RHEL/Fedora paths
 RUN mkdir -p /etc/pki/tls/certs /etc/pki/tls /etc/pki/ca-trust/extracted/pem /etc/ssl/certs && \
