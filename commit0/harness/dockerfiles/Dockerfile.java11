@@ -27,6 +27,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_CERT=${CA_CERT_PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git-lfs \
     git \
     build-essential \
     ca-certificates \
@@ -50,6 +51,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+
+# git-lfs: materialize spec.pdf.bz2 when it was pushed via LFS (specs >100 MiB).
+# `git lfs install --system` registers the smudge filter so the repo-image clone
+# transparently downloads the LFS-backed blob. Inert for the common (non-LFS) repo.
+RUN git lfs install --system
 # JDK is pre-installed by the eclipse-temurin base image
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"

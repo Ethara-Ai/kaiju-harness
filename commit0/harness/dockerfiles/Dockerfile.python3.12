@@ -23,6 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_CERT=${CA_CERT_PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git-lfs \
     git \
     build-essential \
     autoconf \
@@ -38,6 +39,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     locales-all \
     && rm -rf /var/lib/apt/lists/*
 
+
+# git-lfs: materialize spec.pdf.bz2 when it was pushed via LFS (specs >100 MiB).
+# `git lfs install --system` registers the smudge filter so the repo-image clone
+# transparently downloads the LFS-backed blob. Inert for the common (non-LFS) repo.
+RUN git lfs install --system
 RUN pip install --no-cache-dir --upgrade pip
 # uv provides the fast installer used for the repo's python deps
 # (get_dockerfile_repo runs `uv pip install --system … || pip …`).

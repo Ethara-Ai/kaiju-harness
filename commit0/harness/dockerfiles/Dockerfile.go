@@ -22,6 +22,7 @@ ENV TZ=Etc/UTC \
     NODE_EXTRA_CA_CERTS=${CA_CERT_PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git-lfs \
     git \
     build-essential \
     ca-certificates \
@@ -35,6 +36,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
+
+# git-lfs: materialize spec.pdf.bz2 when it was pushed via LFS (specs >100 MiB).
+# `git lfs install --system` registers the smudge filter so the repo-image clone
+# transparently downloads the LFS-backed blob. Inert for the common (non-LFS) repo.
+RUN git lfs install --system
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}" \
     GOPATH="/root/go" \
     GOFLAGS="-count=1" \

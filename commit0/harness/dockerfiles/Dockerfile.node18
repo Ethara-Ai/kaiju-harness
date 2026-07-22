@@ -29,6 +29,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     npm_config_fetch_timeout=300000
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git-lfs \
     git \
     build-essential \
     ca-certificates \
@@ -40,6 +41,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
+
+# git-lfs: materialize spec.pdf.bz2 when it was pushed via LFS (specs >100 MiB).
+# `git lfs install --system` registers the smudge filter so the repo-image clone
+# transparently downloads the LFS-backed blob. Inert for the common (non-LFS) repo.
+RUN git lfs install --system
 # Node 18 (older libs): pin TypeScript to a version known to run on Node 18.
 RUN npm install -g typescript@5.6.3 ts-node@10.9.2
 

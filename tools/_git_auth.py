@@ -425,10 +425,15 @@ def git(
     Raises ``subprocess.CalledProcessError`` (when ``check=True``) with
     stdout / stderr populated, so callers can inspect ``e.stderr``.
     """
-    if args and args[0] == "add" and any(
-        a in ("-A", "--all", ".") for a in args[1:]
-    ):
-        _ensure_harness_excludes(repo_dir)
+    if args and args[0] == "add":
+        if any(a in ("-A", "--all", ".") for a in args[1:]):
+            _ensure_harness_excludes(repo_dir)
+        # STRICT LFS gate: any file being staged that exceeds GitHub's 100 MiB
+        # hard per-file push limit is routed through git-lfs (track +
+        # .gitattributes) so the push isn't rejected for the whole repo. Files at
+        # or under the limit are untouched — LFS never engages unnecessarily.
+        from tools._git_lfs import lfs_gate_add
+        lfs_gate_add(repo_dir, args[1:])
 
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")

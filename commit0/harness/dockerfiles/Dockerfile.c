@@ -24,6 +24,7 @@ ENV TZ=Etc/UTC \
     CCACHE_MAXSIZE=5G
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git-lfs \
     git \
     build-essential \
     ca-certificates \
@@ -50,6 +51,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bear \
     && rm -rf /var/lib/apt/lists/*
 
+
+# git-lfs: materialize spec.pdf.bz2 when it was pushed via LFS (specs >100 MiB).
+# `git lfs install --system` registers the smudge filter so the repo-image clone
+# transparently downloads the LFS-backed blob. Inert for the common (non-LFS) repo.
+RUN git lfs install --system
 RUN mkdir -p /ccache && \
     gcc --version && clang --version && cmake --version && ninja --version
 
