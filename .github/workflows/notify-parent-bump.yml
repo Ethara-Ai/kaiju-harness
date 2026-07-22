@@ -1,0 +1,27 @@
+name: Notify kaiju_knowledge to bump harness
+
+on:
+  push:
+    branches: [test]
+  workflow_dispatch:
+
+concurrency:
+  group: notify-parent-bump
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire repository_dispatch on kaiju_knowledge
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.KAIJU_KNOWLEDGE_PAT }}
+          repository: Ethara-Ai/kaiju_knowledge
+          event-type: harness-updated
+          client-payload: |
+            {
+              "sha": "${{ github.sha }}",
+              "ref": "${{ github.ref }}",
+              "actor": "${{ github.actor }}"
+            }
