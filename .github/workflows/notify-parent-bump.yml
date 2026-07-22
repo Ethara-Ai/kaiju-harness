@@ -1,4 +1,4 @@
-name: Notify kaiju_knowledge to bump harness
+name: Notify kaiju to bump harness
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.KAIJU_KNOWLEDGE_PAT }}
-          repository: Ethara-Ai/kaiju_knowledge
+          repository: Ethara-Ai/kaiju
           event-type: harness-updated
           client-payload: |
             {
