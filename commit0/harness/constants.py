@@ -81,6 +81,13 @@ class Files(BaseModel):
 
 
 BASE_BRANCH = "commit0"
+# The single branch every language's prepare creates locally and PUSHES to the
+# fork (holds the stubbed "Commit 0" + spec). Historically each language either
+# hardcoded the literal "commit0_all" or defined its own constant under a
+# different name (JAVA_REMOTE_BRANCH / *_DATASET_BRANCH) — three spellings for one
+# concept, which is exactly how a producer/consumer branch-name drift slips in.
+# This is the canonical source of truth; the per-language constants alias it.
+REMOTE_BRANCH = "commit0_all"
 
 import os as _os
 from kaiju.paths import is_consolidated as _is_consolidated, build_logs_dir as _build_logs_dir

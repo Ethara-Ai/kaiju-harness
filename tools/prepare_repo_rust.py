@@ -53,6 +53,7 @@ from tools._git_auth import (
     push_to_fork,
     setup_git_credentials,
 )
+from commit0.harness.constants import REMOTE_BRANCH
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -155,7 +156,7 @@ def clone_repo(full_name: str, clone_dir: Path) -> Path:
             git(repo_dir, "clean", "-fdx")
             # Drop any local commit0_all so the later checkout -b starts clean.
             try:
-                git(repo_dir, "branch", "-D", "commit0_all")
+                git(repo_dir, "branch", "-D", REMOTE_BRANCH)
             except subprocess.CalledProcessError:
                 pass
         except subprocess.CalledProcessError as e:
@@ -705,10 +706,10 @@ def prepare_rust_repo(
     # Step 4: Create commit0_all branch
     default_branch = get_default_branch(repo_dir)
     try:
-        git(repo_dir, "checkout", "-b", "commit0_all")
+        git(repo_dir, "checkout", "-b", REMOTE_BRANCH)
     except subprocess.CalledProcessError:
         # Branch may already exist
-        git(repo_dir, "checkout", "commit0_all")
+        git(repo_dir, "checkout", REMOTE_BRANCH)
         git(repo_dir, "reset", "--hard", default_branch)
 
     # Step 5: Stub source files
@@ -779,7 +780,7 @@ def prepare_rust_repo(
                     readme_spec_path = None
                 if readme_spec_path:
                     try:
-                        git(repo_dir, "checkout", "commit0_all")
+                        git(repo_dir, "checkout", REMOTE_BRANCH)
                         shutil.copy2(
                             str(readme_spec_path), str(repo_dir / "spec.pdf.bz2")
                         )
@@ -803,7 +804,7 @@ def prepare_rust_repo(
         logger.info("[DRY RUN] Would push commit0_all to %s", fork_name)
     else:
         try:
-            push_to_fork(repo_dir, fork_name, "commit0_all", remote_name="origin")
+            push_to_fork(repo_dir, fork_name, REMOTE_BRANCH, remote_name="origin")
         except Exception as e:
             raise RuntimeError(
                 f"Push to {fork_name} FAILED — the container build clones this fork "

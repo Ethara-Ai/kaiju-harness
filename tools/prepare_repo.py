@@ -93,6 +93,7 @@ from tools._git_auth import (
     push_to_fork,
     setup_git_credentials,
 )
+from commit0.harness.constants import REMOTE_BRANCH
 
 # Lazy import for spec scraping (optional dependency)
 _scrape_spec_sync = None
@@ -284,7 +285,7 @@ def create_stubbed_branch(
     4. Commit stubbed version as base_commit
     """
     if branch_name is None:
-        branch_name = "commit0_all"
+        branch_name = REMOTE_BRANCH
     reference_commit = get_head_sha(repo_dir)
     logger.info("  Reference commit (original): %s", reference_commit[:12])
 
@@ -1293,7 +1294,7 @@ def prepare_repos(
                 )
                 if spec_path:
                     logger.info("  Spec saved: %s", spec_path)
-                    branch_name = "commit0_all"
+                    branch_name = REMOTE_BRANCH
                     git(repo_dir, "checkout", branch_name)
                     dest = repo_dir / "spec.pdf.bz2"
                     shutil.copy2(spec_path, dest)
@@ -1316,7 +1317,7 @@ def prepare_repos(
                 if readme_spec_url:
                     setup_dict["specification"] = readme_spec_url
                 try:
-                    git(repo_dir, "checkout", "commit0_all")
+                    git(repo_dir, "checkout", REMOTE_BRANCH)
                     shutil.copy2(str(readme_spec_path), str(repo_dir / "spec.pdf.bz2"))
                     git(repo_dir, "add", "spec.pdf.bz2")
                     git(repo_dir, "commit", "-m", f"Add README-based spec for {_repo_name}")
@@ -1331,7 +1332,7 @@ def prepare_repos(
 
         # Push to fork
         if not dry_run:
-            branch_name = "commit0_all"
+            branch_name = REMOTE_BRANCH
             try:
                 git(repo_dir, "checkout", branch_name)
                 push_to_fork(repo_dir, fork_name, branch=branch_name, token=token)

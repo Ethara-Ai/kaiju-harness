@@ -39,6 +39,12 @@ from typing import Sequence
 
 logger = logging.getLogger(__name__)
 
+# Canonical identity for every prepared-repo commit pushed to a fork. Forced by
+# `git()` for all `commit` subcommands so attribution is the harness bot, not the
+# build host's configured git user. Single source of truth.
+KAIJU_BOT_NAME = "kaiju-bot"
+KAIJU_BOT_EMAIL = "kaiju-bot@ethara.ai"
+
 __all__ = [
     "GitAuthError",
     "ForkError",
@@ -280,10 +286,10 @@ def _ensure_commit_identity() -> None:
     if _configured("user.name") and _configured("user.email"):
         return
 
-    os.environ.setdefault("GIT_AUTHOR_NAME", "kaiju-bot")
-    os.environ.setdefault("GIT_AUTHOR_EMAIL", "kaiju-bot@ethara.ai")
-    os.environ.setdefault("GIT_COMMITTER_NAME", "kaiju-bot")
-    os.environ.setdefault("GIT_COMMITTER_EMAIL", "kaiju-bot@ethara.ai")
+    os.environ.setdefault("GIT_AUTHOR_NAME", KAIJU_BOT_NAME)
+    os.environ.setdefault("GIT_AUTHOR_EMAIL", KAIJU_BOT_EMAIL)
+    os.environ.setdefault("GIT_COMMITTER_NAME", KAIJU_BOT_NAME)
+    os.environ.setdefault("GIT_COMMITTER_EMAIL", KAIJU_BOT_EMAIL)
     logger.info(
         "No git identity configured — using process-local kaiju-bot fallback so "
         "prepare commits don't fail with 'Please tell me who you are'."
@@ -426,6 +432,18 @@ def git(
 
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    # Every commit routed through this helper is a PREPARED-repo commit (the stub
+    # "Commit 0" and the spec-PDF commit) that gets pushed to the fork. Force the
+    # author AND committer to the harness bot, OVERRIDING whatever git identity is
+    # configured on the build host (a dev's ~/.gitconfig, or an inherited
+    # GIT_AUTHOR_* env). This is the authoritative attribution — unlike
+    # _ensure_commit_identity, which only fills a bot identity as a last-resort
+    # fallback and otherwise leaves the host identity in place.
+    if args and args[0] == "commit":
+        env["GIT_AUTHOR_NAME"] = KAIJU_BOT_NAME
+        env["GIT_AUTHOR_EMAIL"] = KAIJU_BOT_EMAIL
+        env["GIT_COMMITTER_NAME"] = KAIJU_BOT_NAME
+        env["GIT_COMMITTER_EMAIL"] = KAIJU_BOT_EMAIL
     result = subprocess.run(
         ["git", *args],
         cwd=str(repo_dir),

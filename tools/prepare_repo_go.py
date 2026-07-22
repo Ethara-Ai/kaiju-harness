@@ -71,6 +71,7 @@ from tools._git_auth import (
     push_to_fork,
     setup_git_credentials,
 )
+from commit0.harness.constants import REMOTE_BRANCH
 
 _scrape_spec_sync = None
 
@@ -191,7 +192,7 @@ def create_stubbed_branch(
     4. Commit stubbed version as base_commit
     """
     if branch_name is None:
-        branch_name = "commit0_all"
+        branch_name = REMOTE_BRANCH
 
     gostubber_bin = _ensure_gostubber()
 
@@ -650,7 +651,7 @@ def prepare_single_repo(
         )
 
         if not dry_run:
-            branch_name = "commit0_all"
+            branch_name = REMOTE_BRANCH
             try:
                 git(repo_dir, "checkout", branch_name)
                 push_to_fork(repo_dir, forked_name, branch=branch_name)
@@ -693,7 +694,7 @@ def prepare_single_repo(
                 )
                 if spec_path:
                     logger.info("  Spec saved: %s", spec_path)
-                    branch_name = "commit0_all"
+                    branch_name = REMOTE_BRANCH
                     git(repo_dir, "checkout", branch_name)
                     dest = repo_dir / "spec.pdf.bz2"
                     shutil.copy2(spec_path, dest)
@@ -730,7 +731,7 @@ def prepare_single_repo(
                 if readme_spec_url:
                     setup_dict["specification"] = readme_spec_url
                 try:
-                    branch_name = "commit0_all"
+                    branch_name = REMOTE_BRANCH
                     git(repo_dir, "checkout", branch_name)
                     dest = repo_dir / "spec.pdf.bz2"
                     shutil.copy2(str(readme_spec_path), dest)

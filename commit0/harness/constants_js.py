@@ -6,7 +6,9 @@ from typing import TypedDict
 
 
 JS_BASE_BRANCH: str = "commit0"
-JS_DATASET_BRANCH: str = "commit0_all"
+from commit0.harness.constants import REMOTE_BRANCH
+
+JS_DATASET_BRANCH: str = REMOTE_BRANCH  # canonical alias; see commit0.harness.constants
 JS_STUB_MARKER: str = "// __COMMIT0_STUB__"
 # The Babel stubber co-emits BOTH the comment marker above AND this throw on
 # separate lines (see tools/jsstubber/stub_js.ts buildStubBody). Detection must

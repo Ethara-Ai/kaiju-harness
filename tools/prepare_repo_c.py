@@ -59,6 +59,7 @@ from tools._git_auth import (  # noqa: E402
     push_to_fork,
     setup_git_credentials,
 )
+from commit0.harness.constants import REMOTE_BRANCH
 
 # GitHub org to fork repos into (matches Rust/C++/Java/TS pipelines).
 DEFAULT_ORG = "Zahgon"
@@ -584,7 +585,7 @@ def prepare_one(
     clone_dir: Path,
     fork_org: str = DEFAULT_ORG,
     dry_run: bool = False,
-    branch: str = "commit0_all",
+    branch: str = REMOTE_BRANCH,
     cmake_flags: str = "",
     skip_spec: bool = False,
     spec_url: str = "",
@@ -830,7 +831,7 @@ def main() -> None:
     parser.add_argument(
         "--branch",
         type=str,
-        default="commit0_all",
+        default=REMOTE_BRANCH,
         help="Branch name for the stubbed commit",
     )
     parser.add_argument(

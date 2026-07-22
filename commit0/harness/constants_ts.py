@@ -4,7 +4,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict
 
-from commit0.harness.constants import RepoInstance
+from commit0.harness.constants import REMOTE_BRANCH, RepoInstance
 
 
 class Language(str, Enum):
@@ -24,7 +24,7 @@ TS_SPLIT: Dict[str, list[str]] = {}
 # Per-repo branch created by setup_ts (one per repo clone)
 TS_BASE_BRANCH = "commit0"
 # Branch used for combined/all-repo dataset references
-TS_DATASET_BRANCH = "commit0_all"
+TS_DATASET_BRANCH = REMOTE_BRANCH  # canonical alias; see commit0.harness.constants
 
 DEFAULT_NODE_VERSION = "20"
 CONTAINER_WORKDIR = "/testbed"

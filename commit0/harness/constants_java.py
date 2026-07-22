@@ -2,12 +2,14 @@
 
 Parallel to constants.py — does NOT modify constants.py.
 """
-import defusedxml.ElementTree as ET
+
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from commit0.harness.constants import RepoInstance
+import defusedxml.ElementTree as ET
+
+from commit0.harness.constants import BASE_BRANCH, REMOTE_BRANCH, RepoInstance
 
 
 class JavaRepoInstance(RepoInstance):
@@ -20,12 +22,14 @@ class JavaRepoInstance(RepoInstance):
 
     language: str = "java"
     java_version: str = "17"
-    build_system: str = "maven"          # "maven" | "gradle"
-    java_src_dir: str = "src/main/java"  # renamed to avoid clash with inherited `src_dir`
+    build_system: str = "maven"  # "maven" | "gradle"
+    java_src_dir: str = (
+        "src/main/java"  # renamed to avoid clash with inherited `src_dir`
+    )
     test_dir: str = "src/test/java"
-    test_framework: str = "junit5"       # "junit4" | "junit5" | "testng"
-    has_modules: bool = False            # Multi-module project
-    main_module: Optional[str] = None    # Root module for multi-module projects
+    test_framework: str = "junit5"  # "junit4" | "junit5" | "testng"
+    has_modules: bool = False  # Multi-module project
+    main_module: Optional[str] = None  # Root module for multi-module projects
 
 
 # Version support
@@ -37,9 +41,10 @@ JAVA_SOURCE_EXT = ".java"
 JAVA_STUB_MARKER = 'UnsupportedOperationException("STUB: not implemented")'
 JAVA_TEST_FILE_SUFFIX = "Test.java"
 
-# Branch conventions (parallel to Python's BASE_BRANCH="commit0" and "commit0_all")
-JAVA_BASE_BRANCH = "commit0_java"          # Local working branch (like Python's "commit0")
-JAVA_REMOTE_BRANCH = "commit0_all"    # Remote branch pushed to fork (like Python's "commit0_all")
+# Branch conventions — canonical aliases of the shared constants (single source
+# of truth in commit0.harness.constants), so a rename can never drift per-language.
+JAVA_BASE_BRANCH = BASE_BRANCH      # Local working branch ("commit0")
+JAVA_REMOTE_BRANCH = REMOTE_BRANCH  # Remote branch pushed to fork ("commit0_all")
 JAVA_SKIP_FILENAMES = {"module-info.java", "package-info.java"}
 
 # Source layout

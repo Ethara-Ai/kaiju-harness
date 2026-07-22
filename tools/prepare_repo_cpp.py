@@ -56,6 +56,7 @@ from tools._git_auth import (
     push_to_fork,
     setup_git_credentials,
 )
+from commit0.harness.constants import REMOTE_BRANCH
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -1402,9 +1403,9 @@ def prepare_cpp_repo(
 
     default_branch = default_branch_override or get_default_branch(repo_dir)
     try:
-        git(repo_dir, "checkout", "-b", "commit0_all")
+        git(repo_dir, "checkout", "-b", REMOTE_BRANCH)
     except subprocess.CalledProcessError:
-        git(repo_dir, "checkout", "commit0_all")
+        git(repo_dir, "checkout", REMOTE_BRANCH)
         git(repo_dir, "reset", "--hard", default_branch)
 
     has_cc = generate_compile_commands(repo_dir, build_system, cmake_options=cmake_options)
@@ -1480,7 +1481,7 @@ def prepare_cpp_repo(
                 readme_spec_path = None
             if readme_spec_path:
                 try:
-                    git(repo_dir, "checkout", "commit0_all")
+                    git(repo_dir, "checkout", REMOTE_BRANCH)
                     shutil.copy2(str(readme_spec_path), str(repo_dir / "spec.pdf.bz2"))
                     git(repo_dir, "add", "spec.pdf.bz2")
                     git(repo_dir, "commit", "-m", f"Add spec PDF for {repo_name}")
@@ -1499,12 +1500,12 @@ def prepare_cpp_repo(
         logger.info("[DRY RUN] Would push commit0_all to %s", fork_name)
     else:
         logger.info("Pushing commit0_all to %s...", fork_name)
-        push_to_fork(repo_dir, fork_name, "commit0_all", remote_name="origin")
+        push_to_fork(repo_dir, fork_name, REMOTE_BRANCH, remote_name="origin")
 
     git(repo_dir, "checkout", default_branch)
     test_ids = collect_test_ids(repo_dir, test_cmd, build_system)
     save_test_ids(repo_name, test_ids)
-    git(repo_dir, "checkout", "commit0_all")
+    git(repo_dir, "checkout", REMOTE_BRANCH)
 
     test_framework = _detect_test_framework(repo_dir)
 
