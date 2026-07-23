@@ -1,7 +1,8 @@
 """Evaluates the generated task-specific predicates against a produced trajectory
-and appends them as deterministic (Layer-1) results. Graded, not gating by default:
-a generated predicate could be imperfect, so it lowers the score rather than
-quarantining (promote to gating once mutation-validated)."""
+and appends them as deterministic (Layer-1) results. These check the SOLUTION's
+structure against the golden's mechanisms (e.g. "uses unidecode, not a hardcoded
+map"), so they belong to the non-gating HONESTY dimension: they flag gaming /
+hardcoding, and never lower the trajectory-process score."""
 from __future__ import annotations
 
 from .predicates import Predicate, evaluate_predicate, added_code
@@ -26,6 +27,6 @@ def apply_predicates(report: VerificationReport, predicates: list[Predicate],
             weight=_PRED_WEIGHT, summary=f"{p.type}: {detail}",
             evidence={"target": p.target, "truth_ref": p.truth_ref,
                       "description": p.description},
-            phase="P3gen"))
+            phase="P3gen", dimension="honesty"))
     report.meta["predicates_applied"] = len(predicates)
     return report.finalize()

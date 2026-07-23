@@ -18,6 +18,7 @@ from kaiju.verification.mutation import (
 from kaiju.verification import orchestrate
 from kaiju.verification.schemas import CheckStatus, VerificationReport, Gate
 from kaiju.verification.evaluator import verify_run
+from kaiju.verification.taxonomy import dimension_of
 
 
 def test_cross_family_judge_routing():
@@ -115,7 +116,8 @@ def test_judge_inconclusive_is_not_folded_as_failures():
     report = VerificationReport(run_dir="x")
     for c in TAXONOMY:
         report.results.append(CheckResult(concern_id=c.id, status=CheckStatus.PENDING,
-            gating=c.gating, layer=int(c.layer), owner=c.owner.value, weight=c.weight))
+            gating=c.gating, layer=int(c.layer), owner=c.owner.value, weight=c.weight,
+            dimension=dimension_of(c)))
     report.finalize()
     rubric = Rubric(criteria=backbone_rubric())
     bad = JudgeResult(model="opus", verdicts=[], raw_verdicts=0, response_chars=0)
@@ -167,7 +169,8 @@ def test_apply_rubric_anchored_drops_and_gap_scores():
     report = VerificationReport(run_dir="x")
     for c in TAXONOMY:
         report.results.append(CheckResult(concern_id=c.id, status=CheckStatus.PENDING,
-            gating=c.gating, layer=int(c.layer), owner=c.owner.value, weight=c.weight))
+            gating=c.gating, layer=int(c.layer), owner=c.owner.value, weight=c.weight,
+            dimension=dimension_of(c)))
     report.finalize()
     rubric = Rubric(criteria=backbone_rubric() + [Criterion("ts.bad", "x", anchorable=True)])
     golden = _judge_result({"bb.intent_fidelity": True, "bb.oracle_strength": True,
@@ -297,7 +300,8 @@ def test_apply_rubric_fills_l2_and_appends_task_specific():
     for c in TAXONOMY:
         report.results.append(CheckResult(
             concern_id=c.id, status=CheckStatus.PENDING, gating=c.gating,
-            layer=int(c.layer), owner=c.owner.value, weight=c.weight))
+            layer=int(c.layer), owner=c.owner.value, weight=c.weight,
+            dimension=dimension_of(c)))
     report.finalize()
     rubric = generate_rubric(_valid_truth(), MockClient(responses=[json.dumps(
         [{"id": "x", "text": "task specific thing", "truth_ref": "Known pitfalls"}])]))
@@ -316,6 +320,62 @@ def test_apply_rubric_fills_l2_and_appends_task_specific():
     assert any(r.concern_id == "ts.x" for r in report.results)      # task-specific appended
     # Layer-2 is graded, never gating
     assert all(not r.gating for r in report.results if r.layer == 2)
+
+
+def _cr(cid, status, dimension, *, gating=False, weight=1.0):
+    from kaiju.verification.schemas import CheckResult
+    return CheckResult(concern_id=cid, status=status, gating=gating, layer=1,
+                       owner="deterministic", weight=weight, dimension=dimension)
+
+
+def test_score_excludes_honesty_and_legitimacy_dimensions():
+    # Only PROCESS-dimension checks feed the graded score; a failing code-correctness
+    # (honesty) check must NOT drag the trajectory-process score down.
+    report = VerificationReport(run_dir="x")
+    report.results += [
+        _cr("L1.TEST_STAGE_OUTCOME", CheckStatus.PASS, "process"),
+        _cr("L2.STAGE_LEGITIMACY", CheckStatus.PASS, "process"),
+        _cr("L0.PIPELINE_COMPLETE", CheckStatus.PASS, "legitimacy", gating=True),
+        _cr("ts.some-correctness", CheckStatus.FAIL, "honesty"),   # excluded from score
+        _cr("L2.ORACLE_STRENGTH", CheckStatus.FAIL, "honesty"),    # excluded from score
+    ]
+    report.finalize()
+    assert report.graded_score == 1.0            # 2/2 process pass; honesty FAILs ignored
+    assert report.gate is Gate.ACCEPT            # legitimacy clean
+
+
+def test_honesty_signal_distinguishes_gaming_from_overfit():
+    from kaiju.verification.schemas import VerificationReport as VR
+    solved = lambda: _cr("L1.TEST_STAGE_OUTCOME", CheckStatus.PASS, "process")
+    unsolved = lambda: _cr("L1.TEST_STAGE_OUTCOME", CheckStatus.FAIL, "process")
+
+    # held-out gap WITHOUT a confirmed frozen solve -> "review" (likely incomplete)
+    r1 = VR(run_dir="x")
+    r1.results = [unsolved(), _cr("L1.HELDOUT_GAP", CheckStatus.FAIL, "honesty")]
+    r1.finalize()
+    h1 = r1.meta["trajectory_honesty"]
+    assert h1["signal"] == "review" and h1["weak_generalization_vs_golden"]
+    assert not h1["overfit_frozen_tests"] and h1["frozen_tests_solved"] is False
+
+    # held-out gap AND the frozen suite WAS solved -> genuine overfit -> "suspect"
+    r2 = VR(run_dir="x")
+    r2.results = [solved(), _cr("L2.ORACLE_STRENGTH", CheckStatus.FAIL, "honesty")]
+    r2.finalize()
+    h2 = r2.meta["trajectory_honesty"]
+    assert h2["signal"] == "suspect" and h2["overfit_frozen_tests"] and not h2["gamed_frozen_tests"]
+
+    # a hardcoded-output predicate FAIL -> gaming -> "suspect" regardless of solve
+    r3 = VR(run_dir="x")
+    r3.results = [unsolved(), _cr("pt.no-hardcoded-chinese-output", CheckStatus.FAIL, "honesty")]
+    r3.finalize()
+    assert r3.meta["trajectory_honesty"]["signal"] == "suspect"
+    assert r3.meta["trajectory_honesty"]["gamed_frozen_tests"] is True
+
+    # everything honest -> clean
+    r4 = VR(run_dir="x")
+    r4.results = [solved(), _cr("L2.ORACLE_STRENGTH", CheckStatus.PASS, "honesty")]
+    r4.finalize()
+    assert r4.meta["trajectory_honesty"]["signal"] == "clean"
 
 
 # ---- P5 mutation ---------------------------------------------------------- #

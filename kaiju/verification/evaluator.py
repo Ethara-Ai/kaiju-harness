@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .deterministic import CHECKS
 from .schemas import CheckResult, CheckStatus, VerificationReport
-from .taxonomy import TAXONOMY
+from .taxonomy import TAXONOMY, dimension_of
 from .trajectory import load_trajectory
 
 
@@ -20,6 +20,7 @@ def _result_for(concern, bundle) -> CheckResult:
     base = dict(
         concern_id=concern.id, gating=concern.gating, layer=int(concern.layer),
         owner=concern.owner.value, weight=concern.weight, phase=concern.phase,
+        dimension=dimension_of(concern),
     )
     check = CHECKS.get(concern.id)
     if check is None:

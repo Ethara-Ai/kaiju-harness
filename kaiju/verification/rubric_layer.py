@@ -92,7 +92,7 @@ def apply_rubric(report: VerificationReport, rubric: Rubric, judge: JudgeResult,
             summary=(v.justification or "")[:300],
             evidence={"text": c.text, "truth_ref": c.truth_ref, "evidence": v.evidence,
                       "judge_model": judge.model},
-            phase="P6"))
+            phase="P6", dimension="honesty"))
 
     # 3) GAP vs golden on validated ANCHORABLE criteria (golden passes all by construction)
     anchorable_validated = [c for c in rubric.criteria
