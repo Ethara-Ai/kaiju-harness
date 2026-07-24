@@ -162,11 +162,19 @@ async def _agen(chunks):
 
 
 def _run_keepalive(chunks, interval=10.0):
+    """Collect the keepalive-wrapped stream. Returns (out, exc): every yielded
+    chunk plus the exception the generator raised after its last yield (None
+    for a clean end) — the post-fix contract aborts the stream UNCLEANLY after
+    a synthetic failure frame, so truncation tests need both halves."""
     async def _run():
         out = []
-        async for b in bridge_mod._stream_with_keepalive(_agen(chunks), _noop_aclose, interval):
-            out.append(b)
-        return out
+        agen = bridge_mod._stream_with_keepalive(_agen(chunks), _noop_aclose, interval)
+        try:
+            async for b in agen:
+                out.append(b)
+        except Exception as e:  # noqa: BLE001 — the abort is part of the contract
+            return out, e
+        return out, None
     return asyncio.run(_run())
 
 
@@ -175,29 +183,171 @@ async def _noop_aclose():
 
 
 class TestC9_003_TruncationGuard:
-    def test_keepalive_truncated_stream_emits_error(self):
-        # Stream ends WITHOUT response.completed/incomplete/failed -> truncated.
+    def test_keepalive_truncated_stream_emits_error_then_aborts(self):
+        # Stream ends WITHOUT response.completed/incomplete/failed -> truncated:
+        # a synthetic response.failed frame, then an UNCLEAN abort (the harness's
+        # litellm fork swallows the frame alone into a fabricated clean stop).
         chunks = [b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n']
-        out = _run_keepalive(chunks)
+        out, exc = _run_keepalive(chunks)
         joined = b"".join(out)
         assert b"response.failed" in joined
         assert b"truncated" in joined
+        assert isinstance(exc, bridge_mod.UpstreamTruncationError)
 
     def test_keepalive_complete_stream_no_synthetic_error(self):
         chunks = [
             b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
             b'data: {"type":"response.completed","response":{"id":"r"}}\n\n',
         ]
-        out = _run_keepalive(chunks)
+        out, exc = _run_keepalive(chunks)
         # every chunk forwarded verbatim, NO synthetic failure appended
         assert out == chunks
+        assert exc is None
         assert not any(b"response.failed" in b and b"truncated" in b for b in out)
+
+    def test_large_terminal_event_detected_at_any_chunking(self):
+        """REGRESSION (the 2026-07 stream-drop RCA root cause): the codex
+        backend's response.completed data line embeds the ENTIRE response
+        object, so the terminal marker sits kilobytes before the end of the
+        event. The pre-fix guard truncated its scan window to 256B BEFORE
+        scanning, never saw the marker on any non-trivial turn, and flagged
+        every long completed stream as truncated — which also made buffered
+        mode discard 100% of successful captures. The fix scans carry+chunk in
+        full; this must hold for every network chunking."""
+        big_output = json.dumps({
+            "id": "r", "status": "completed",
+            "output": [{"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": "x" * 4000}]}],
+            "usage": {"input_tokens": 11746, "output_tokens": 10702},
+        }).encode()
+        stream = (
+            b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+            b'event: response.completed\n'
+            b'data: {"type":"response.completed","response":' + big_output + b'}\n\n'
+        )
+        for size in (512, 1024, 1364, 4096, 16384, len(stream)):
+            chunks = [stream[i:i + size] for i in range(0, len(stream), size)]
+            out, exc = _run_keepalive(chunks)
+            assert exc is None, f"chunk size {size}: falsely aborted: {exc}"
+            assert out == chunks, f"chunk size {size}: synthetic frame appended"
+
+    def test_terminal_marker_split_across_chunks_still_detected(self):
+        # The marker itself straddles a chunk boundary -> the 64B carry must
+        # stitch it back together.
+        ev = b'data: {"type":"response.completed","response":{"id":"r"}}\n\n'
+        cut = ev.index(b"response.comp") + 5      # mid-marker
+        chunks = [b'data: {"type":"response.output_text.delta","delta":"x"}\n\n',
+                  ev[:cut], ev[cut:]]
+        out, exc = _run_keepalive(chunks)
+        assert exc is None
+        assert out == chunks
+
+    def test_genuine_response_failed_relayed_then_aborted(self):
+        # A GENUINE upstream response.failed is a terminal event (no synthetic
+        # frame, no truncation warning) but must still end in an unclean abort:
+        # the harness's litellm fork has no branch for failed frames and would
+        # fabricate finish_reason=stop from a clean close.
+        chunks = [
+            b'data: {"type":"response.output_text.delta","delta":"x"}\n\n',
+            b'event: response.failed\n'
+            b'data: {"type":"response.failed","response":{"error":{"message":"server boom"}}}\n\n',
+        ]
+        out, exc = _run_keepalive(chunks)
+        assert out == chunks  # relayed verbatim, nothing synthetic appended
+        assert isinstance(exc, bridge_mod.UpstreamTruncationError)
+        assert "response.failed" in str(exc)
+
+    def test_post_terminal_transport_error_ignored(self):
+        # A transport error AFTER response.completed was forwarded (e.g. the
+        # upstream closed without the final chunked-body terminator) must NOT
+        # convert a fully-delivered, paid turn into a failure.
+        async def _src():
+            yield b'data: {"type":"response.completed","response":{"id":"r"}}\n\n'
+            raise RuntimeError("peer closed connection (incomplete chunked read)")
+
+        async def _run():
+            out = []
+            async for b in bridge_mod._stream_with_keepalive(_src(), _noop_aclose, 10.0):
+                out.append(b)
+            return out
+
+        out = asyncio.run(_run())  # must NOT raise
+        assert out == [b'data: {"type":"response.completed","response":{"id":"r"}}\n\n']
+
+    def test_upstream_bare_timeout_error_not_treated_as_idle(self):
+        # A bare TimeoutError raised by the upstream ITERATOR lands in the
+        # keep-alive except-clause (asyncio.TimeoutError IS builtins.TimeoutError
+        # on py>=3.11). Without the nxt.done() guard the branch would spin
+        # forever re-awaiting the completed future, flooding keepalives.
+        async def _src():
+            yield b'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+            raise TimeoutError("socket timed out")
+
+        async def _run():
+            out = []
+            try:
+                async for b in bridge_mod._stream_with_keepalive(_src(), _noop_aclose, 0.02):
+                    out.append(b)
+            except TimeoutError:
+                return out, True
+            return out, False
+
+        out, reraised = asyncio.run(_run())
+        assert reraised, "bare TimeoutError must abort, not loop as idle"
+        joined = b"".join(out)
+        assert b"response.failed" in joined and b"TimeoutError" in joined
+        assert out.count(bridge_mod._KEEPALIVE_LINE) <= 2  # no keepalive flood
+
+    def test_truncation_frame_starts_on_fresh_line(self):
+        # The synthetic frame must begin with a newline so it cannot glue onto
+        # a partial `data:` line left dangling by the truncated upstream.
+        assert xlate.responses_truncation_error_sse().startswith(b"\nevent: response.failed\n")
+
+    def test_midstream_exception_yields_frame_then_reraises(self):
+        # A real transport drop (httpx RemoteProtocolError et al.) must emit a
+        # diagnostic response.failed frame and then re-raise — pre-fix it
+        # propagated raw with no frame (the reported 'peer closed connection').
+        class _Boom(RuntimeError):
+            pass
+
+        async def _src():
+            yield b'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+            raise _Boom("peer closed connection")
+
+        async def _run():
+            out = []
+            agen = bridge_mod._stream_with_keepalive(_src(), _noop_aclose, 10.0)
+            try:
+                async for b in agen:
+                    out.append(b)
+            except _Boom:
+                return out, True
+            return out, False
+
+        out, reraised = asyncio.run(_run())
+        assert reraised, "original exception must propagate (unclean abort)"
+        joined = b"".join(out)
+        assert b"response.failed" in joined
+        assert b"upstream stream error" in joined
 
     def test_tail_terminal_detection_compact_and_spaced_and_event(self):
         assert xlate.tail_has_terminal_event(b'{"type":"response.completed"}')
         assert xlate.tail_has_terminal_event(b'{"type": "response.incomplete"}')
-        assert xlate.tail_has_terminal_event(b'event: response.failed\n')
+        # event-line form must be line-anchored; callers seed the scan window
+        # with b"\n" at stream start (see the caller contract in translate.py).
+        assert xlate.tail_has_terminal_event(b'\nevent: response.failed\n')
         assert not xlate.tail_has_terminal_event(b'{"type":"response.output_text.delta"}')
+
+    def test_tail_error_event_detection(self):
+        assert xlate.tail_has_error_event(b'data: {"type":"error","message":"boom"}\n\n')
+        assert xlate.tail_has_error_event(b'{"type": "error"}')
+        assert xlate.tail_has_error_event(b'prev\nevent: error\ndata: {}\n\n')
+        # escaped model text can't false-latch (quotes escape inside strings)
+        assert not xlate.tail_has_error_event(
+            b'data: {"type":"response.output_text.delta","delta":"\\"type\\":\\"error\\""}\n\n')
+        # unanchored event text inside a delta string can't false-latch
+        assert not xlate.tail_has_error_event(
+            b'data: {"type":"response.output_text.delta","delta":"event: error now"}\n\n')
 
     def test_event_marker_must_be_line_anchored_not_false_latched_by_model_text(self):
         """QC-C9-003 bypass guard: the bare string 'event: response.completed'
@@ -219,9 +369,13 @@ class TestC9_003_TruncationGuard:
             b'"delta":"event: response.completed now"}\n\n'
         )
         assert not xlate.tail_has_terminal_event(poison_quote)
-        # genuine SSE framing (leading newline OR tail start) still detected
+        # genuine SSE framing (leading newline) still detected
         assert xlate.tail_has_terminal_event(b"prev\nevent: response.completed\n")
-        assert xlate.tail_has_terminal_event(b"event: response.failed\ndata: {}\n")
+        assert xlate.tail_has_terminal_event(b"\nevent: response.failed\ndata: {}\n")
+        # NO window-start form: callers seed the scan window with b"\n" at
+        # stream start, so a window beginning with bare "event: ..." can only
+        # be model text cut at the carry boundary — it must NOT latch.
+        assert not xlate.tail_has_terminal_event(b"event: response.failed\ndata: {}\n")
 
     def test_async_chat_truncated_no_clean_stop(self):
         async def _src():
@@ -259,6 +413,62 @@ class TestC9_003_TruncationGuard:
         joined = b"".join(xlate.iter_responses_sse_as_chat(lines, "m", 1)).decode()
         assert '"error"' in joined
         assert '"finish_reason": "stop"' not in joined
+
+    def test_chat_path_midstream_exception_yields_error_chunk_then_aborts(self):
+        # /chat/completions streaming: a mid-stream upstream read failure must
+        # emit a diagnostic error chunk and then abort uncleanly — pre-fix the
+        # exception propagated raw with no frame (H5 hole, chat twin of H1).
+        class _RaisingStreamResponse:
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+
+            async def aiter_lines(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"hi"}'
+                raise RuntimeError("peer closed connection")
+
+            async def aclose(self):
+                pass
+
+        class _FakeClient:
+            def build_request(self, method, url, content=None, headers=None):
+                return ("req", url)
+
+            async def send(self, req, stream=True):
+                return _RaisingStreamResponse()
+
+            async def aclose(self):
+                pass
+
+        import unittest.mock as _mock
+        with _mock.patch.object(bridge_mod.httpx, "AsyncClient", lambda **k: _FakeClient()):
+            app = build_app(_StubProvider("solo"))
+
+            async def _run():
+                from starlette.requests import Request
+                body = json.dumps({"model": "gpt-5.5", "stream": True,
+                                   "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+                async def _receive():
+                    return {"type": "http.request", "body": body, "more_body": False}
+
+                scope = {"type": "http", "method": "POST", "path": "/chat/completions",
+                         "headers": [(b"content-type", b"application/json")],
+                         "query_string": b""}
+                route = next(r for r in app.routes
+                             if getattr(r, "path", None) == "/chat/completions")
+                resp = await route.endpoint(Request(scope, _receive))
+                chunks, exc = [], None
+                try:
+                    async for c in resp.body_iterator:
+                        chunks.append(c)
+                except Exception as e:  # noqa: BLE001
+                    exc = e
+                return chunks, exc
+
+            chunks, exc = asyncio.run(_run())
+        joined = b"".join(chunks)
+        assert b'"error"' in joined and b"upstream stream error" in joined
+        assert isinstance(exc, RuntimeError)  # original exception re-raised
 
     def test_parity_both_bridges_guard_truncation(self):
         codex = Path(bridge_mod.__file__).read_text()
@@ -464,20 +674,117 @@ class TestC9_007_BufferAndRetry:
         r = client.post("/v1/responses", json={"input": "hi", "stream": True})
         assert r.status_code == 200
         assert b"response.completed" in r.content
+        assert calls["n"] == 1  # complete on the first capture, no re-issue
 
-    def test_buffered_incomplete_retries_then_errors(self, monkeypatch):
+    def test_buffered_large_complete_stream_not_discarded(self, monkeypatch):
+        """REGRESSION (stream-drop RCA): pre-fix, the buffered path truncated
+        its scan window to 256B before scanning, so a LARGE response.completed
+        event was never recognized — the bridge discarded the fully successful
+        capture, re-issued the identical request (retries+1) times (burning
+        quota), and returned 'incomplete after retries' for 100% of calls."""
+        monkeypatch.setenv("KAIJU_CODEX_BUFFER_AND_RETRY", "1")
+        monkeypatch.setenv("KAIJU_CODEX_STREAM_BUFFER_RETRIES", "2")
+        big = json.dumps({
+            "id": "r", "status": "completed",
+            "output": [{"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": "y" * 8000}]}],
+            "usage": {"input_tokens": 5, "output_tokens": 4000},
+        }).encode()
+        stream = (b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+                  b'event: response.completed\n'
+                  b'data: {"type":"response.completed","response":' + big + b'}\n\n')
+        FakeClient, calls = _fake_client_factory([(200, stream)])
+        monkeypatch.setattr(bridge_mod.httpx, "AsyncClient", lambda **k: FakeClient())
+        client = TestClient(build_app(_StubProvider("solo")))
+        r = client.post("/v1/responses", json={"input": "hi", "stream": True})
+        assert r.status_code == 200
+        assert b"response.completed" in r.content
+        assert b"incomplete after retries" not in r.content
+        assert calls["n"] == 1, "successful capture was discarded and re-issued"
+
+    @staticmethod
+    def _drive_responses_route(app, body_dict):
+        """Invoke the /responses endpoint and consume its StreamingResponse
+        body_iterator directly, returning (chunks, exc). TestClient cannot be
+        used for the failure paths: it discards already-streamed bytes when the
+        app aborts mid-body, whereas real uvicorn flushes each yielded chunk to
+        the socket before closing (verified live in the stream-drop RCA)."""
+        from starlette.requests import Request
+
+        body_bytes = json.dumps(body_dict).encode()
+
+        async def _receive():
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+        async def _run():
+            scope = {"type": "http", "method": "POST", "path": "/responses",
+                     "headers": [(b"content-type", b"application/json")],
+                     "query_string": b""}
+            route = next(r for r in app.routes if getattr(r, "path", None) == "/responses")
+            resp = await route.endpoint(Request(scope, _receive))
+            chunks, exc = [], None
+            try:
+                async for c in resp.body_iterator:
+                    chunks.append(c)
+            except Exception as e:  # noqa: BLE001 — the abort is the contract
+                exc = e
+            return chunks, exc
+
+        return asyncio.run(_run())
+
+    def test_buffered_incomplete_retries_then_errors_and_aborts(self, monkeypatch):
         monkeypatch.setenv("KAIJU_CODEX_BUFFER_AND_RETRY", "1")
         monkeypatch.setenv("KAIJU_CODEX_STREAM_BUFFER_RETRIES", "1")
         # Upstream always returns a stream WITHOUT a terminal event.
         truncated = b'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
         FakeClient, calls = _fake_client_factory([(200, truncated)])
         monkeypatch.setattr(bridge_mod.httpx, "AsyncClient", lambda **k: FakeClient())
-        client = TestClient(build_app(_StubProvider("solo")))
-        r = client.post("/v1/responses", json={"input": "hi", "stream": True})
-        assert r.status_code == 200
-        # Never a truncated clean stream: ends with a synthetic failure frame.
-        assert b"response.failed" in r.content
+        chunks, exc = self._drive_responses_route(
+            build_app(_StubProvider("solo")), {"input": "hi", "stream": True})
+        joined = b"".join(chunks)
+        # Never a truncated clean stream: a synthetic failure frame, then an
+        # UNCLEAN abort (frame alone is swallowed by the harness litellm fork).
+        assert b"response.failed" in joined
+        assert b"incomplete after retries" in joined
+        assert isinstance(exc, bridge_mod.UpstreamTruncationError)
         assert calls["n"] >= 2  # re-issued at least once before giving up
+
+    def test_buffered_genuine_response_failed_relayed_then_aborted(self, monkeypatch):
+        # A capture ending at a GENUINE upstream response.failed is complete
+        # (no retry — the failure is server-side and deterministic for this
+        # body) but the replay must end in an unclean abort, not a clean close
+        # the litellm fork would turn into a fabricated success.
+        monkeypatch.setenv("KAIJU_CODEX_BUFFER_AND_RETRY", "1")
+        monkeypatch.setenv("KAIJU_CODEX_STREAM_BUFFER_RETRIES", "2")
+        failed = (b'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+                  b'event: response.failed\n'
+                  b'data: {"type":"response.failed","response":{"error":{"message":"server boom"}}}\n\n')
+        FakeClient, calls = _fake_client_factory([(200, failed)])
+        monkeypatch.setattr(bridge_mod.httpx, "AsyncClient", lambda **k: FakeClient())
+        chunks, exc = self._drive_responses_route(
+            build_app(_StubProvider("solo")), {"input": "hi", "stream": True})
+        joined = b"".join(chunks)
+        assert b"server boom" in joined  # real upstream failure relayed
+        assert isinstance(exc, bridge_mod.UpstreamTruncationError)
+        assert calls["n"] == 1  # terminal event -> no pointless re-issue
+
+    def test_buffered_deterministic_error_event_relayed_not_looped_forever(self, monkeypatch):
+        # A capture that consistently ends at a bare SSE `error` event is a
+        # deterministic upstream failure: after retries, relay the REAL error
+        # bytes (not a generic 'incomplete' message that discards them).
+        monkeypatch.setenv("KAIJU_CODEX_BUFFER_AND_RETRY", "1")
+        monkeypatch.setenv("KAIJU_CODEX_STREAM_BUFFER_RETRIES", "1")
+        err_stream = (b'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+                      b'event: error\n'
+                      b'data: {"type":"error","code":"quota_exceeded","message":"boom"}\n\n')
+        FakeClient, calls = _fake_client_factory([(200, err_stream)])
+        monkeypatch.setattr(bridge_mod.httpx, "AsyncClient", lambda **k: FakeClient())
+        chunks, exc = self._drive_responses_route(
+            build_app(_StubProvider("solo")), {"input": "hi", "stream": True})
+        joined = b"".join(chunks)
+        assert b"quota_exceeded" in joined  # the real upstream error survives
+        assert isinstance(exc, bridge_mod.UpstreamTruncationError)
+        assert calls["n"] == 2  # retried once, then relayed instead of looping
 
     def test_parity_both_bridges_have_buffered_path(self):
         codex = Path(bridge_mod.__file__).read_text()

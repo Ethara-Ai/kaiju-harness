@@ -595,17 +595,22 @@ async def _stream_with_failover(
                 saw_error = False
                 # Track only SSE *event lines* (`event: message_stop` / `event: error`)
                 # — matching arbitrary body bytes false-latches when the model's own
-                # output contains the literal `message_stop` / `"type":"error"`. Keep
-                # a small rolling buffer so a marker split across two chunks is still
-                # matched on a line boundary.
-                tail = b""
+                # output contains the literal `message_stop` / `"type":"error"`.
+                # Scan carry+chunk IN FULL, then keep a 64B carry (>= marker length)
+                # so a marker split across two chunks still matches. Never truncate
+                # BEFORE scanning: a marker sitting >256B before the end of a large
+                # chunk would scroll out unseen (the codex-bridge bug that flagged
+                # every long completed stream as truncated). The carry is seeded
+                # with a newline so an event line at stream start is line-anchored.
+                tail = b"\n"
                 try:
                     async for chunk in upstream.aiter_bytes():
-                        tail = (tail + chunk)[-256:]
-                        if b"\nevent: message_stop" in tail or tail.startswith(b"event: message_stop"):
+                        window = tail + chunk
+                        if b"\nevent: message_stop" in window:
                             saw_stop = True
-                        if b"\nevent: error" in tail or tail.startswith(b"event: error"):
+                        if b"\nevent: error" in window:
                             saw_error = True
+                        tail = window[-64:]
                         yield chunk
                 except Exception as e:  # noqa: BLE001 - any read failure mid-stream (not BaseException)
                     _LOG.warning("mid-stream read error after status 200: %s", e)
@@ -729,7 +734,7 @@ async def _stream_buffered_with_retry(
             fwd = _build_forward_headers(headers_in, access_token)
             fwd.setdefault("content-type", "application/json")
             buf = bytearray()
-            tail = b""
+            tail = b"\n"  # line-anchor seed for the event-line scan below
             saw_stop = False
             saw_error = False
             client = httpx.AsyncClient(timeout=_bridge_timeout(streaming=True))
@@ -765,11 +770,14 @@ async def _stream_buffered_with_retry(
                         pass
                     async for chunk in upstream.aiter_bytes():
                         buf += chunk
-                        tail = (tail + chunk)[-256:]
-                        if b"\nevent: message_stop" in tail or tail.startswith(b"event: message_stop"):
+                        # Scan carry+chunk in full, THEN truncate the carry —
+                        # see the event_stream twin above for why order matters.
+                        window = tail + chunk
+                        if b"\nevent: message_stop" in window:
                             saw_stop = True
-                        if b"\nevent: error" in tail or tail.startswith(b"event: error"):
+                        if b"\nevent: error" in window:
                             saw_error = True
+                        tail = window[-64:]
                 finally:
                     await cm.__aexit__(None, None, None)
             except Exception as e:  # noqa: BLE001 — mid-stream read/connect drop

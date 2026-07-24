@@ -108,6 +108,21 @@ def _max_inline_retries() -> int:
         return 3
 
 
+class UpstreamTruncationError(RuntimeError):
+    """Raised into the response stream AFTER the synthetic ``response.failed``
+    frame so the downstream socket closes UNCLEANLY (no terminating chunk).
+
+    The frame alone is not enough: the harness's litellm fork swallows a
+    ``response.failed`` event (no branch for it in its chat-bridge stream
+    translator -> empty chunk) and fabricates ``finish_reason="stop"`` at EOF,
+    recording a truncated turn as a clean success. An unclean close makes EVERY
+    client fail the call (httpx raises RemoteProtocolError -> litellm
+    MidStreamFallbackError -> aider logs it -> the harness module-level retry
+    re-issues the turn), while well-behaved Responses clients still get the
+    informative frame first.
+    """
+
+
 # Option D — buffer-and-retry: buffer the WHOLE upstream Responses SSE stream and
 # re-issue on a mid-stream drop so the client only ever receives a COMPLETE
 # response (or a clean error), never a truncated one. Parity with claude_code's
@@ -116,10 +131,11 @@ def _max_inline_retries() -> int:
 # DEFAULT OFF (opt-in): buffering means the client (aider/litellm) gets NO
 # incremental output until a turn completes, so a log-based inactivity watchdog
 # sees a frozen log for the whole turn and could false-kill a long
-# extended-thinking module. The mid-stream drop is already surfaced as an error
-# by the terminal-event guard in _stream_with_keepalive (so litellm num_retries /
-# recovery.py re-issue), making D a last resort. Enable with
-# KAIJU_CODEX_BUFFER_AND_RETRY=1.
+# extended-thinking module. In default (incremental) mode a mid-stream drop is
+# surfaced as a synthetic response.failed frame FOLLOWED BY an unclean socket
+# abort (see UpstreamTruncationError) so the harness's module-level retry
+# re-issues the turn; litellm's own num_retries does NOT cover mid-stream
+# failures. Enable with KAIJU_CODEX_BUFFER_AND_RETRY=1.
 def _buffer_and_retry_enabled() -> bool:
     return os.environ.get("KAIJU_CODEX_BUFFER_AND_RETRY", "0").strip().lower() in (
         "1", "true", "yes", "on",
@@ -169,19 +185,34 @@ async def _stream_with_keepalive(
     Real chunks are yielded exactly as received. The keep-alive is emitted only
     when NO upstream chunk is in flight (between reads), so it can never land in
     the middle of a ``data:`` event. Stops when the upstream iterator is exhausted
-    (``response.completed`` etc.) or raises; always closes the upstream response.
+    (``response.completed`` etc.); always closes the upstream response.
     Cancellation (client disconnect) propagates and the ``finally`` still closes.
 
     Truncation guard (parity with claude_code's event_stream): a plain socket
-    close is NOT proof the turn finished. We watch a rolling byte tail for a
-    Responses terminal event (response.completed/.incomplete/.failed); if the
-    stream ends WITHOUT one, we inject a synthetic ``response.failed`` frame so
-    the client raises instead of recording a truncated turn as a clean stop.
+    close is NOT proof the turn finished. Every chunk is scanned — carry+chunk
+    in FULL, per the tail_has_terminal_event caller contract — for a Responses
+    terminal event (response.completed/.incomplete/.failed). If the stream ends
+    OR errors without one, we yield a synthetic ``response.failed`` frame with
+    the drop telemetry and then RAISE so the client socket closes uncleanly;
+    see UpstreamTruncationError for why the frame alone is insufficient. A
+    stream ending at a GENUINE upstream ``response.failed`` is relayed and then
+    aborted the same way (the fork would fabricate a success from a clean
+    close), while a transport error AFTER a success terminal was forwarded is
+    ignored — the turn is complete and paid for.
     """
     ait = chunks.__aiter__()
     nxt: Optional[asyncio.Future] = None
-    tail = b""
+    # Terminal-marker scan state: 64B carry (>= marker length) seeded with a
+    # newline so an `event:` line at stream start is line-anchored; `log_tail`
+    # keeps a slightly longer window purely for drop diagnostics.
+    tail = b"\n"
+    log_tail = b""
     saw_terminal = False
+    saw_failed = False
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    last_read = t0
+    bytes_fwd = 0
     try:
         while True:
             nxt = asyncio.ensure_future(ait.__anext__())
@@ -194,7 +225,25 @@ async def _stream_with_keepalive(
                         chunk = await asyncio.wait_for(asyncio.shield(nxt), interval)
                     else:
                         chunk = await nxt
-                except asyncio.TimeoutError:
+                except asyncio.TimeoutError as e:
+                    if nxt.done():
+                        # The TimeoutError came from the upstream ITERATOR (a
+                        # done future), not from the keep-alive timer — yielding
+                        # a keep-alive and re-awaiting the completed future
+                        # would spin forever. Treat it as a mid-read failure.
+                        nxt = None
+                        if saw_terminal and not saw_failed:
+                            _LOG.info("codex stream: post-terminal TimeoutError "
+                                      "ignored (turn already complete): %s", e)
+                            return
+                        _LOG.warning(
+                            "codex stream error mid-read: TimeoutError: %s "
+                            "(elapsed=%.1fs bytes=%d tail=%r)",
+                            e, loop.time() - t0, bytes_fwd, log_tail)
+                        if not saw_terminal:
+                            yield _xlate.responses_truncation_error_sse(
+                                f"kaiju-bridge: upstream stream error: TimeoutError: {e}")
+                        raise
                     # Upstream idle (stalled or still reasoning): keep the client
                     # connection warm and keep waiting on the SAME pending read.
                     yield _KEEPALIVE_LINE
@@ -203,15 +252,68 @@ async def _stream_with_keepalive(
                     nxt = None
                     if not saw_terminal:
                         # Clean socket close but no terminal event -> truncated.
-                        _LOG.warning("codex stream ended without a terminal "
-                                     "response event -> signalling truncation")
+                        _LOG.warning(
+                            "codex stream truncated (clean close, no terminal "
+                            "event): elapsed=%.1fs bytes=%d gap_since_last_read="
+                            "%.1fs tail=%r",
+                            loop.time() - t0, bytes_fwd, loop.time() - last_read,
+                            log_tail)
                         yield _xlate.responses_truncation_error_sse()
+                        raise UpstreamTruncationError(
+                            "upstream stream ended without a terminal event "
+                            f"after {loop.time() - t0:.1f}s / {bytes_fwd} bytes"
+                        ) from None
+                    if saw_failed:
+                        # The turn genuinely FAILED upstream (response.failed
+                        # was relayed). A clean close here would let the
+                        # harness's litellm fork fabricate a success out of it
+                        # — abort uncleanly instead (no synthetic frame:
+                        # upstream's own failed frame was already forwarded).
+                        _LOG.warning(
+                            "codex stream: upstream reported response.failed "
+                            "(elapsed=%.1fs bytes=%d) -> unclean abort",
+                            loop.time() - t0, bytes_fwd)
+                        raise UpstreamTruncationError(
+                            "upstream reported response.failed (relayed)"
+                        ) from None
                     return
+                except Exception as e:
+                    # Mid-stream read failure (httpx RemoteProtocolError /
+                    # ReadError / ReadTimeout ...). Pre-fix this propagated raw
+                    # with no frame; now the client gets the diagnostic frame
+                    # first, then the unclean abort. (CancelledError is a
+                    # BaseException and is handled by the outer handler.)
+                    nxt = None
+                    if saw_terminal and not saw_failed:
+                        # The terminal event already reached the client — the
+                        # turn is complete and paid for; a post-terminal
+                        # transport hiccup (e.g. missing final chunked-body
+                        # terminator) must not convert it into a failure.
+                        _LOG.info("codex stream: post-terminal read error "
+                                  "ignored (turn already complete): %s: %s",
+                                  type(e).__name__, e)
+                        return
+                    _LOG.warning(
+                        "codex stream error mid-read: %s: %s (elapsed=%.1fs "
+                        "bytes=%d gap_since_last_read=%.1fs tail=%r)",
+                        type(e).__name__, e, loop.time() - t0, bytes_fwd,
+                        loop.time() - last_read, log_tail)
+                    if not saw_terminal:
+                        yield _xlate.responses_truncation_error_sse(
+                            "kaiju-bridge: upstream stream error: "
+                            f"{type(e).__name__}: {e}")
+                    raise
                 else:
                     nxt = None
-                    tail = (tail + chunk)[-256:]
-                    if _xlate.tail_has_terminal_event(tail):
+                    last_read = loop.time()
+                    bytes_fwd += len(chunk)
+                    window = tail + chunk
+                    if not saw_terminal and _xlate.tail_has_terminal_event(window):
                         saw_terminal = True
+                    if not saw_failed and _xlate.tail_has_failed_event(window):
+                        saw_failed = True
+                    tail = window[-64:]
+                    log_tail = window[-200:]
                     yield chunk
                     break
     except asyncio.CancelledError:
@@ -540,8 +642,15 @@ def build_app(provider=None) -> FastAPI:
         max_retries = _max_stream_buffer_retries()
 
         async def _capture() -> tuple[str, bytes]:
-            """(kind, body) where kind in {'ok','error','incomplete'}. 'ok' body
-            is a complete Responses SSE stream ready to replay verbatim."""
+            """(kind, payload) where kind in {'ok','ok_failed','error_relay',
+            'error','incomplete'}. 'ok' payload is a complete Responses SSE
+            stream (a real terminal event was seen) to replay verbatim;
+            'ok_failed' is complete but ends at a genuine upstream
+            ``response.failed`` (relay, then abort — the litellm fork would
+            fabricate a success from a clean close); 'error_relay' is a capture
+            that consistently ended at a bare SSE ``error`` event
+            (deterministic upstream failure — relay the real error, don't keep
+            re-paying for it); 'error' is an upstream HTTP error body."""
             attempt = 0
             while True:
                 # _open_upstream owns token acquisition + in-request account
@@ -550,23 +659,40 @@ def build_app(provider=None) -> FastAPI:
                 if err_resp is not None:
                     return ("error", getattr(err_resp, "body", b"") or b"")
                 buf = bytearray()
-                tail = b""
+                # Scan carry+chunk in FULL, then keep a 64B carry — see the
+                # tail_has_terminal_event caller contract (a truncated-first
+                # window misses the marker on every non-trivial turn).
+                tail = b"\n"
                 saw_terminal = False
+                saw_failed = False
+                saw_error = False
+                loop = asyncio.get_running_loop()
+                t0 = loop.time()
                 try:
                     async for chunk in upstream.aiter_raw():
                         buf += chunk
-                        tail = (tail + chunk)[-256:]
-                        if _xlate.tail_has_terminal_event(tail):
+                        window = tail + chunk
+                        if not saw_terminal and _xlate.tail_has_terminal_event(window):
                             saw_terminal = True
+                        if not saw_failed and _xlate.tail_has_failed_event(window):
+                            saw_failed = True
+                        if not saw_error and _xlate.tail_has_error_event(window):
+                            saw_error = True
+                        tail = window[-64:]
                 except Exception as e:  # noqa: BLE001 — mid-stream read/connect drop
-                    _LOG.warning("codex buffered stream: upstream drop (attempt %d/%d): %s",
-                                 attempt + 1, max_retries, e)
+                    _LOG.warning("codex buffered stream: upstream drop (attempt "
+                                 "%d/%d) after %.1fs/%d bytes: %s: %s",
+                                 attempt + 1, max_retries, loop.time() - t0,
+                                 len(buf), type(e).__name__, e)
                 finally:
                     await upstream.aclose()
                 if saw_terminal:
-                    return ("ok", bytes(buf))  # complete stream captured
+                    # complete stream captured
+                    return ("ok_failed" if saw_failed else "ok", bytes(buf))
                 attempt += 1
                 if attempt > max_retries:
+                    if saw_error and buf:
+                        return ("error_relay", bytes(buf))
                     _LOG.error("codex buffered stream: still incomplete after %d retries",
                                max_retries)
                     return ("incomplete", b"")
@@ -582,15 +708,32 @@ def build_app(provider=None) -> FastAPI:
                         await asyncio.wait_for(asyncio.shield(task), timeout=_STREAM_KEEPALIVE_SECS)
                     except asyncio.TimeoutError:
                         yield _KEEPALIVE_LINE  # keep the client<->bridge socket warm
-                kind, captured = task.result()
+                kind, payload = task.result()
                 if kind == "ok":
-                    yield captured
-                elif kind == "error":
+                    yield payload
+                    return
+                # Every non-ok outcome: informative frame (or the relayed real
+                # error) followed by an UNCLEAN abort — the harness's litellm
+                # fork swallows error frames into a fabricated clean stop, so
+                # only a socket-level failure reliably fails the client call
+                # (see UpstreamTruncationError).
+                if kind == "ok_failed":
+                    yield payload
+                    raise UpstreamTruncationError(
+                        "upstream reported response.failed (relayed)")
+                if kind == "error_relay":
+                    yield payload
+                    raise UpstreamTruncationError(
+                        "upstream stream ended at an error event (relayed)")
+                if kind == "error":
+                    excerpt = payload[:300].decode("utf-8", "replace")
                     yield _xlate.responses_truncation_error_sse(
-                        "kaiju-bridge: upstream error (buffered)")
-                else:  # incomplete
-                    yield _xlate.responses_truncation_error_sse(
-                        "kaiju-bridge: upstream stream incomplete after retries")
+                        f"kaiju-bridge: upstream error (buffered): {excerpt}")
+                    raise UpstreamTruncationError("upstream error (buffered)")
+                yield _xlate.responses_truncation_error_sse(
+                    "kaiju-bridge: upstream stream incomplete after retries")
+                raise UpstreamTruncationError(
+                    "upstream stream incomplete after retries")
             finally:
                 if not task.done():
                     task.cancel()
@@ -662,11 +805,23 @@ def build_app(provider=None) -> FastAPI:
             # Translate the upstream Responses SSE into Chat-Completions SSE
             # INCREMENTALLY (do not buffer the whole turn) so incremental output
             # keeps a log-based liveness watchdog fed and latency stays low.
+            # Clean-close truncation is guarded inside aiter_responses_sse_as_chat
+            # (error chunk instead of a clean stop); a mid-stream READ failure is
+            # guarded here: diagnostic error chunk, then re-raise so the client
+            # socket aborts uncleanly (parity with the /responses path — a clean
+            # [DONE] would let a lenient client record the turn as complete).
             async def _gen():
                 try:
                     async for chunk in _xlate.aiter_responses_sse_as_chat(
                         upstream.aiter_lines(), model, created):
                         yield chunk
+                except Exception as e:
+                    _LOG.warning("codex chat stream: upstream error mid-stream: "
+                                 "%s: %s", type(e).__name__, e)
+                    yield _xlate.chat_truncation_error_sse(
+                        "kaiju-bridge: upstream stream error: "
+                        f"{type(e).__name__}: {e}")
+                    raise
                 finally:
                     await upstream.aclose()
             return StreamingResponse(_gen(), status_code=200, media_type="text/event-stream")

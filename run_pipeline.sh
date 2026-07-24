@@ -713,6 +713,36 @@ _kill_tree() {
         || true
 }
 
+# Total CPU seconds consumed by the agent's process group (ported from
+# run_pipeline_go.sh — the go/ts/rust pipelines gained these with the
+# "stop false-killing healthy long-thinking agents" watchdog fix; the python
+# pipeline lacked them, so a >inactivity-limit silent reasoning turn was
+# exit-124-killed here while surviving on every other language).
+_pgroup_cpu_secs() {
+    # procps `ps -g <numeric>` selects by SESSION (the `set -m` agent leads a
+    # process GROUP, not a session), so on Linux `ps -o time= -g $1` matches
+    # nothing and the CPU veto was a silent no-op. Resolve the group's PIDs via
+    # pgrep -g (process group on BOTH procps and BSD), then sum with ps -p.
+    local _pids
+    _pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$_pids" ]] && { printf "0"; return; }
+    ps -o time= -p "$_pids" 2>/dev/null | awk '
+        { gsub(/ /,""); n=split($0,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; t+=s }
+        END { printf "%d", t+0 }'
+}
+
+# True (0) if any process in the agent's group holds an ESTABLISHED TCP
+# connection — a long extended-thinking LLM turn writes no logs but keeps its
+# model-API socket open. Returns 2 if lsof is unavailable (caller falls back
+# to the CPU-progress check).
+_pgroup_has_live_conn() {
+    command -v lsof >/dev/null 2>&1 || return 2
+    local pids
+    pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$pids" ]] && return 1
+    lsof -nP -a -p "$pids" -iTCP -sTCP:ESTABLISHED >/dev/null 2>&1
+}
+
 watchdog_run() {
     local agent_pid="$1"
     local log_dir="$2"
@@ -724,6 +754,19 @@ watchdog_run() {
 
     local hard_timeout_warned="false"
     local mtime_functional="true"
+    local _veto_start=0  # when the live-conn/CPU gate started suppressing the inactivity kill
+
+    # How long a live-connection / advancing-CPU agent may run WITHOUT log
+    # progress before we kill it anyway. A long extended-thinking turn writes
+    # NOTHING to the log until it completes (buffered SSE stream), so log
+    # inactivity alone is not a hang. The absolute wall-time cap still backstops
+    # a true hang. Default 90 min; override via WATCHDOG_LIVECONN_VETO_SECS.
+    # (Ported from run_pipeline_go.sh for cross-language watchdog parity.)
+    local _liveconn_veto_secs="${WATCHDOG_LIVECONN_VETO_SECS:-}"
+    if ! [[ "$_liveconn_veto_secs" =~ ^[0-9]+$ ]] || [[ "$_liveconn_veto_secs" -lt 1 ]]; then
+        _liveconn_veto_secs=$(( inactivity_limit * 6 ))
+        [[ "$_liveconn_veto_secs" -lt 5400 ]] && _liveconn_veto_secs=5400
+    fi
 
     # Validate get_mtime works before relying on it
     local _probe_mtime
@@ -766,10 +809,12 @@ watchdog_run() {
             idle=$(( now_epoch - latest_mtime ))
             if [[ $idle -lt $inactivity_limit ]]; then
                 agent_active="true"
+                _veto_start=0  # real log progress — clear the alive-but-silent veto timer
             fi
         else
             # No logs yet (slow startup, model download, dep install) — benefit of the doubt
             agent_active="true"
+            _veto_start=0
         fi
 
         # Absolute wall-time cap — unconditional, prevents unbounded spend
@@ -805,7 +850,8 @@ watchdog_run() {
             fi
         fi
 
-        # Inactivity timeout: kill if no log writes within the limit
+        # Inactivity timeout: kill if no log writes within the limit — but NOT if
+        # the agent is healthily waiting on the model or still computing locally.
         if [[ "$latest_mtime" -gt 0 ]] && [[ "$agent_active" == "false" ]]; then
             # An intentional rate-limit pause is NOT a hang. If recovery left a
             # fresh `.rate_limit_paused` marker, suppress the inactivity kill — the
@@ -813,7 +859,43 @@ watchdog_run() {
             # cap (checked above) still bounds an unbounded pause.
             if _pause_marker_fresh "$log_dir" "$(( inactivity_limit * 2 ))"; then
                 log "  WATCHDOG: log idle ${idle}s but a fresh rate-limit pause marker is present — intentionally paused, not stuck. Continuing."
+                _veto_start=0
                 continue
+            fi
+            # Log-inactivity ALONE is not "stuck". A long server-side extended-
+            # thinking turn writes no logs and burns ~0 local CPU (blocked on the
+            # socket). Before killing — and wasting a paid turn — require BOTH: no
+            # live LLM connection AND no local CPU progress over a short window.
+            # (Ported from run_pipeline_go.sh; the python pipeline was the only
+            # one still killing healthy long-thinking agents at exit 124.)
+            local _alive="false"
+            if _pgroup_has_live_conn "$agent_pid"; then
+                _alive="true"
+                if [[ $(( idle % 60 )) -lt 5 ]]; then
+                    log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                fi
+            else
+                local _cpu1 _cpu2
+                _cpu1=$(_pgroup_cpu_secs "$agent_pid")
+                sleep 3
+                _cpu2=$(_pgroup_cpu_secs "$agent_pid")
+                if [[ "${_cpu2:-0}" -gt "${_cpu1:-0}" ]]; then
+                    _alive="true"
+                    log "  WATCHDOG: log idle ${idle}s but agent CPU advancing (${_cpu1}->${_cpu2}s) — working, not stuck. Continuing."
+                fi
+            fi
+            if [[ "$_alive" == "true" ]]; then
+                # A live connection/CPU DELAYS the inactivity kill, it must not VETO
+                # it forever — bound the veto at _liveconn_veto_secs; the absolute
+                # wall-time cap still backstops a genuine infinite hang.
+                if [[ "$_veto_start" -eq 0 ]]; then _veto_start="$now_epoch"; fi
+                local _veto_for=$(( now_epoch - _veto_start ))
+                if [[ "$_veto_for" -lt "$_liveconn_veto_secs" ]]; then
+                    continue
+                fi
+                log "  WATCHDOG: agent alive-but-silent for ${_veto_for}s (> ${_liveconn_veto_secs}s live-conn veto cap) — killing despite live signal."
+            else
+                _veto_start=0
             fi
             log "  WATCHDOG: No log activity for ${idle}s (limit: ${inactivity_limit}s). Agent appears stuck."
             if [[ -n "$latest_log" ]] && [[ -f "$latest_log" ]]; then

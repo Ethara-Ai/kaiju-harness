@@ -186,21 +186,33 @@ RESPONSES_TERMINAL_TYPES = ("response.completed", "response.incomplete", "respon
 
 
 def tail_has_terminal_event(tail: bytes) -> bool:
-    """True if a rolling SSE byte tail contains a Responses terminal event.
+    """True if a scan window contains a Responses terminal event.
 
     Detects the JSON ``type`` field (compact or spaced) and the SSE ``event:``
-    line form. Callers keep a small rolling buffer (~256B) so a marker split
-    across two upstream chunks is still matched on the next read. This is the
-    byte-stream analogue of the line-level terminal check in
-    ``aiter_responses_sse_as_chat``.
+    line form. This is the byte-stream analogue of the line-level terminal
+    check in ``aiter_responses_sse_as_chat``.
 
-    The ``event:`` form MUST be line-anchored (leading ``\\n`` or tail start),
-    exactly like claude_code's ``message_stop`` check
-    (agent/claude_code/bridge.py): the bare substring ``event: response.completed``
-    contains no JSON-escaped characters, so it appears verbatim inside a model's
-    own ``output_text.delta`` text and would false-latch the terminal flag,
-    bypassing the truncation guard. The ``"type":"..."`` JSON forms are safe
-    because a literal ``"`` inside a delta string is always escaped to ``\\"``.
+    Caller contract (the fix for the pre-2026-07 truncation false-negatives):
+    scan ``carry + chunk`` IN FULL for every upstream chunk, THEN truncate the
+    carry to ~64B (>= marker length, so a marker split across two chunks still
+    matches on the next read). Scanning the full window matters because the
+    codex backend's ``response.completed`` data line embeds the ENTIRE response
+    object — on any non-trivial turn the marker sits kilobytes before the end
+    of the event, so a window truncated BEFORE scanning (the old
+    ``(tail+chunk)[-256:]``) never sees it and every long completed stream gets
+    flagged as truncated. Seed the carry with ``b"\\n"`` at stream start so an
+    ``event:`` line in the first bytes is line-anchored.
+
+    The ``event:`` form MUST be line-anchored (leading ``\\n``), exactly like
+    claude_code's ``message_stop`` check (agent/claude_code/bridge.py): the
+    bare substring ``event: response.completed`` contains no JSON-escaped
+    characters, so it appears verbatim inside a model's own
+    ``output_text.delta`` text and would false-latch the terminal flag,
+    bypassing the truncation guard. (There is deliberately NO window-start
+    form: with a seeded carry a genuine event line is always preceded by a
+    real newline, and a window may begin mid-delta at the carry boundary.)
+    The ``"type":"..."`` JSON forms are safe because a literal ``"`` inside a
+    delta string is always escaped to ``\\"``.
     """
     for t in RESPONSES_TERMINAL_TYPES:
         tb = t.encode()
@@ -208,9 +220,38 @@ def tail_has_terminal_event(tail: bytes) -> bool:
             return True
         if b'"type": "' + tb + b'"' in tail:
             return True
-        if (b"\nevent: " + tb) in tail or tail.startswith(b"event: " + tb):
+        if (b"\nevent: " + tb) in tail:
             return True
     return False
+
+
+def tail_has_failed_event(tail: bytes) -> bool:
+    """True if the window contains the ``response.failed`` terminal marker
+    specifically (a subset of ``tail_has_terminal_event``). A stream that ends
+    AT a genuine upstream ``response.failed`` is complete for relay purposes
+    but must still be followed by an UNCLEAN abort: the harness's litellm fork
+    has no branch for failed frames and would fabricate a clean stop (see
+    bridge.UpstreamTruncationError). Same caller contract as
+    ``tail_has_terminal_event``; only upstream bytes are ever scanned, so the
+    bridge's own synthetic frame cannot latch this."""
+    return (b'"type":"response.failed"' in tail
+            or b'"type": "response.failed"' in tail
+            or b"\nevent: response.failed" in tail)
+
+
+def tail_has_error_event(tail: bytes) -> bool:
+    """True if a scan window contains a bare SSE ``error`` event.
+
+    ``error`` is NOT a Responses terminal type (that set is
+    ``RESPONSES_TERMINAL_TYPES``), but a stream that repeatedly ends right
+    after one is a deterministic upstream failure: the buffered path relays
+    the captured stream verbatim after its retries are exhausted instead of
+    discarding the real error. Same caller contract and anchoring rules as
+    ``tail_has_terminal_event``.
+    """
+    if b'"type":"error"' in tail or b'"type": "error"' in tail:
+        return True
+    return b"\nevent: error\n" in tail
 
 
 # Message injected when the upstream stream ends WITHOUT a terminal event so the
@@ -222,10 +263,15 @@ _FAILED_MSG = "kaiju-bridge: upstream reported a failed/error response"
 def responses_truncation_error_sse(message: str = _TRUNCATION_MSG) -> bytes:
     """A synthetic Responses-API failure event to inject when the native SSE
     stream ends without a terminal event, so a Responses client (litellm
-    responses-mode) raises instead of recording a truncated 'complete' turn."""
+    responses-mode) raises instead of recording a truncated 'complete' turn.
+
+    The leading newline terminates any partial ``data:`` line the truncated
+    upstream left dangling — without it the ``event:`` line glues onto the
+    partial line and SSE parsers miss the frame (parity with claude_code's
+    _sse_error_bytes)."""
     body = json.dumps({"type": "response.failed",
                        "response": {"error": {"message": message}}})
-    return b"event: response.failed\ndata: " + body.encode() + b"\n\n"
+    return b"\nevent: response.failed\ndata: " + body.encode() + b"\n\n"
 
 
 def chat_truncation_error_sse(message: str = _TRUNCATION_MSG, err_type: str = "api_error") -> bytes:

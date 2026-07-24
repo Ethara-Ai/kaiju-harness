@@ -903,6 +903,49 @@ _kill_tree() {
         || true
 }
 
+# An intentional rate-limit pause is NOT a hang: recovery re-touches a
+# `.rate_limit_paused` marker each heartbeat while it waits out a provider
+# cap. Fresh marker => suppress the inactivity kill (the absolute wall-time
+# cap still bounds an unbounded pause). Parity with run_pipeline.sh (B15).
+_pause_marker_fresh() {
+    local search_dir="$1"
+    local fresh_within="$2"
+    local now mt newest_mt=0
+    now=$(date +%s)
+    while IFS= read -r marker; do
+        mt=$(get_mtime "$marker")
+        if [[ "$mt" -gt "$newest_mt" ]]; then newest_mt="$mt"; fi
+    done < <(find "$search_dir" -name ".rate_limit_paused" 2>/dev/null)
+    [[ "$newest_mt" -gt 0 ]] || return 1
+    local age=$(( now - newest_mt ))
+    [[ "$age" -lt "$fresh_within" ]]
+}
+
+# Total CPU seconds consumed by the agent's process group (watchdog-veto parity
+# with the other pipelines — see run_pipeline.sh). procps `ps -g <numeric>`
+# selects by SESSION, so PIDs are resolved via pgrep -g (process group on BOTH
+# procps and BSD) and summed with ps -p.
+_pgroup_cpu_secs() {
+    local _pids
+    _pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$_pids" ]] && { printf "0"; return; }
+    ps -o time= -p "$_pids" 2>/dev/null | awk '
+        { gsub(/ /,""); n=split($0,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; t+=s }
+        END { printf "%d", t+0 }'
+}
+
+# True (0) if any process in the agent's group holds an ESTABLISHED TCP
+# connection — a long extended-thinking LLM turn writes no logs but keeps its
+# model-API socket open. Returns 2 if lsof is unavailable (caller falls back
+# to the CPU-progress check).
+_pgroup_has_live_conn() {
+    command -v lsof >/dev/null 2>&1 || return 2
+    local pids
+    pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$pids" ]] && return 1
+    lsof -nP -a -p "$pids" -iTCP -sTCP:ESTABLISHED >/dev/null 2>&1
+}
+
 watchdog_run() {
     local agent_pid="$1"
     local log_dir="$2"
@@ -914,6 +957,16 @@ watchdog_run() {
 
     local hard_timeout_warned="false"
     local mtime_functional="true"
+    local _veto_start=0  # when the live-conn/CPU gate started suppressing the inactivity kill
+
+    # How long a live-connection / advancing-CPU agent may run WITHOUT log
+    # progress before we kill it anyway (watchdog parity with run_pipeline.sh;
+    # a long extended-thinking turn writes nothing until it completes).
+    local _liveconn_veto_secs="${WATCHDOG_LIVECONN_VETO_SECS:-}"
+    if ! [[ "$_liveconn_veto_secs" =~ ^[0-9]+$ ]] || [[ "$_liveconn_veto_secs" -lt 1 ]]; then
+        _liveconn_veto_secs=$(( inactivity_limit * 6 ))
+        [[ "$_liveconn_veto_secs" -lt 5400 ]] && _liveconn_veto_secs=5400
+    fi
 
     local _probe_mtime
     _probe_mtime=$(get_mtime "/proc/self/status")
@@ -970,10 +1023,12 @@ watchdog_run() {
             idle=$(( now_epoch - latest_mtime ))
             if [[ $idle -lt $inactivity_limit ]]; then
                 agent_active="true"
+                _veto_start=0  # real log progress — clear the alive-but-silent veto timer
             fi
         else
             # No logs yet (slow startup, model download, dep install) — benefit of the doubt
             agent_active="true"
+            _veto_start=0
         fi
 
         # Absolute wall-time cap — unconditional, prevents unbounded spend
@@ -1009,8 +1064,44 @@ watchdog_run() {
             fi
         fi
 
-        # Inactivity timeout: kill if no log writes within the limit
+        # Inactivity timeout: kill if no log writes within the limit — but NOT if
+        # the agent is healthily waiting on the model or still computing locally
+        # (watchdog-veto parity with run_pipeline.sh / go / ts / rust / c).
         if [[ "$latest_mtime" -gt 0 ]] && [[ "$agent_active" == "false" ]]; then
+            if _pause_marker_fresh "$log_dir" "$(( inactivity_limit * 2 ))"; then
+                log "  WATCHDOG: log idle ${idle}s but a fresh rate-limit pause marker is present — intentionally paused, not stuck. Continuing."
+                _veto_start=0
+                continue
+            fi
+            local _alive="false"
+            if _pgroup_has_live_conn "$agent_pid"; then
+                _alive="true"
+                if [[ $(( idle % 60 )) -lt 5 ]]; then
+                    log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                fi
+            else
+                local _cpu1 _cpu2
+                _cpu1=$(_pgroup_cpu_secs "$agent_pid")
+                sleep 3
+                _cpu2=$(_pgroup_cpu_secs "$agent_pid")
+                if [[ "${_cpu2:-0}" -gt "${_cpu1:-0}" ]]; then
+                    _alive="true"
+                    log "  WATCHDOG: log idle ${idle}s but agent CPU advancing (${_cpu1}->${_cpu2}s) — working, not stuck. Continuing."
+                fi
+            fi
+            if [[ "$_alive" == "true" ]]; then
+                # A live connection/CPU DELAYS the inactivity kill, it must not VETO
+                # it forever — bound the veto at _liveconn_veto_secs; the absolute
+                # wall-time cap still backstops a genuine infinite hang.
+                if [[ "$_veto_start" -eq 0 ]]; then _veto_start="$now_epoch"; fi
+                local _veto_for=$(( now_epoch - _veto_start ))
+                if [[ "$_veto_for" -lt "$_liveconn_veto_secs" ]]; then
+                    continue
+                fi
+                log "  WATCHDOG: agent alive-but-silent for ${_veto_for}s (> ${_liveconn_veto_secs}s live-conn veto cap) — killing despite live signal."
+            else
+                _veto_start=0
+            fi
             log "  WATCHDOG: No log activity for ${idle}s (limit: ${inactivity_limit}s). Agent appears stuck."
             if [[ -n "$latest_log" ]] && [[ -f "$latest_log" ]]; then
                 log "  WATCHDOG: Last aider log: $(basename "$(dirname "$latest_log")")"

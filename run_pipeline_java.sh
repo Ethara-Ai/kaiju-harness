@@ -664,6 +664,44 @@ kill_tree() {
     kill -"$sig" "$pid" 2>/dev/null || true
 }
 
+# PIDs of the agent process tree (root + all descendants). The java agent is
+# NOT a process-group leader (no `set -m`; kill_tree walks children with
+# pgrep -P), so the pgroup-based helpers the other pipelines use would match
+# nothing here — walk the tree instead. pgrep -P accepts a comma-separated
+# parent list on both procps and BSD.
+_watchdog_tree_pids() {
+    local pids="$1" frontier="$1" next
+    while [[ -n "$frontier" ]]; do
+        next=$(pgrep -P "$(echo "$frontier" | tr ' ' ',')" 2>/dev/null | tr '\n' ' ')
+        frontier=$(echo "$next" | xargs 2>/dev/null || true)
+        [[ -n "$frontier" ]] && pids="$pids $frontier"
+    done
+    echo "$pids"
+}
+
+# Total CPU seconds consumed by the agent tree (watchdog-veto parity with the
+# other pipelines — see run_pipeline.sh).
+_pgroup_cpu_secs() {
+    local _pids
+    _pids=$(_watchdog_tree_pids "$1" | tr ' ' '\n' | paste -sd, -)
+    [[ -z "$_pids" ]] && { printf "0"; return; }
+    ps -o time= -p "$_pids" 2>/dev/null | awk '
+        { gsub(/ /,""); n=split($0,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; t+=s }
+        END { printf "%d", t+0 }'
+}
+
+# True (0) if any process in the agent tree holds an ESTABLISHED TCP
+# connection — a long extended-thinking LLM turn writes no logs but keeps its
+# model-API socket open. Returns 2 if lsof is unavailable (caller falls back
+# to the CPU-progress check).
+_pgroup_has_live_conn() {
+    command -v lsof >/dev/null 2>&1 || return 2
+    local pids
+    pids=$(_watchdog_tree_pids "$1" | tr ' ' '\n' | paste -sd, -)
+    [[ -z "$pids" ]] && return 1
+    lsof -nP -a -p "$pids" -iTCP -sTCP:ESTABLISHED >/dev/null 2>&1
+}
+
 # Watchdog: identical to Python pipeline
 watchdog_run() {
     local agent_pid="$1"
@@ -675,6 +713,15 @@ watchdog_run() {
     start_time=$(date +%s)
 
     local hard_timeout_warned="false"
+    local _veto_start=0  # when the live-conn/CPU gate started suppressing the inactivity kill
+
+    # How long a live-connection / advancing-CPU agent may run WITHOUT log
+    # progress before we kill it anyway (watchdog parity with run_pipeline.sh).
+    local _liveconn_veto_secs="${WATCHDOG_LIVECONN_VETO_SECS:-}"
+    if ! [[ "$_liveconn_veto_secs" =~ ^[0-9]+$ ]] || [[ "$_liveconn_veto_secs" -lt 1 ]]; then
+        _liveconn_veto_secs=$(( inactivity_limit * 6 ))
+        [[ "$_liveconn_veto_secs" -lt 5400 ]] && _liveconn_veto_secs=5400
+    fi
 
     while kill -0 "$agent_pid" 2>/dev/null; do
         sleep 15
@@ -709,9 +756,11 @@ watchdog_run() {
             idle=$(( now_epoch - latest_mtime ))
             if [[ $idle -lt $inactivity_limit ]]; then
                 agent_active="true"
+                _veto_start=0  # real log progress — clear the alive-but-silent veto timer
             fi
         else
             agent_active="true"
+            _veto_start=0
         fi
 
         # Absolute wall-time cap
@@ -756,7 +805,38 @@ watchdog_run() {
             # unbounded pause, so this cannot hang forever.
             if _pause_marker_fresh "$log_dir" "$(( inactivity_limit * 2 ))"; then
                 log "  WATCHDOG: log idle ${idle}s but a fresh rate-limit pause marker is present — intentionally paused, not stuck. Continuing."
+                _veto_start=0
                 continue
+            fi
+            # Log-inactivity ALONE is not "stuck": a long server-side extended-
+            # thinking turn writes no logs and burns ~0 local CPU. Require BOTH
+            # no live LLM connection AND no local CPU progress before killing
+            # (watchdog-veto parity with run_pipeline.sh).
+            local _alive="false"
+            if _pgroup_has_live_conn "$agent_pid"; then
+                _alive="true"
+                if [[ $(( idle % 60 )) -lt 5 ]]; then
+                    log "  WATCHDOG: log idle ${idle}s but a live LLM connection is open — thinking, not stuck. Continuing."
+                fi
+            else
+                local _cpu1 _cpu2
+                _cpu1=$(_pgroup_cpu_secs "$agent_pid")
+                sleep 3
+                _cpu2=$(_pgroup_cpu_secs "$agent_pid")
+                if [[ "${_cpu2:-0}" -gt "${_cpu1:-0}" ]]; then
+                    _alive="true"
+                    log "  WATCHDOG: log idle ${idle}s but agent CPU advancing (${_cpu1}->${_cpu2}s) — working, not stuck. Continuing."
+                fi
+            fi
+            if [[ "$_alive" == "true" ]]; then
+                if [[ "$_veto_start" -eq 0 ]]; then _veto_start="$now_epoch"; fi
+                local _veto_for=$(( now_epoch - _veto_start ))
+                if [[ "$_veto_for" -lt "$_liveconn_veto_secs" ]]; then
+                    continue
+                fi
+                log "  WATCHDOG: agent alive-but-silent for ${_veto_for}s (> ${_liveconn_veto_secs}s live-conn veto cap) — killing despite live signal."
+            else
+                _veto_start=0
             fi
             log "  WATCHDOG: No log activity for ${idle}s (limit: ${inactivity_limit}s). Agent appears stuck."
             log "  WATCHDOG: Killing agent (PID ${agent_pid})."

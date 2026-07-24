@@ -659,7 +659,14 @@ _kill_tree() {
 # Cumulative CPU seconds for the whole process group led by $1 — a "still
 # computing locally" liveness gate.
 _pgroup_cpu_secs() {
-    ps -o time= -g "$1" 2>/dev/null | awk '
+    # procps `ps -g <numeric>` selects by SESSION (the `set -m` agent leads a
+    # process GROUP, not a session), so on Linux `ps -o time= -g $1` matches
+    # nothing and the CPU veto was a silent no-op. Resolve the group's PIDs via
+    # pgrep -g (process group on BOTH procps and BSD), then sum with ps -p.
+    local _pids
+    _pids=$(pgrep -g "$1" 2>/dev/null | paste -sd, -)
+    [[ -z "$_pids" ]] && { printf "0"; return; }
+    ps -o time= -p "$_pids" 2>/dev/null | awk '
         { gsub(/ /,""); n=split($0,a,":"); s=0; for(i=1;i<=n;i++) s=s*60+a[i]; t+=s }
         END { printf "%d", t+0 }'
 }
