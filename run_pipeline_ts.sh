@@ -1028,8 +1028,8 @@ _auto_resume_agent() {
     local _ld="$1" _alog="$2"; shift 2
     [[ "${1:-}" == "--" ]] && shift
     local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
-    _sweep_limbo_modules \"$_ld\"
-    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+    _sweep_limbo_modules "$_ld"
+    _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
     while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
         _auto=$((_auto + 1))
         log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
@@ -1048,8 +1048,8 @@ _auto_resume_agent() {
         set -e
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
-        _sweep_limbo_modules \"$_ld\"
-    _nr=$(find \"$_ld\" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
+        _sweep_limbo_modules "$_ld"
+    _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
         log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
