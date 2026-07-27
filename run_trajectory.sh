@@ -629,6 +629,25 @@ _atif_perid = len(glob.glob(f"outputs/{uuid}/Harbor_Data/Trajectory/**/trajector
 _atif_shared = len(glob.glob(f"Harbor_Data/Trajectory/**/*{split}*/trajectory.json", recursive=True))
 print(f"   ATIF trajectory files: {_atif_perid} in outputs/{uuid}/Harbor_Data/Trajectory ({_atif_shared} in shared top-level Harbor_Data)")
 PY
+
+# ---- 5b. automatic trajectory verification ----
+# FULL verification by default: deterministic gate + author TRUTH.md/rubric/pytest
+# predicates (--build) + cross-family LLM judge (--judge) + independent re-run
+# (--reexec). Generation/judge need a model bridge up (the run's bridge for
+# generation; the cross-family bridge, e.g. claude-code :8765 to judge a GPT run,
+# for the judge) — each piece is LOUD about what it did / why it skipped. Never fatal.
+#   KAIJU_VERIFY_MINIMAL=1  -> deterministic gate only (no model, no cost)
+#   KAIJU_VERIFY_NO_BUILD=1 / _NO_JUDGE=1 / _NO_REEXEC=1  -> drop that piece
+echo "== [5b/5] verify trajectory =="
+_VFLAGS=""
+if [[ "${KAIJU_VERIFY_MINIMAL:-0}" != "1" ]]; then
+  [[ "${KAIJU_VERIFY_NO_BUILD:-0}"  == "1" ]] || _VFLAGS="$_VFLAGS --build"
+  [[ "${KAIJU_VERIFY_NO_PYTEST:-0}" == "1" ]] || _VFLAGS="$_VFLAGS --pytest"
+  [[ "${KAIJU_VERIFY_NO_JUDGE:-0}"  == "1" ]] || _VFLAGS="$_VFLAGS --judge"
+  [[ "${KAIJU_VERIFY_NO_REEXEC:-0}" == "1" ]] || _VFLAGS="$_VFLAGS --reexec"
+fi
+python -m kaiju.verification.autorun "outputs/$UUID" $_VFLAGS || \
+  echo "   [verify] verification step errored (non-fatal)"
 if [[ "${REUSE_BRIDGE:-0}" == "1" ]]; then
   echo "== done. outputs/$UUID  (bridge LEFT RUNNING per --reuse-bridge; stop manually with 'bash scripts/claude_code_bridge.sh stop' or 'pkill -f openai_codex') =="
 else
