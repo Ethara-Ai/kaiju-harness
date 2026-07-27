@@ -25,7 +25,7 @@ from agent.agent_utils_java import (
 )
 from agent.agents_java import JavaAgents
 from agent.agents import TransientLLMError
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC, mark_module_started
 from agent.config_java import JavaAgentConfig
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
 from agent.llm_cost_capture import capture_module_calls
@@ -530,6 +530,7 @@ def run_java_agent(
                 # so the inactivity watchdog sees progress and a worker killed
                 # mid-module keeps a partial trajectory — parity with go/rust/python
                 # (previously java wrote neither file per module).
+                mark_module_started(test_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
 
@@ -648,6 +649,7 @@ def run_java_agent(
                     logger.info("Skipping already-completed module: %s", file_log_name)
                     continue
 
+                mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 logger.info("Linting: %s", rel_path)
 
                 if thinking_capture is not None:
@@ -741,6 +743,7 @@ def run_java_agent(
                     logger.info("Skipping already-completed module: %s", file_log_name)
                     continue
 
+                mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 logger.info("Processing: %s", rel_path)
 
                 # Live turn flush -> <module>/turns.jsonl + .heartbeat touch (parity

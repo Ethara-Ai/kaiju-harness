@@ -38,7 +38,7 @@ from agent.agent_utils_js import (
 )
 from agent.agents_js import AiderJsAgents
 from agent.agents import TransientLLMError
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC, mark_module_started
 from agent.class_types import AgentConfig
 from agent.llm_cost_capture import capture_module_calls
 from agent.module_patch import module_file_patch
@@ -375,6 +375,7 @@ def _run_agent_for_repo_js_impl(
                     # touch .heartbeat (crash-resilience + watchdog liveness) —
                     # parity with go/rust/python. Without it a mid-module kill loses
                     # the partial trajectory and .heartbeat is never written.
+                    mark_module_started(test_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
 
@@ -504,6 +505,7 @@ def _run_agent_for_repo_js_impl(
                         )
                         continue
 
+                    mark_module_started(lint_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(lint_log_dir / "turns.jsonl")
 
@@ -599,6 +601,7 @@ def _run_agent_for_repo_js_impl(
                         logger.info("Skipping already-drafted file: %s", file_name)
                         continue
 
+                    mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
 

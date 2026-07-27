@@ -21,7 +21,7 @@ import shlex
 import sys
 from agent.agents_ts import TsAiderAgents
 from agent.agents import TransientLLMError
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC, mark_module_started
 from typing import cast
 from agent.class_types import AgentConfig
 from agent.thinking_capture import ThinkingCapture
@@ -251,6 +251,7 @@ def run_agent_for_repo_ts(
 
                     # Live-flush per-module turns.jsonl + touch .heartbeat
                     # (crash-resilience + watchdog liveness) — parity with go/rust.
+                    mark_module_started(test_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(test_log_dir / "turns.jsonl")
 
@@ -415,6 +416,7 @@ def run_agent_for_repo_ts(
                         logger.info(f"Skipping already-linted file: {lint_file_name}")
                         continue
 
+                    mark_module_started(lint_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(lint_log_dir / "turns.jsonl")
 
@@ -509,6 +511,7 @@ def run_agent_for_repo_ts(
                         logger.info(f"Skipping already-drafted file: {file_name}")
                         continue
 
+                    mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                     if thinking_capture is not None:
                         thinking_capture.set_live_path(file_log_dir / "turns.jsonl")
 

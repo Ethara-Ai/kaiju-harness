@@ -37,7 +37,7 @@ from agent.run_agent import (
     _skip_failed_module,
 )
 from agent.agents import TransientLLMError
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC, mark_module_started
 import logging
 from agent.claude_code.recovery import run_with_recovery
 
@@ -307,6 +307,7 @@ def _run_agent_for_repo_impl(
                     )
                     continue
 
+                mark_module_started(test_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if os.environ.get("KAIJU_DIRECT_PYTEST"):
                     test_cmd = f"{sys.executable} -m pytest {test_file} --tb=short --continue-on-collection-errors --no-header -q"
                 else:
@@ -418,6 +419,7 @@ def _run_agent_for_repo_impl(
                     logger.info(f"Skipping already-linted file: {lint_file_name}")
                     continue
 
+                mark_module_started(lint_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
@@ -514,6 +516,7 @@ def _run_agent_for_repo_impl(
                     logger.info(f"Skipping already-drafted file: {file_name}")
                     continue
 
+                mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if agent_config.add_import_module_to_context:
                     dependencies = import_dependencies.get(f, [])
                     iter_message = update_message_with_dependencies(

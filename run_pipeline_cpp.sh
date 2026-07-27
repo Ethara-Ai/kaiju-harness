@@ -1156,13 +1156,24 @@ _sweep_limbo_modules() {
 _auto_resume_agent() {
     local _ld="$1" _alog="$2"; shift 2
     [[ "${1:-}" == "--" ]] && shift
-    local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}" _auto=0 _nr
+    # Progress-aware retry budget: KAIJU_AUTO_RESUME_ROUNDS (default 3) bounds
+    # CONSECUTIVE no-progress rounds (needs_retry count not decreasing); a round
+    # that heals at least one module RESETS the budget, so a large batch of
+    # genuinely-transient failures is re-run to completion instead of being cut
+    # off at a fixed round count. KAIJU_AUTO_RESUME_MAX_ROUNDS (default 12)
+    # hard-caps total rounds and MAX_WALL_TIME still bounds wall clock via the
+    # per-round watchdog. The pause escalates x2 (cap 300s) while stuck and
+    # resets to the base on progress (provider recovery windows).
+    local _amax="${KAIJU_AUTO_RESUME_ROUNDS:-3}"
+    local _hardcap="${KAIJU_AUTO_RESUME_MAX_ROUNDS:-12}"
+    local _pause0="${KAIJU_AUTO_RESUME_PAUSE:-60}"
+    local _pause="$_pause0" _auto=0 _noprog=0 _nr _prev
     _sweep_limbo_modules "$_ld"
     _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
-    while [[ "${_nr:-0}" -gt 0 && "$_auto" -lt "$_amax" ]]; do
+    while [[ "${_nr:-0}" -gt 0 && "$_noprog" -lt "$_amax" && "$_auto" -lt "$_hardcap" ]]; do
         _auto=$((_auto + 1))
-        log "  AUTO-RESUME ${_auto}/${_amax}: ${_nr} module(s) left .needs_retry — waiting ${KAIJU_AUTO_RESUME_PAUSE:-60}s then re-running in-place (no manual --resume)."
-        sleep "${KAIJU_AUTO_RESUME_PAUSE:-60}"
+        log "  AUTO-RESUME ${_auto}/${_hardcap}: ${_nr} module(s) left .needs_retry — waiting ${_pause}s then re-running in-place (no manual --resume)."
+        sleep "$_pause"
         local _rs _re _pid
         _rs=$(date +%s)
         set +e
@@ -1178,11 +1189,23 @@ _auto_resume_agent() {
         _re=$(date +%s)
         AGENT_ELAPSED=$(( AGENT_ELAPSED + (_re - _rs) ))
         _sweep_limbo_modules "$_ld"
+        _prev="$_nr"
         _nr=$(find "$_ld" -name '.needs_retry' 2>/dev/null | wc -l | tr -d ' ')
-        log "  AUTO-RESUME ${_auto}/${_amax} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry."
+        if [[ "${_nr:-0}" -lt "${_prev:-0}" ]]; then
+            _noprog=0; _pause="$_pause0"   # progress: reset budget + pause
+        else
+            _noprog=$((_noprog + 1))
+            _pause=$(( _pause * 2 )); [[ "$_pause" -gt 300 ]] && _pause=300
+        fi
+        log "  AUTO-RESUME ${_auto}/${_hardcap} finished (rc=${AGENT_RC}); ${_nr} module(s) still .needs_retry (no-progress ${_noprog}/${_amax})."
     done
     if [[ "${_nr:-0}" -gt 0 ]]; then
-        log "  WARNING: ${_nr} module(s) STILL .needs_retry after ${_amax} auto-resume round(s) — genuinely persistent (not a passing transient); run INCOMPLETE."
+        local _left=""
+        local _m
+        while IFS= read -r _m; do
+            _left="${_left}$(basename "$(dirname "$_m")") "
+        done < <(find "$_ld" -name '.needs_retry' 2>/dev/null | sort)
+        log "  WARNING: ${_nr} module(s) STILL .needs_retry after ${_auto} auto-resume round(s) (${_noprog} consecutive without progress): ${_left}— genuinely persistent (not a passing transient); run INCOMPLETE."
         # STRICT-BLOCKING: fail loudly unless --go-crazy was passed. Enforces the
         # "no proceeding past .needs_retry orphans" contract so batch scores stay
         # meaningful (a silent skip lets unimplementable modules dilute the result).

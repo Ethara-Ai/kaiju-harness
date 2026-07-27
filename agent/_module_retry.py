@@ -61,6 +61,42 @@ STRICT_MAX_BLOCKING_ROUNDS = int(os.environ.get("KAIJU_MAX_BLOCKING_ROUNDS", "3"
 STRICT_BLOCKING_WAIT_SEC = int(os.environ.get("KAIJU_BLOCKING_WAIT_SEC", "600"))
 
 
+def mark_module_started(log_dir: Path) -> None:
+    """Write an in-progress ``.needs_retry`` breadcrumb the moment a module is
+    SELECTED to run (i.e. immediately after the runner's ``_is_module_done``
+    skip check decided to process it). ``_mark_module_done`` replaces it with
+    ``.done`` on completion.
+
+    This makes the LIMBO state — a killed module with neither marker —
+    impossible by construction: a kill at ANY instant (before the agent's
+    first byte, mid-turn, or during post-processing) leaves ``.needs_retry``,
+    so end-of-stage AUTO-RESUME re-runs the module. The aider.log-based
+    ``_sweep_limbo_modules`` heuristic in the pipeline scripts remains as
+    belt-and-braces, but it can only see modules that got far enough to write
+    a log; this marker also covers a crash BEFORE any artifact existed.
+
+    Never overwrites an existing marker: a real error message from a prior
+    round is more useful than the generic in-progress text.
+
+    MUST be called only after the done-check: marking an already-``.done``
+    module would inflate the auto-resume count forever (the resumed agent
+    skips done modules, so the marker would never clear).
+    """
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        marker = log_dir / ".needs_retry"
+        if not marker.exists():
+            marker.write_text(
+                "in-progress (module started; replaced by .done on completion — "
+                "if this file survives, the agent was killed/crashed mid-module "
+                "and AUTO-RESUME should re-run it)",
+                encoding="utf-8",
+            )
+    except OSError as exc:  # marker is a safety net — never break the run for it
+        logger.warning("mark_module_started: could not write marker in %s: %s",
+                       log_dir, exc)
+
+
 def _is_go_crazy() -> bool:
     """Return True if KAIJU_GO_CRAZY is set (bypass strict blocking).
 

@@ -27,7 +27,7 @@ from agent.agent_utils_rust import (
 )
 from agent.agents_rust import RustAiderAgents
 from agent.agents import TransientLLMError
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC, mark_module_started
 from agent.class_types import AgentConfig
 from agent.run_agent import DirContext, run_eval_after_each_commit
 from agent.thinking_capture import ThinkingCapture, SummarizerCost
@@ -756,6 +756,7 @@ def _run_rust_agent_for_repo_impl(
                     continue
 
                 # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                mark_module_started(test_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(test_log_dir) / "turns.jsonl")
 
@@ -906,6 +907,7 @@ def _run_rust_agent_for_repo_impl(
                     continue
 
                 # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                mark_module_started(lint_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
 
@@ -1042,6 +1044,7 @@ def _run_rust_agent_for_repo_impl(
                     continue
 
                 # E6: flush each turn live so a killed worker keeps a partial trajectory.
+                mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(file_log_dir) / "turns.jsonl")
 

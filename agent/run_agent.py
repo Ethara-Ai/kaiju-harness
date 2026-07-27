@@ -18,7 +18,7 @@ import subprocess
 import sys
 from agent.agents import AiderAgents
 from agent.agents import TransientLLMError
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC, mark_module_started
 from agent.claude_code.recovery import run_with_recovery
 from typing import Optional, Tuple, Type, cast
 from types import TracebackType
@@ -348,6 +348,7 @@ def _run_agent_for_repo_impl(
                 if _is_module_done(test_log_dir):
                     logger.info("Skipping %s (already done)", test_file_name)
                     continue
+                mark_module_started(test_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(test_log_dir) / "turns.jsonl")
                 lint_cmd = get_lint_cmd(
@@ -449,6 +450,7 @@ def _run_agent_for_repo_impl(
                 if _is_module_done(lint_log_dir):
                     logger.info("Skipping %s (already done)", lint_file_name)
                     continue
+                mark_module_started(lint_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
                 lint_cmd = get_lint_cmd(
@@ -542,6 +544,7 @@ def _run_agent_for_repo_impl(
                 if _is_module_done(file_log_dir):
                     logger.info("Skipping %s (already done)", file_name)
                     continue
+                mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(file_log_dir) / "turns.jsonl")
                 lint_cmd = get_lint_cmd(

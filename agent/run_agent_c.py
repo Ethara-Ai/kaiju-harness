@@ -23,7 +23,7 @@ import git
 import yaml
 
 from agent.agents import TransientLLMError
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC, mark_module_started
 from agent.agents_c import AiderCAgents
 from agent.agent_utils_c import (
     collect_c_test_files,
@@ -374,6 +374,7 @@ def _run_agent_for_repo_impl(
                     continue
 
                 # Flush each turn live so a killed worker keeps a partial trajectory.
+                mark_module_started(test_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(test_log_dir) / "turns.jsonl")
 
@@ -480,6 +481,7 @@ def _run_agent_for_repo_impl(
                     continue
 
                 # Flush each turn live so a killed worker keeps a partial trajectory.
+                mark_module_started(lint_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(lint_log_dir) / "turns.jsonl")
 
@@ -573,6 +575,7 @@ def _run_agent_for_repo_impl(
                     continue
 
                 # Flush each turn live so a killed worker keeps a partial trajectory.
+                mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
                 if thinking_capture is not None:
                     thinking_capture.set_live_path(Path(file_log_dir) / "turns.jsonl")
 

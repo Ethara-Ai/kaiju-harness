@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Rationale: if module A fails and we continue to B/C/D, on next AUTO-RESUME the
 # outer agent process restarts and starts over from A anyway — much cheaper to
 # retry A immediately with a short backoff. Skips only after this budget is spent.
-from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC  # noqa: E402
+from agent._module_retry import INLINE_MODULE_MAX_RETRIES, INLINE_MODULE_WAIT_SEC  # noqa: E402, mark_module_started
 
 
 def _make_blind_lint_cmd(base_cmd: str) -> str:
@@ -305,6 +305,7 @@ def _run_cpp_agent_for_repo_impl(
 
     # Derive target_files from base_commit blobs (deterministic across stages 1/2/3).
     # Stage 1 fills the stubs, so a working-tree scan on stages 2/3 returns 0 files.
+    mark_module_started(stable_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
     _base_commit_for_scan = example["base_commit"]
     try:
         _repo_for_scan = Repo(repo_path)
@@ -420,6 +421,7 @@ def _run_cpp_agent_for_repo_impl(
             logger.info("Skipping %s (already done)", stem)
             continue
 
+        mark_module_started(file_log_dir)  # no-limbo: kill at any instant leaves .needs_retry (or .done)
         message, summarizer_costs = get_cpp_message(
             agent_config,
             repo_path,
