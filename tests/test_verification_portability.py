@@ -236,3 +236,28 @@ class TestBackfill:
         assert "--kaiju-mode" in cmd and "--task-name" in cmd
         assert str(run) in cmd and str(run / "pipeline_results.json") in cmd
         assert str(tmp_path / "Harbor_Data" / "Trajectory") in cmd
+
+# ---------------------------------------------------------------------------
+# 4. language-agnostic solution digests (anchor-collapse fix)
+# ---------------------------------------------------------------------------
+class TestSolutionCodeExtensions:
+    def test_exts_derived_from_stub_files(self):
+        from kaiju.verification.solution_code import exts_from_stub_files
+        assert exts_from_stub_files(["a/uuid.go", "b/hash.go"]) == (".go",)
+        assert exts_from_stub_files(["x.rs", "y/z.rs"]) == (".rs",)
+        assert exts_from_stub_files(["m.py"]) == (".py",)
+        assert exts_from_stub_files([]) == (".py",)          # safe fallback
+        assert exts_from_stub_files(["a.c", "a.h"]) == (".c", ".h")
+
+    def test_manifest_exts_reads_per_stage_lists(self, tmp_path, monkeypatch):
+        from kaiju.verification import rubric_anchor as RA
+        from kaiju.verification import layout
+        mp = tmp_path / "verification" / "verifiers" / "target_manifest.json"
+        mp.parent.mkdir(parents=True)
+        mp.write_text(json.dumps({"stage1": ["dce.go", "uuid.go"], "stage3": ["sql.go"]}))
+        assert RA._manifest_exts(tmp_path) == (".go",)
+        mp.write_text(json.dumps({"files": [{"path": "lib.rs"}]}))
+        assert RA._manifest_exts(tmp_path) == (".rs",)
+        mp.write_text("not json")
+        assert RA._manifest_exts(tmp_path) == (".py",)       # fallback, never crash
+

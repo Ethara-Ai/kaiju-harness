@@ -21,6 +21,31 @@ from .model_client import ModelClient
 from .rubric import Rubric, Criterion
 
 
+def _manifest_exts(uuid_root) -> tuple[str, ...]:
+    """Task source extensions from the frozen target manifest (falls back to
+    .py) so golden/stub digests work for every language, not just Python."""
+    import json as _json
+    from . import layout
+    from .solution_code import exts_from_stub_files
+    names: list = []
+    try:
+        m = _json.loads(layout.manifest_path(uuid_root).read_text())
+        # format: {"stage1": ["a.go", ...], ...} (per-stage lists); tolerate a
+        # flat {"files": [...]} or a bare list too.
+        if isinstance(m, dict):
+            for v in m.values():
+                if isinstance(v, list):
+                    names.extend(x.get("path") if isinstance(x, dict) else x for x in v)
+        elif isinstance(m, list):
+            names.extend(m)
+    except Exception:
+        pass
+    names = [n for n in names if n]
+    if not names:
+        return (".py",)
+    return exts_from_stub_files(names)
+
+
 def _code_digest(code: str, label: str) -> str:
     return (f"## {label}\nThe following is the solution's implementation code. "
             f"Judge ONLY the code-and-behavior criteria against it.\n\n```\n{code[:16000]}\n```")
@@ -36,13 +61,15 @@ def build_anchor_code(uuid_root: str | Path) -> tuple[str, str] | None:
     entry = _entries(uuid_root)
     if not entry:
         return None
+    # (exts derived from the frozen manifest below — language-agnostic)
     repo = _find_repo(uuid_root, entry)
     base, ref = entry.get("base_commit"), entry.get("reference_commit")
     if repo is None or not base or not ref:
         return None
     src_dir = str(entry.get("src_dir") or ".")
-    golden = read_solution_code(repo, ref, src_dir)
-    stub = read_solution_code(repo, base, src_dir)
+    exts = _manifest_exts(uuid_root)
+    golden = read_solution_code(repo, ref, src_dir, exts=exts)
+    stub = read_solution_code(repo, base, src_dir, exts=exts)
     if not golden:
         return None
     return golden, stub

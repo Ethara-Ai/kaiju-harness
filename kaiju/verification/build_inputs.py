@@ -277,8 +277,10 @@ def build_and_freeze_from_uuid(uuid_root: str | Path, client=None) -> str | None
     src_dir = str(entry.get("src_dir") or ".")
 
     truth = generate_truth(inp, gen)
-    golden_code = read_solution_code(repo, ref, src_dir)
-    stub_code = read_solution_code(repo, base, src_dir)
+    from .solution_code import exts_from_stub_files
+    _exts = exts_from_stub_files(inp.stub_files)
+    golden_code = read_solution_code(repo, ref, src_dir, exts=_exts)
+    stub_code = read_solution_code(repo, base, src_dir, exts=_exts)
 
     # SOUND PYTEST loop — real golden/stub execution decides which tests survive.
     def _run_pytest(code, which):

@@ -166,8 +166,9 @@ def judge_run(run_dir: str | Path, client: ModelClient | None = None) -> JudgeRe
         if repo is not None:
             st3 = bundle.stages.get("stage3")
             patch = st3.model_changes_diffs[0] if (st3 and st3.model_changes_diffs) else None
+            from .rubric_anchor import _manifest_exts
             code = read_solution_code(repo, entry["base_commit"], str(entry.get("src_dir") or "."),
-                                      patch=patch)
+                                      patch=patch, exts=_manifest_exts(uuid_root))
             if code:
                 digest = f"## Candidate final solution code\n```\n{code[:20000]}\n```\n\n" + digest
     except Exception:
