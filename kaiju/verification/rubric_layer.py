@@ -90,7 +90,7 @@ def apply_rubric(report: VerificationReport, rubric: Rubric, judge: JudgeResult,
             concern_id=c.id, status=_verdict_status(v.passed), gating=False,
             layer=int(Layer.JUDGMENT), owner=Owner.RUBRIC.value, weight=_TS_WEIGHT,
             summary=(v.justification or "")[:300],
-            evidence={"text": c.text, "truth_ref": c.truth_ref, "evidence": v.evidence,
+            evidence={"text": c.text, "contract_ref": c.contract_ref, "evidence": v.evidence,
                       "judge_model": judge.model},
             phase="P6", dimension="honesty"))
 

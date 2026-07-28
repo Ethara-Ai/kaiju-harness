@@ -18,16 +18,44 @@ from pathlib import Path
 from .truth import TruthInputs
 from .orchestrate import build_bundle, freeze_bundle, verification_dir
 
-_REPO_SEARCH = ("repos", "repos_staging", "clones")
+_REPO_SEARCH = ("repos", "repos_staging", "clones", "repos_cache")
+
+
+def _entry_usable(e: dict | None) -> bool:
+    return bool(e and e.get("base_commit") and e.get("reference_commit")
+                and (e.get("repo") or e.get("original_repo")))
 
 
 def _entries(uuid_root: Path) -> dict | None:
-    p = uuid_root / "datasets" / "entries.json"
-    if not p.exists():
-        return None
-    data = json.loads(p.read_text(encoding="utf-8"))
-    entries = data if isinstance(data, list) else [data]
-    return entries[0] if entries else None
+    """The task's RepoInstance record. Canonical: ``datasets/entries.json``.
+
+    A run dir copied from ANOTHER machine may carry a different layout (e.g.
+    the rust flow keeps ``<split>_dataset.json`` at the repo root, which is not
+    always included in the copy) — fall back to any ``*_dataset.json`` under
+    the uuid root or its datasets/ dir. When nothing usable exists, print an
+    ACTIONABLE message naming exactly what to copy over instead of degrading
+    silently."""
+    candidates = [uuid_root / "datasets" / "entries.json"]
+    candidates += sorted((uuid_root / "datasets").glob("*_dataset.json"))
+    candidates += sorted(uuid_root.glob("*_dataset.json"))
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        entries = data if isinstance(data, list) else [data]
+        for e in entries:
+            if _entry_usable(e):
+                if p.name != "entries.json":
+                    print(f"   [verify] entries.json missing — using {p.name} instead")
+                return e
+    print(f"   [verify] no usable task record under {uuid_root} — need "
+          "datasets/entries.json (or a <split>_dataset.json) with repo + "
+          "base_commit + reference_commit; copy it from the machine that ran "
+          "prepare, then re-run with --build")
+    return None
 
 
 def _repo_dir_candidates(entry: dict) -> list[str]:
@@ -73,6 +101,74 @@ def _find_repo(uuid_root: Path, entry: dict) -> Path | None:
     return fallback
 
 
+def _clone_urls(entry: dict) -> list[str]:
+    """Candidate clone URLs: the FORK first (it holds the stubbed base_commit,
+    which upstream never has), then upstream (the golden reference_commit is
+    guaranteed there even if the fork predates it)."""
+    urls: list[str] = []
+    for field in ("repo", "original_repo"):
+        slug = (entry.get(field) or "").strip()
+        if not slug:
+            continue
+        if slug.startswith(("http://", "https://", "git@")):
+            urls.append(slug)
+        else:
+            urls.append(f"https://github.com/{slug}.git")
+    seen, out = set(), []
+    for u in urls:
+        if u not in seen:
+            seen.add(u); out.append(u)
+    return out
+
+
+def _git(args: list[str], timeout: int = 600) -> bool:
+    try:
+        return subprocess.run(["git", *args], capture_output=True,
+                              timeout=timeout).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _ensure_repo(uuid_root: Path, entry: dict) -> Path | None:
+    """A local checkout containing BOTH base_commit and reference_commit.
+
+    Prepare-time staging (repos_staging/) only exists on the machine that ran
+    prepare; a run dir copied from another machine has none. Self-heal by
+    cloning into ``<uuid_root>/repos_cache/<name>`` (self-contained: travels
+    with the run dir) — fork first, then fetch upstream into the same clone if
+    a commit is still missing."""
+    base, ref = entry.get("base_commit") or "", entry.get("reference_commit") or ""
+    local = _find_repo(uuid_root, entry)
+    if local is not None and _has_commit(local, base) and _has_commit(local, ref):
+        return local
+
+    urls = _clone_urls(entry)
+    if not urls:
+        return local
+    name = _repo_dir_candidates(entry)[0]
+    dest = uuid_root / "repos_cache" / name
+    if not (dest / ".git").is_dir():
+        print(f"   [verify] repo staging empty — cloning {urls[0]} -> {dest}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not _git(["clone", urls[0], str(dest)]):
+            print(f"   [verify] clone FAILED for {urls[0]} (network/auth?) — "
+                  "cannot compute the golden diff")
+            return local
+    for i, url in enumerate(urls[1:], start=1):
+        if _has_commit(dest, base) and _has_commit(dest, ref):
+            break
+        remote = f"vsrc{i}"
+        _git(["-C", str(dest), "remote", "add", remote, url])
+        print(f"   [verify] fetching missing commit(s) from {url}")
+        _git(["-C", str(dest), "fetch", remote])
+    missing = [sha[:12] for sha in (base, ref) if sha and not _has_commit(dest, sha)]
+    if missing:
+        print(f"   [verify] commit(s) {missing} not reachable from any of "
+              f"{urls} — was the stub branch force-pushed away? Cannot build.")
+        return local
+    return dest
+
+
 def _git_diff(repo: Path, base: str, ref: str) -> str | None:
     try:
         r = subprocess.run(["git", "-C", str(repo), "diff", f"{base}..{ref}"],
@@ -114,13 +210,15 @@ def _stub_files_from_diff(diff: str) -> list[str]:
 def build_inputs_for_uuid(uuid_root: str | Path) -> TruthInputs | None:
     uuid_root = Path(uuid_root)
     entry = _entries(uuid_root)
-    if not entry or not entry.get("base_commit") or not entry.get("reference_commit"):
+    if not _entry_usable(entry):
         return None
-    repo = _find_repo(uuid_root, entry)
+    repo = _ensure_repo(uuid_root, entry)
     if repo is None:
         return None
     golden = _git_diff(repo, entry["base_commit"], entry["reference_commit"])
     if not golden:
+        print(f"   [verify] golden diff {entry['base_commit'][:12]}.."
+              f"{entry['reference_commit'][:12]} is empty in {repo} — cannot build")
         return None
     test_ids = []
     for tp in (uuid_root / "datasets").glob("*_test_ids.bz2"):
@@ -174,7 +272,7 @@ def build_and_freeze_from_uuid(uuid_root: str | Path, client=None) -> str | None
     # candidate scoring (gap-scoring only cancels strictness under one judge).
     judge_client = judge_client_for_run(_first_run_model(uuid_root))
     entry = _entries(uuid_root)
-    repo = _find_repo(uuid_root, entry)
+    repo = _ensure_repo(uuid_root, entry)
     base, ref = entry["base_commit"], entry["reference_commit"]
     src_dir = str(entry.get("src_dir") or ".")
 

@@ -1,8 +1,10 @@
 """P6 (part 2) — the LLM-as-judge.
 
 Scores each rubric criterion pass|fail against a candidate trajectory, using a
-DIFFERENT-family judge (Opus 4.8) at max reasoning effort, REFERENCE-GUIDED by
-TRUTH.md (never shown the golden diff). Binary per criterion, evidence-cited,
+DIFFERENT-family judge (Opus 4.8) at max reasoning effort, guided by the frozen
+reference behavioral contract (never shown the golden diff). The prompt never
+names internal artifacts (TRUTH file), so judge evidence/justifications stored
+in rubric results stay free of answer-key references. Binary per criterion, evidence-cited,
 conservative (fail-if-uncertain) to resist leniency/self-preference bias.
 """
 from __future__ import annotations
@@ -72,16 +74,17 @@ class JudgeResult:
 
 _SYSTEM = (
     "You are a rigorous, skeptical code-review JUDGE. You score a candidate solution's "
-    "TRAJECTORY against a rubric, using TRUTH.md as the reference for what a correct "
-    "solution must achieve. You judge the PATH and the QUALITY, not whether tests passed "
+    "TRAJECTORY against a rubric, using the reference behavioral contract below as the "
+    "definition of what a correct solution must achieve. You judge the PATH and the QUALITY, not whether tests passed "
     "(that is checked separately).\n"
     "For EACH criterion return a binary verdict:\n"
     "- pass ONLY if the trajectory clearly satisfies it, with concrete cited evidence.\n"
     "- fail if it is violated OR if the evidence is insufficient to be confident "
     "(default to fail when uncertain).\n"
-    "TRUTH.md describes a DESTINATION; a different but valid route that reaches the "
-    "behavioral contract must still pass (do not penalize a solution merely for differing "
-    "from any single expected approach).\n"
+    "The contract describes a DESTINATION; a different but valid route that reaches it "
+    "must still pass (do not penalize a solution merely for differing from any single "
+    "expected approach). Cite evidence from the trajectory itself; never reference "
+    "internal document names in your evidence or justification.\n"
     'Return ONLY a JSON array, one object per criterion: '
     '[{"criterion_id": "...", "verdict": "pass"|"fail", "evidence": "<quote/span>", '
     '"justification": "<one sentence>"}].'
@@ -91,7 +94,7 @@ _SYSTEM = (
 def build_judge_prompt(truth_md: str, rubric: Rubric, trajectory_digest: str) -> tuple[str, str]:
     crit_lines = "\n".join(f"- {c.id}: {c.text}" for c in rubric.criteria)
     user = (
-        f"# TRUTH.md (reference)\n\n{truth_md}\n\n"
+        f"# Reference behavioral contract\n\n{truth_md}\n\n"
         f"# Rubric criteria to score\n{crit_lines}\n\n"
         f"# Candidate trajectory\n{trajectory_digest}\n\n"
         "Score every criterion now. Return the JSON array."
