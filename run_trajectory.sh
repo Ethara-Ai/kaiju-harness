@@ -648,6 +648,15 @@ if [[ "${KAIJU_VERIFY_MINIMAL:-0}" != "1" ]]; then
 fi
 python -m kaiju.verification.autorun "outputs/$UUID" $_VFLAGS || \
   echo "   [verify] verification step errored (non-fatal)"
+
+# ---- 5c. Harbor/ATIF conversion backfill ----
+# The pipelines convert in-run (run_pipeline*.sh -> commit0_to_atif_v2); this
+# heals any run whose in-run conversion failed (its WARN path) or that was
+# produced on another machine. Idempotent: runs with trajectory.json files
+# already under Harbor_Data/Trajectory are skipped.
+echo "== [5c/5] Harbor/ATIF backfill =="
+python scripts/backfill_atif.py "outputs/$UUID" || \
+  echo "   [harbor] ATIF backfill reported failures (non-fatal; see above)"
 if [[ "${REUSE_BRIDGE:-0}" == "1" ]]; then
   echo "== done. outputs/$UUID  (bridge LEFT RUNNING per --reuse-bridge; stop manually with 'bash scripts/claude_code_bridge.sh stop' or 'pkill -f openai_codex') =="
 else
