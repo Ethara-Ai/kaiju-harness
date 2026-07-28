@@ -46,6 +46,36 @@ def _already_converted(out_root: Path, task: str, model: str) -> int:
     return len(list(d.rglob("trajectory.json"))) if d.is_dir() else 0
 
 
+def _export_verification(uuid_root: Path, out_root: Path, task: str) -> None:
+    """Mirror the task's verification data into the Harbor export.
+
+    The Harbor `verifier/` dir the converter writes holds only the reward
+    definition; the kaiju verification artifacts — the frozen verifiers
+    (TRUTH.md, rubric, predicates, generated pytest) and every run's findings
+    (report.json gate, judge verdicts, pytest/anchor results, reexec) — live
+    under <uuid_root>/verification/ and must travel WITH the exported
+    trajectories, or a Harbor consumer cannot tell an ACCEPTED trajectory from
+    a QUARANTINED one. Copied at task level (verifiers are per-task; results/
+    already namespaces per model/run), preserving the canonical layout.py
+    structure so verification-aware consumers read it unchanged.
+
+    Runs on every invocation (even when conversion is skipped as up-to-date):
+    verification is often re-run AFTER conversion, and this keeps the export
+    in sync. Copy, never move — the uuid_root stays the source of truth.
+    """
+    src = uuid_root / "verification"
+    if not src.is_dir():
+        print("[backfill] no verification/ under the uuid root — nothing to "
+              "export (run kaiju.verification.autorun first for gated exports)")
+        return
+    dest = out_root / task / "verification"
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest, dirs_exist_ok=True)
+    n_reports = len(list(dest.rglob("report.json")))
+    print(f"[backfill] verification data exported -> "
+          f"{dest.relative_to(out_root.parent.parent)} ({n_reports} run report(s))")
+
+
 def backfill(uuid_root: Path, *, force: bool = False, mirror: bool = False) -> int:
     out_root = uuid_root / "Harbor_Data" / "Trajectory"
     run_dirs = sorted(uuid_root.glob("runs/*/agent/run_*"))
@@ -54,6 +84,7 @@ def backfill(uuid_root: Path, *, force: bool = False, mirror: bool = False) -> i
         return 1
     failures = 0
     converted = 0
+    tasks_seen: set[str] = set()
     for run_dir in run_dirs:
         model = run_dir.parts[-3]
         results_path = run_dir / "pipeline_results.json"
@@ -69,6 +100,7 @@ def backfill(uuid_root: Path, *, force: bool = False, mirror: bool = False) -> i
             failures += 1
             continue
         task = _task_name(results)
+        tasks_seen.add(task)
         existing = _already_converted(out_root, task, model)
         if existing and not force:
             print(f"[backfill] SKIP {run_dir.relative_to(uuid_root)} — "
@@ -90,6 +122,10 @@ def backfill(uuid_root: Path, *, force: bool = False, mirror: bool = False) -> i
         print(f"[backfill] OK — {n} trajectory.json under "
               f"{out_root.relative_to(uuid_root)}/{task}/{model}")
         converted += 1
+    # Always (re)sync verification data into the export — even for skipped
+    # runs, since verification may have been re-run after conversion.
+    for task in sorted(tasks_seen):
+        _export_verification(uuid_root, out_root, task)
     if mirror and out_root.is_dir():
         shared = REPO / "Harbor_Data" / "Trajectory"
         shared.mkdir(parents=True, exist_ok=True)

@@ -195,6 +195,31 @@ class TestBackfill:
         assert not invoked
         assert "resume it first" in capsys.readouterr().out
 
+    def test_verification_data_exported_into_harbor_tree(self, tmp_path, monkeypatch):
+        # The export must carry the verification data (frozen verifiers +
+        # per-run reports) at task level, and must sync even when the
+        # trajectory conversion itself is skipped as already-converted.
+        m = self._load()
+        run = tmp_path / "runs" / "gpt-5.5" / "agent" / "run_1"
+        run.mkdir(parents=True)
+        (run / "pipeline_results.json").write_text(json.dumps({"dataset_short": "dataset"}))
+        # verification artifacts to travel with the export
+        (tmp_path / "verification" / "verifiers").mkdir(parents=True)
+        (tmp_path / "verification" / "verifiers" / "TRUTH.md").write_text("contract")
+        rr = tmp_path / "verification" / "results" / "gpt-5.5" / "agent" / "run_1"
+        rr.mkdir(parents=True)
+        (rr / "report.json").write_text(json.dumps({"gate": "accept"}))
+        # pre-mark as converted so the conversion is SKIPPED
+        pre = tmp_path / "Harbor_Data" / "Trajectory" / "dataset" / "gpt-5.5" / "agent" / "m"
+        pre.mkdir(parents=True)
+        (pre / "trajectory.json").write_text("{}")
+        monkeypatch.setattr(m.subprocess, "run",
+                            lambda *a, **k: type("R", (), {"returncode": 0})())
+        m.backfill(tmp_path)
+        exp = tmp_path / "Harbor_Data" / "Trajectory" / "dataset" / "verification"
+        assert (exp / "verifiers" / "TRUTH.md").read_text() == "contract"
+        assert (exp / "results" / "gpt-5.5" / "agent" / "run_1" / "report.json").exists()
+
     def test_completed_run_invokes_converter_with_pipeline_args(
             self, tmp_path, monkeypatch):
         m = self._load()
