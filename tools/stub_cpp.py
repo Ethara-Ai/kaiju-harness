@@ -108,6 +108,29 @@ def _is_void_or_constructor(decl_text: str) -> bool:
     return bool(tokens) and tokens[-1] == "void"
 
 
+def _declarator_has_param_list(decl_text: str) -> bool:
+    """True if the pre-body declarator text contains a balanced ``(...)``
+    parameter list — the signature of a real function/method. A namespace or
+    class ``{ … }`` mis-parsed as a function_definition under tree-sitter error
+    recovery has NO parameter list, so this rejects it and prevents corrupting
+    the header with a namespace-scope ``__builtin_trap()``. A trailing return
+    type or template args also contain parens, but only a function ever has a
+    ``)`` followed (ignoring ws/qualifiers) by the body brace — so we look for
+    at least one ``(`` … ``)`` pair anywhere in the declarator, which no
+    namespace/class/enum declarator has."""
+    depth = 0
+    saw_open = saw_pair = False
+    for ch in decl_text:
+        if ch == "(":
+            depth += 1
+            saw_open = True
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and saw_open:
+                saw_pair = True
+    return saw_pair
+
+
 def _make_stub_body(decl_text: str) -> str:
     """Choose the appropriate stub body based on function qualifiers."""
     is_constexpr = "constexpr" in decl_text or "consteval" in decl_text
@@ -411,6 +434,23 @@ def _stub_file_treesitter(filepath: Path) -> int:
             if body is None:
                 return
 
+            decl_bytes = source[node.start_byte : body.start_byte]
+            decl_text = decl_bytes.decode("utf-8", errors="replace")
+
+            # Layer 1.5 (correctness): a REAL function definition's declarator
+            # portion contains a parameter list `(...)`. Under tree-sitter error
+            # recovery (unknown macros like SPDLOG_API/SPDLOG_INLINE), a
+            # `namespace details { … }` or `class X { … }` is frequently
+            # mis-parsed AS a function_definition whose `{ … }` is taken for a
+            # compound_statement — stubbing it emits
+            # `namespace details { __builtin_trap(); }`, valid tokens but a
+            # SEMANTIC error ("type specifier required") that breaks the build.
+            # Require a balanced parameter list in the declarator; without one
+            # this is not a function and must not be stubbed.
+            if not _declarator_has_param_list(decl_text):
+                skipped_no_brace += 1
+                return
+
             # Layer 2: pick the true body end. When tree-sitter's parse of this
             # function contains errors (unknown macros inside the body), its
             # reported end_byte cannot be trusted — walk the source manually.
@@ -424,8 +464,6 @@ def _stub_file_treesitter(filepath: Path) -> int:
             else:
                 body_end = body.end_byte
 
-            decl_bytes = source[node.start_byte : body.start_byte]
-            decl_text = decl_bytes.decode("utf-8", errors="replace")
             stub = _make_stub_body(decl_text)
             replacements.append((body.start_byte, body_end, stub.encode()))
             return

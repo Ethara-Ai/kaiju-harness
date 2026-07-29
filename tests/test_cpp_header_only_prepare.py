@@ -172,3 +172,41 @@ class TestStubberHeaderOnly:
             capture_output=True, text=True, timeout=120)
         assert "__builtin_trap" in (proj / "include" / "a.hpp").read_text()
         assert "__builtin_trap" not in (proj / "tests" / "a_test.cpp").read_text()
+
+# ---------------------------------------------------------------------------
+# tree-sitter fallback must never corrupt declaration-only headers
+# ---------------------------------------------------------------------------
+class TestFallbackParamListGuard:
+    def test_param_list_detection(self):
+        from tools.stub_cpp import _declarator_has_param_list as h
+        assert h("SPDLOG_INLINE void foo(int x) ")
+        assert h("int compute(int x) const ")
+        assert h("void bar() ")
+        assert h("template<class T> auto f(T a) -> T ")
+        # non-functions (mis-parsed under tree-sitter error recovery)
+        assert not h("namespace details ")
+        assert not h("class file_helper ")
+        assert not h("struct W ")
+        assert not h("enum class E ")
+
+    def test_namespace_not_corrupted_by_fallback(self, tmp_path):
+        # spdlog-shape: an unknown macro triggers tree-sitter error recovery
+        # that mis-parses `namespace details { ... }` as a function. The guard
+        # must leave the namespace intact (no namespace-scope __builtin_trap).
+        from tools.stub_cpp import stub_cpp_file
+        h = tmp_path / "os.h"
+        h.write_text(
+            "#pragma once\n"
+            "#define SPDLOG_API\n"
+            "namespace spdlog {\n"
+            "namespace details {\n"
+            "SPDLOG_API void real_fn(int x) { do_work(x); }\n"
+            "}\n"
+            "}\n")
+        stub_cpp_file(str(h))
+        out = h.read_text()
+        assert "namespace details { __builtin_trap" not in out
+        assert "namespace details {" in out       # namespace preserved
+        # a genuine function inside is still stubbable
+        assert "__builtin_trap" in out
+
