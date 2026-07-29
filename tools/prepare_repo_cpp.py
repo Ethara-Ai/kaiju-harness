@@ -84,6 +84,42 @@ CPPSTUBBER_SRC = TOOLS_DIR / "cppstubber"
 CPPSTUBBER_BUILD_DIR = CPPSTUBBER_SRC / "build"
 
 
+def _discover_llvm_cmake_dir() -> str | None:
+    """The LLVM cmake package dir (…/lib/cmake/llvm), or None.
+
+    Tries ``$LLVM_DIR`` (env override), then ``llvm-config --cmakedir`` /
+    ``--prefix`` for whichever llvm-config is on PATH (covers versioned
+    binaries like ``llvm-config-17``), then common Homebrew prefixes. Returns
+    None on the CI images where LLVM is already on cmake's default path, so the
+    caller adds nothing and behavior is unchanged there."""
+    env = os.environ.get("LLVM_DIR")
+    if env and (Path(env) / "LLVMConfig.cmake").exists():
+        return env
+    for exe in ("llvm-config", "llvm-config-18", "llvm-config-17",
+                "llvm-config-16", "llvm-config-15"):
+        try:
+            r = subprocess.run([exe, "--cmakedir"], capture_output=True,
+                               text=True, timeout=15)
+            cand = r.stdout.strip()
+            if r.returncode == 0 and cand and (Path(cand) / "LLVMConfig.cmake").exists():
+                return cand
+            r = subprocess.run([exe, "--prefix"], capture_output=True,
+                               text=True, timeout=15)
+            pref = r.stdout.strip()
+            if r.returncode == 0 and pref:
+                cand2 = str(Path(pref) / "lib" / "cmake" / "llvm")
+                if (Path(cand2) / "LLVMConfig.cmake").exists():
+                    return cand2
+        except (OSError, subprocess.SubprocessError):
+            continue
+    for pref in ("/opt/homebrew/opt/llvm", "/usr/local/opt/llvm",
+                 "/usr/lib/llvm-18", "/usr/lib/llvm-17"):
+        cand = str(Path(pref) / "lib" / "cmake" / "llvm")
+        if (Path(cand) / "LLVMConfig.cmake").exists():
+            return cand
+    return None
+
+
 def _ensure_cppstubber_fresh() -> None:
     """H6: Rebuild cppstubber if the binary is missing or STALE vs source.
 
@@ -115,9 +151,21 @@ def _ensure_cppstubber_fresh() -> None:
     reason = "missing" if not CPPSTUBBER.exists() else "stale (source newer than binary)"
     logger.info("cppstubber binary %s — rebuilding via cmake…", reason)
     CPPSTUBBER_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    cmake_cfg = ["cmake", "-S", str(src_root), "-B", str(CPPSTUBBER_BUILD_DIR),
+                 "-DCMAKE_BUILD_TYPE=Release"]
+    # LLVM/Clang aren't always on cmake's default search path (Homebrew on macOS,
+    # side-by-side versions). Discover the cmake dirs via llvm-config so the
+    # stubber self-builds everywhere instead of silently degrading to
+    # tree-sitter. On the CI images LLVM IS on the path, so this is additive —
+    # llvm-config absent => unchanged behavior.
+    llvm_cmake = _discover_llvm_cmake_dir()
+    if llvm_cmake:
+        cmake_cfg += [f"-DLLVM_DIR={llvm_cmake}",
+                      f"-DClang_DIR={llvm_cmake.replace('cmake/llvm', 'cmake/clang')}"]
+        logger.info("cppstubber: using LLVM cmake dir %s", llvm_cmake)
     try:
         cfg = subprocess.run(
-            ["cmake", "-S", str(src_root), "-B", str(CPPSTUBBER_BUILD_DIR), "-DCMAKE_BUILD_TYPE=Release"],
+            cmake_cfg,
             capture_output=True, text=True, timeout=600,
         )
         if cfg.returncode != 0:
@@ -354,6 +402,31 @@ def _detect_test_framework(repo_dir: Path) -> str:
 
 _BAZEL_MARKERS = ("WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "BUILD.bazel", "BUILD")
 
+_HEADER_EXTS_HO = (".h", ".hpp", ".hh", ".hxx", ".h++", ".ipp", ".tpp", ".inl")
+_IMPL_EXTS_HO = (".cpp", ".cc", ".cxx", ".c++")
+
+
+def is_header_only_repo(repo_dir: Path) -> bool:
+    """A library with header source but no (non-test) .cpp implementation files —
+    spdlog, rapidjson, robin-map, single-header libs, etc. Such a repo has no
+    build to run for stubbing (cppstubber reads sources directly), so a missing
+    build system is not fatal for it."""
+    headers = impls = 0
+    for p in repo_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        parts = {seg.lower() for seg in p.parts}
+        if parts & {"test", "tests", "testing", "third_party", "3rdparty",
+                    "vendor", "extern", "example", "examples", "bench",
+                    "benchmark", "benchmarks", "build", ".git", "_deps"}:
+            continue
+        ext = p.suffix.lower()
+        if ext in _HEADER_EXTS_HO:
+            headers += 1
+        elif ext in _IMPL_EXTS_HO:
+            impls += 1
+    return headers > 0 and impls == 0
+
 
 def detect_build_system(repo_dir: Path) -> str:
     hit = _build_system_at(repo_dir)
@@ -369,6 +442,16 @@ def detect_build_system(repo_dir: Path) -> str:
                 subdir, nested,
             )
             return nested
+
+    # Header-only / single-header libraries legitimately ship no build system
+    # (bshoshany/thread-pool has only a library.json). Stubbing reads the
+    # sources directly (cppstubber --input-dir), so treat this as build
+    # system "none": skip compile_commands + the compile gate, and rely on the
+    # stubbed-base-PARSES gate for correctness instead of a full compile.
+    if is_header_only_repo(repo_dir):
+        logger.info("No build system, but repo is header-only — treating as "
+                    "build_system='none' (stub-and-parse, no compile gate).")
+        return "none"
 
     if any((repo_dir / m).exists() for m in _BAZEL_MARKERS):
         raise BazelOnlyRepo(
@@ -444,6 +527,14 @@ def generate_compile_commands(
     cmake_options: list[str] | None = None,
 ) -> bool:
     logger.info("Generating compile_commands.json (build_system=%s)...", build_system)
+
+    if build_system == "none":
+        # Header-only: no build, so no compile_commands. cppstubber's
+        # --input-dir mode reads sources directly (it does not need a
+        # compilation database), so this is expected, not a failure.
+        logger.info("build_system='none' (header-only) — skipping "
+                    "compile_commands.json; stubber uses --input-dir mode.")
+        return False
 
     if build_system == "cmake":
         build_dir = repo_dir / "build"
@@ -812,6 +903,16 @@ def verify_compiles(
     cmake_options: list[str] | None = None,
 ) -> bool:
     logger.info("Verifying compilation (build_system=%s)...", build_system)
+
+    if build_system == "none":
+        # Header-only: there is no build target to compile. The correctness
+        # guarantee comes from the stubbed-base-PARSES gate
+        # (_stubbed_base_compiles_cpp), which re-parses every stubbed header;
+        # a full compile-and-link gate is neither available nor meaningful for
+        # a library that is only ever #included by a consumer.
+        logger.info("build_system='none' (header-only) — no compile target; "
+                    "correctness enforced by the stubbed-base-parses gate.")
+        return True
 
     if build_system == "cmake" and cmake_options:
         reconfigure = subprocess.run(
@@ -1341,6 +1442,9 @@ def _default_test_cmd(build_system: str) -> str:
         "meson": "meson test -C build",
         "autotools": "make check || make test",
         "make": "make check || make test",
+        # Header-only: the consumer builds the tests; the eval harness supplies
+        # its own compile+run recipe, so no repo-native default applies.
+        "none": "true",
     }.get(build_system, "ctest --test-dir build --output-on-failure")
 
 
@@ -1633,7 +1737,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--build-system", default="auto",
-        choices=["auto", "cmake", "meson", "autotools", "make"],
+        choices=["auto", "cmake", "meson", "autotools", "make", "none"],
         help="Build system to use (default: auto-detect)",
     )
     parser.add_argument(

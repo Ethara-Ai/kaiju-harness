@@ -41,7 +41,12 @@ from commit0.harness.constants_cpp import (
 
 CPPSTUBBER_BINARY = Path(__file__).parent / "cppstubber" / "build" / "cppstubber"
 
-CPP_EXTENSIONS = {".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".c++", ".h++"}
+# Includes the bare ".h" and inline-template extensions so the tree-sitter
+# FALLBACK still scans header-only libraries (most keep everything in ".h").
+# cppstubber (the primary, AST-based path) is what produces correct template
+# stubs; this list only governs which files the fallback even looks at.
+CPP_EXTENSIONS = {".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx", ".c++", ".h++",
+                  ".h", ".ipp", ".tpp", ".inl"}
 
 SKIP_DIRS = {".git", "build", "cmake-build-debug", "cmake-build-release",
              "builddir", "third_party", "3rdparty", "vendor", "extern",

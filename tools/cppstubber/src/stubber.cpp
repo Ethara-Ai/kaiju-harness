@@ -5,6 +5,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
+#include "llvm/Config/llvm-config.h"  // LLVM_VERSION_MAJOR (portability guard)
 
 #include <algorithm>
 #include <string>
@@ -28,13 +29,47 @@ static bool isInTestFile(const clang::FunctionDecl *FD,
     if (fname.empty())
         return false;
 
+    // Segment-anchored classification — a bare substring match on "test" also
+    // matched ANY ancestor dir containing those letters (ho_test/, latest/,
+    // pytest tmp dirs, a repo whose org has "test"), wrongly skipping the whole
+    // repo. Split the path into segments and match only (a) a whole directory
+    // segment that IS a test/bench dir, or (b) the FILENAME being a test/bench
+    // file (test_x.cpp / x_test.cpp / x.bench.cpp).
     std::string lower = fname.lower();
-    auto has = [&](const char *s) { return lower.find(s) != std::string::npos; };
-    return has("test") || has("_test.") ||
-           has("_tests.") || has("/tests/") ||
-           has("/test/") || has("_unittest") ||
-           has("_benchmark") || has("/bench/") ||
-           has("/benchmarks/");
+    std::vector<std::string> segs;
+    std::string cur;
+    for (char c : lower) {
+        if (c == '/' || c == '\\') { if (!cur.empty()) segs.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) segs.push_back(cur);
+    if (segs.empty())
+        return false;
+
+    // (a) any directory segment that names a test/bench area
+    for (size_t i = 0; i + 1 < segs.size(); ++i) {
+        const std::string &s = segs[i];
+        if (s == "test" || s == "tests" || s == "testing" || s == "unittest" ||
+            s == "unittests" || s == "bench" || s == "benchmark" ||
+            s == "benchmarks")
+            return true;
+    }
+
+    // (b) the filename itself is a test/bench file
+    const std::string &fn = segs.back();
+    auto ends = [&](const char *suf) {
+        std::string s(suf);
+        return fn.size() >= s.size() && fn.compare(fn.size() - s.size(), s.size(), s) == 0;
+    };
+    auto starts = [&](const char *pre) {
+        std::string s(pre);
+        return fn.size() >= s.size() && fn.compare(0, s.size(), s) == 0;
+    };
+    auto contains = [&](const char *s) { return fn.find(s) != std::string::npos; };
+    return starts("test_") || starts("test-") ||
+           contains("_test.") || contains("-test.") ||
+           contains("_tests.") || contains("_unittest") ||
+           contains(".test.") || contains("_benchmark") || contains(".bench.");
 }
 
 static bool isInHeaderFile(const clang::FunctionDecl *FD,
@@ -88,7 +123,15 @@ bool StubVisitor::shouldSkip(const clang::FunctionDecl *FD) const {
         if (MD->isDefaulted() || MD->isDeleted())
             return true;
 
+        // isPure() was renamed isPureVirtual() in LLVM 18. Guard so the stubber
+        // builds on every host from the CI images (LLVM 14-17) to the latest
+        // toolchains — the doc's suggested isAbstract() is a CXXRecordDecl
+        // (class-level) query, not the per-method test we need here.
+#if LLVM_VERSION_MAJOR >= 18
         if (MD->isPureVirtual())
+#else
+        if (MD->isPure())
+#endif
             return true;
 
         if (!config_.stub_private && MD->getAccess() == clang::AS_private)
